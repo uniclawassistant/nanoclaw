@@ -11,6 +11,7 @@ import {
   IDLE_TIMEOUT,
   MAX_MESSAGES_PER_PROMPT,
   ONECLI_URL,
+  CREDENTIAL_PROXY_PORT,
   POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
@@ -25,9 +26,11 @@ import {
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { startCredentialProxy } from './credential-proxy.js';
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
+  PROXY_BIND_HOST,
 } from './container-runtime.js';
 import {
   getAllChats,
@@ -570,6 +573,9 @@ function ensureContainerSystemRunning(): void {
 
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
+  if (PROXY_BIND_HOST) {
+    await startCredentialProxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST);
+  }
   initDatabase();
   logger.info('Database initialized');
   loadState();

@@ -6,7 +6,10 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 
+import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+
+const envConfig = readEnvFile(['CREDENTIAL_PROXY_HOST']);
 
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'container';
@@ -37,7 +40,8 @@ function detectHostGateway(): string {
  * but the proxy must start before any container.
  * The /convert-to-apple-container skill sets this during setup.
  */
-export const PROXY_BIND_HOST = process.env.CREDENTIAL_PROXY_HOST;
+export const PROXY_BIND_HOST =
+  process.env.CREDENTIAL_PROXY_HOST || envConfig.CREDENTIAL_PROXY_HOST;
 if (!PROXY_BIND_HOST) {
   throw new Error(
     'CREDENTIAL_PROXY_HOST is not set in .env. Run /convert-to-apple-container to configure.',

@@ -47,8 +47,12 @@ export function startCredentialProxy(
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
       const chunks: Buffer[] = [];
+      req.on('error', (err) => {
+        logger.error({ err }, 'Credential proxy request error');
+      });
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
+       try {
         const body = Buffer.concat(chunks);
         const headers: Record<string, string | number | string[] | undefined> =
           {
@@ -106,6 +110,13 @@ export function startCredentialProxy(
 
         upstream.write(body);
         upstream.end();
+       } catch (err) {
+        logger.error({ err, url: req.url }, 'Credential proxy handler error');
+        if (!res.headersSent) {
+          res.writeHead(500);
+          res.end('Internal proxy error');
+        }
+       }
       });
     });
 
