@@ -25,6 +25,9 @@ export interface TelegramChannelOpts {
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
 
+// Marker file used to notify a chat after /restart kickstart completes.
+const RESTART_NOTIFY_FILE = path.join(DATA_DIR, 'restart-notify.json');
+
 /**
  * Send a message with Telegram Markdown parse mode, falling back to plain text.
  * Claude's output naturally matches Telegram's Markdown v1 format:
@@ -192,6 +195,49 @@ export class TelegramChannel implements Channel {
       ctx.reply('Session reset. Next message starts fresh.');
     });
 
+    // Command to restart NanoClaw (kickstart via launchd)
+    this.bot.command('restart', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const groups = this.opts.registeredGroups();
+      const group = groups[chatJid];
+      if (!group) {
+        ctx.reply('Chat not registered.');
+        return;
+      }
+
+      await ctx.reply(`${ASSISTANT_NAME} restarting…`);
+      logger.warn(
+        { group: group.name, triggeredBy: ctx.from?.id },
+        '/restart: kickstart requested',
+      );
+
+      // Drop a marker so the next startup can ping the same chat when it's back.
+      try {
+        fs.writeFileSync(
+          RESTART_NOTIFY_FILE,
+          JSON.stringify({
+            chatId: ctx.chat.id,
+            threadId: ctx.message?.message_thread_id ?? null,
+            requestedAt: new Date().toISOString(),
+          }),
+        );
+      } catch (err) {
+        logger.warn({ err }, '/restart: failed to write notify marker');
+      }
+
+      // Defer kickstart so the reply is flushed before launchd kills us.
+      setTimeout(() => {
+        try {
+          const uid = process.getuid ? process.getuid() : 0;
+          const label =
+            process.env.NANOCLAW_LAUNCHD_LABEL || 'com.nanoclaw-unic';
+          execSync(`launchctl kickstart -k gui/${uid}/${label}`);
+        } catch (err) {
+          logger.error({ err }, '/restart: kickstart failed');
+        }
+      }, 500);
+    });
+
     // Command to show session status
     this.bot.command('status', (ctx) => {
       const chatJid = `tg:${ctx.chat.id}`;
@@ -261,7 +307,13 @@ export class TelegramChannel implements Channel {
 
     // Telegram bot commands handled above — skip them in the general handler
     // so they don't also get stored as messages. All other /commands flow through.
-    const TELEGRAM_BOT_COMMANDS = new Set(['chatid', 'ping', 'new', 'status']);
+    const TELEGRAM_BOT_COMMANDS = new Set([
+      'chatid',
+      'ping',
+      'new',
+      'status',
+      'restart',
+    ]);
 
     this.bot.on('message:text', async (ctx) => {
       if (ctx.message.text.startsWith('/')) {
@@ -481,11 +533,48 @@ export class TelegramChannel implements Channel {
             { command: 'status', description: 'Show context usage' },
             { command: 'chatid', description: 'Show chat ID' },
             { command: 'ping', description: 'Check if bot is online' },
+            { command: 'restart', description: 'Restart NanoClaw' },
           ]).catch((err) => logger.warn({ err }, 'Failed to set bot commands'));
           console.log(`\n  Telegram bot: @${botInfo.username}`);
           console.log(
             `  Send /chatid to the bot to get a chat's registration ID\n`,
           );
+
+          // If we were just kickstarted via /restart, notify the requesting chat.
+          if (fs.existsSync(RESTART_NOTIFY_FILE)) {
+            try {
+              const marker = JSON.parse(
+                fs.readFileSync(RESTART_NOTIFY_FILE, 'utf-8'),
+              );
+              const opts: { message_thread_id?: number } = {};
+              if (typeof marker.threadId === 'number') {
+                opts.message_thread_id = marker.threadId;
+              }
+              this.bot!.api.sendMessage(
+                marker.chatId,
+                `${ASSISTANT_NAME} back online.`,
+                opts,
+              )
+                .catch((err) =>
+                  logger.warn({ err }, '/restart: failed to send back-online'),
+                )
+                .finally(() => {
+                  try {
+                    fs.unlinkSync(RESTART_NOTIFY_FILE);
+                  } catch {
+                    // ignore
+                  }
+                });
+            } catch (err) {
+              logger.warn({ err }, '/restart: failed to read notify marker');
+              try {
+                fs.unlinkSync(RESTART_NOTIFY_FILE);
+              } catch {
+                // ignore
+              }
+            }
+          }
+
           resolve();
         },
       });
