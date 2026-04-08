@@ -10,6 +10,7 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'ONECLI_URL',
   'TZ',
+  'PCP_KEY',
 ]);
 
 export const ASSISTANT_NAME =
@@ -75,6 +76,12 @@ function escapeRegex(str: string): string {
 export function buildTriggerPattern(trigger: string): RegExp {
   return new RegExp(`^${escapeRegex(trigger.trim())}(?=[\\s]|$)`, 'i');
 }
+
+// User-defined env vars to forward into container settings.json.
+// These are read from .env and injected so skills/prompts can use them
+// without hardcoding secrets.
+export const USER_ENV_VARS: Record<string, string> = {};
+if (envConfig.PCP_KEY) USER_ENV_VARS.PCP_KEY = envConfig.PCP_KEY;
 
 export const DEFAULT_TRIGGER = `@${ASSISTANT_NAME}`;
 
