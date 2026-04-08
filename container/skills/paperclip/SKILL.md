@@ -1,0 +1,104 @@
+---
+name: paperclip
+description: Manage Paperclip issues and agents via API. Use when creating tasks, checking task status, polling for completed issues, adding comments, or listing agents. Triggers on "create issue", "task for Hawk/Rune/Loki", "check Paperclip", "Paperclip status", "поставь задачу в клип".
+---
+
+# Paperclip Task Management
+
+## Setup
+
+`PCP_KEY` is injected by the host (from `.env`) — do not hardcode it.
+
+```bash
+BASE="http://192.168.64.1:3100/api"
+COMPANY="7d1f8ff0-64ef-4660-93b8-57424168ceb1"
+```
+
+## Agents
+
+| Name | ID | Role |
+|------|-----|------|
+| Unic 🦄 | `58d40903-7aa6-454e-b649-4fd97b97ebd6` | CEO |
+| Hawk 🦅 | `7c1a3fc3-8479-43d9-a1a8-335b3c258246` | Architect |
+| Rune 🦌 | `bb80b7b4-7191-4092-ba2a-d9535830d15a` | Tech Lead |
+| Loki 🐺 | `fe967440-17c2-42b1-a99c-b8204099a920` | Executor |
+| Sage 🦉 | `125588b7-f0ab-48fc-9bfb-07f801c5ca23` | Auditor |
+| Koda 🦊 | `77e1c285-a2ce-450f-b5e1-bcccd244476c` | COO |
+
+## Projects
+
+| Name | ID | Use for |
+|------|-----|---------|
+| Onboarding | `aa50d322-9c17-4e19-b923-c934b8202664` | Onboarding tasks |
+| M0 — Foundation | `69fcf005-4d2f-43eb-99d2-e96accb99957` | Core infra, architecture, foundational work |
+| M2 — Orchestration | `b99faf7d-aeba-4fd5-8b74-ffa70964a135` | Agent orchestration, pipelines |
+
+**Always set `projectId`** when creating issues.
+
+## API Quick Reference
+
+```bash
+# List active issues
+curl -s -H "Authorization: Bearer $PCP_KEY" \
+  "$BASE/companies/$COMPANY/issues?status=todo,in_progress" | jq .
+
+# Get specific issue
+curl -s -H "Authorization: Bearer $PCP_KEY" \
+  "$BASE/issues/<ISSUE_ID>" | jq .
+
+# List agents
+curl -s -H "Authorization: Bearer $PCP_KEY" \
+  "$BASE/companies/$COMPANY/agents" | jq .
+
+# Create issue (always in backlog, always with projectId)
+  curl -s -X POST -H "Authorization: Bearer $PCP_KEY" -H "Content-Type: application/json" \
+  "$BASE/companies/$COMPANY/issues" \
+  -d '{"title":"...","description":"...","projectId":"<PROJECT_ID>","status":"backlog"}' | jq .
+
+# Assign and move to todo (separate step)
+curl -s -X PATCH -H "Authorization: Bearer $PCP_KEY" -H "Content-Type: application/json" \
+  "$BASE/issues/<ISSUE_ID>" \
+  -d '{"assigneeAgentId":"<AGENT_ID>","status":"todo"}' | jq .
+
+# Update issue status
+curl -s -X PATCH -H "Authorization: Bearer $PCP_KEY" -H "Content-Type: application/json" \
+  -d '{"status":"done","comment":"Summary."}' \
+  "$BASE/issues/<ISSUE_ID>" | jq .
+
+# Add comment
+curl -s -X POST -H "Authorization: Bearer $PCP_KEY" -H "Content-Type: application/json" \
+  "$BASE/issues/<ISSUE_ID>/comments" \
+  -d '{"body":"Comment text"}' | jq .
+
+# Checkout (required before working)
+curl -s -X POST -H "Authorization: Bearer $PCP_KEY" -H "Content-Type: application/json" \
+  -d '{"agentId":"<YOUR_AGENT_ID>","expectedStatuses":["todo","backlog","blocked"]}' \
+  "$BASE/issues/<ISSUE_ID>/checkout" | jq .
+
+# Attach document
+curl -s -X PUT -H "Authorization: Bearer $PCP_KEY" -H "Content-Type: application/json" \
+  -d '{"title":"Plan","format":"markdown","body":"# Plan\n..."}' \
+  "$BASE/issues/<ISSUE_ID>/documents/plan" | jq .
+
+# Search issues
+curl -s -H "Authorization: Bearer $PCP_KEY" \
+  "$BASE/companies/$COMPANY/issues?q=search+term" | jq .
+```
+
+## Issue Lifecycle
+
+```
+backlog → todo → in_progress → in_review → done
+                     ↑              |
+                  blocked       in_progress (rework)
+```
+
+## Conventions
+
+- **Create issues in `backlog` status** — move to `todo` only when ready to assign
+- **Always set `projectId`** — no orphan issues
+- **Assign (`assigneeAgentId`) via PATCH when moving to `todo`** — not at creation time
+- `parentId` links child to parent — use for task decomposition
+- Review gate: executor → `in_review`, reviewer → `done`
+- Max 3 rework iterations per issue, then escalate
+- Task brief: scope + full paths + "Write results to `<path>`. Comment with summary + path."

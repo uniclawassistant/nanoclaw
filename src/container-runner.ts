@@ -26,6 +26,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -258,6 +259,18 @@ function buildContainerArgs(
     args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
   } else {
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+  }
+
+  // Pass GitHub token if available (for gh CLI and git push)
+  const ghSecrets = readEnvFile(['GH_TOKEN']);
+  if (ghSecrets.GH_TOKEN) {
+    args.push('-e', `GH_TOKEN=${ghSecrets.GH_TOKEN}`);
+  }
+
+  // Pass Paperclip API key if available (for paperclip skill)
+  const pcpSecrets = readEnvFile(['PCP_KEY']);
+  if (pcpSecrets.PCP_KEY) {
+    args.push('-e', `PCP_KEY=${pcpSecrets.PCP_KEY}`);
   }
 
   // Runtime-specific args for host gateway resolution
