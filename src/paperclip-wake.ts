@@ -4,29 +4,39 @@ import http from 'http';
 import { logger as defaultLogger } from './logger.js';
 
 /**
- * Wake payload Paperclip delivers via the built-in `http` adapter.
+ * Wake payload Paperclip delivers.
  *
- * The adapter sends `{ agentId, runId, context, ...payloadTemplate }`.
- * `context` may contain `taskId`, `issueId`, `wakeReason`, `wakeCommentId`,
- * and whatever else Paperclip snapshotted at run-start time.
+ * The shipped adapter (`@fury_ios/nanoclaw-paperclip-adapter@0.1.3`) sends
+ * the following top-level shape to `POST /paperclip/wake`:
  *
- * We tolerate unknown fields — this type only names the ones we care about.
+ *   {
+ *     runId, taskId, agentId, containerId, workspacePath,
+ *     wakePayload: { env, config, context, runtime },
+ *     callbackUrl, callbackJwt
+ *   }
+ *
+ * The daemon routes on the TOP-LEVEL `containerId` / `workspacePath` — it
+ * treats `wakePayload.context` as opaque passthrough for the agent runner.
+ * Unknown fields are tolerated.
  */
 export interface PaperclipWakePayload {
-  agentId?: string;
   runId?: string;
-  companyId?: string;
-  context?: {
-    taskId?: string;
-    issueId?: string;
-    wakeReason?: string;
-    wakeCommentId?: string;
-    chatJid?: string;
-    groupFolder?: string;
-    apiUrl?: string;
-    apiKey?: string;
+  taskId?: string | null;
+  agentId?: string;
+  containerId?: string;
+  workspacePath?: string;
+  wakePayload?: {
+    env?: Record<string, unknown>;
+    config?: Record<string, unknown>;
+    context?: Record<string, unknown>;
+    runtime?: Record<string, unknown>;
     [key: string]: unknown;
   };
+  callbackUrl?: string | null;
+  callbackJwt?: string | null;
+  // Legacy/inline-context fields — retained so older senders still route.
+  companyId?: string;
+  context?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -35,15 +45,67 @@ export type WakeLogger = Pick<
   'info' | 'warn' | 'error' | 'debug'
 >;
 
+/**
+ * One NDJSON frame streamed back on the open `POST /paperclip/wake` response.
+ * Matches the frames the adapter's NDJSON parser accepts (see the adapter
+ * `src/ndjson.ts` for the authoritative shape).
+ */
+export type WakeLogStream = 'stdout' | 'stderr';
+export interface WakeLogFrame {
+  type: 'log';
+  stream: WakeLogStream;
+  chunk: string;
+}
+export interface WakeDoneFrame {
+  type: 'done';
+  exitCode: number | null;
+  signal?: string | null;
+  timedOut?: boolean;
+  errorMessage?: string | null;
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens?: number;
+  };
+  sessionParams?: Record<string, unknown> | null;
+  sessionDisplayId?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  costUsd?: number | null;
+  summary?: string | null;
+  resultJson?: Record<string, unknown> | null;
+}
+export type WakeFrame = WakeLogFrame | WakeDoneFrame;
+
+/** Stream handle passed to `onWake` — lets the handler emit NDJSON frames. */
+export interface WakeStream {
+  log(stream: WakeLogStream, chunk: string): void;
+  done(frame: Omit<WakeDoneFrame, 'type'>): void;
+  /**
+   * True once `done()` has been called or the connection has ended. Further
+   * `log()` calls are no-ops after this flips.
+   */
+  readonly closed: boolean;
+}
+
 export interface PaperclipWakeDeps {
-  /** Shared secret used for bearer auth and/or HMAC verification. */
+  /** Shared secret used for HMAC verification and bearer fallback. */
   secret: string;
   /** Accept signatures whose timestamp is within ± this many seconds of now. */
   replayWindowSeconds?: number;
-  /** Callback for a verified wake. Errors are logged and swallowed. */
+  /**
+   * Callback for a verified wake. The handler is responsible for driving the
+   * NDJSON stream via `stream.log()` / `stream.done()`. If it returns without
+   * calling `done()`, the wrapper emits a synthetic `done` with `exitCode=1`
+   * so the adapter side never hangs.
+   *
+   * Errors thrown are logged; a terminal `done` frame with the error is sent
+   * if the stream is still open.
+   */
   onWake: (
     payload: PaperclipWakePayload,
     rawBody: string,
+    stream: WakeStream,
   ) => void | Promise<void>;
   /** Optional logger override (tests inject fakes). */
   logger?: WakeLogger;
@@ -54,40 +116,10 @@ export interface PaperclipWakeDeps {
 }
 
 export const WAKE_PATH = '/paperclip/wake';
+export const HEALTH_PATH = '/paperclip/health';
 const DEFAULT_REPLAY_WINDOW_SECONDS = 300;
 const DEFAULT_MAX_BODY_BYTES = 1_048_576; // 1 MiB
-
-interface ParsedSignature {
-  timestampSeconds: number;
-  mac: string;
-}
-
-/**
- * Parse a Stripe-style `X-Paperclip-Signature: t=<unix>,v1=<hex>` header.
- * Returns null if the header is missing or malformed.
- */
-export function parseSignatureHeader(
-  header: string | undefined,
-): ParsedSignature | null {
-  if (!header) return null;
-  const parts = header.split(',').map((p) => p.trim());
-  let t: number | null = null;
-  let v1: string | null = null;
-  for (const part of parts) {
-    const eq = part.indexOf('=');
-    if (eq <= 0) continue;
-    const key = part.slice(0, eq).trim();
-    const value = part.slice(eq + 1).trim();
-    if (key === 't') {
-      const n = Number(value);
-      if (Number.isFinite(n)) t = n;
-    } else if (key === 'v1') {
-      v1 = value;
-    }
-  }
-  if (t == null || !v1) return null;
-  return { timestampSeconds: t, mac: v1 };
-}
+const HEX_SIGNATURE_RE = /^[a-f0-9]{64}$/i;
 
 /** Constant-time hex string comparison. */
 function safeEqualHex(a: string, b: string): boolean {
@@ -99,6 +131,14 @@ function safeEqualHex(a: string, b: string): boolean {
   }
 }
 
+/**
+ * Compute `hmac-sha256(secret, "${timestamp}.${rawBody}")` as lowercase hex.
+ *
+ * This is the canonical signing string the shipped adapter uses for BOTH
+ * `POST /paperclip/wake` (with the full JSON body) and
+ * `GET /paperclip/runs/{runId}` / `GET /paperclip/health` (with rawBody="").
+ * See adapter `src/hmac.ts`.
+ */
 export function computeSignature(
   secret: string,
   timestampSeconds: number,
@@ -115,15 +155,15 @@ export type VerifyResult =
   | { ok: false; status: 401 | 403; reason: string };
 
 /**
- * Verify a wake request's auth. Accepts either:
- *   - `Authorization: Bearer <secret>` (exact match, constant-time)
- *   - `X-Paperclip-Signature: t=<unix>,v1=<hex>` where the HMAC-SHA256 of
- *     `${t}.${rawBody}` using `secret` equals `v1` and |now - t| is within
- *     the replay window.
+ * Verify a request's auth. Accepts either:
+ *   - `Authorization: Bearer <secret>` (exact match, constant-time) — retained
+ *     for backward compatibility with the in-tree static-bearer path.
+ *   - `x-paperclip-timestamp: <unix-seconds>` + `x-paperclip-signature: <hex>`
+ *     where the HMAC-SHA256 of `${timestamp}.${rawBody}` equals the signature
+ *     and |now - timestamp| ≤ the replay window.
  *
- * Bearer is enough today (the Paperclip built-in `http` adapter can carry a
- * static `Authorization` header via its `headers` config). HMAC support is
- * wired for the future `http`-adapter upgrade that will sign each request.
+ * The shipped adapter (@fury_ios/nanoclaw-paperclip-adapter@0.1.3) sends the
+ * two-header HMAC form; see its `src/hmac.ts` / `src/wake.ts`.
  */
 export function verifyWakeAuth(params: {
   secret: string;
@@ -136,6 +176,7 @@ export function verifyWakeAuth(params: {
 
   const authHeader = headerString(headers['authorization']);
   const sigHeader = headerString(headers['x-paperclip-signature']);
+  const tsHeader = headerString(headers['x-paperclip-timestamp']);
 
   if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
     const presented = authHeader.slice(7).trim();
@@ -146,17 +187,22 @@ export function verifyWakeAuth(params: {
     ) {
       return { ok: true, method: 'bearer' };
     }
-    // Fall through so a request that carries *both* headers still gets a
-    // chance to pass via HMAC. If only bearer was supplied and it's wrong,
-    // the HMAC branch below will fail with 401 too.
+    // Fall through — combined headers still get a chance via HMAC.
   }
 
-  if (sigHeader) {
-    const parsed = parseSignatureHeader(sigHeader);
-    if (!parsed) {
-      return { ok: false, status: 401, reason: 'malformed signature header' };
+  if (sigHeader || tsHeader) {
+    if (!sigHeader || !tsHeader) {
+      return {
+        ok: false,
+        status: 401,
+        reason: 'missing x-paperclip-signature or x-paperclip-timestamp',
+      };
     }
-    const skew = Math.abs(nowSeconds - parsed.timestampSeconds);
+    const ts = Number(tsHeader);
+    if (!Number.isFinite(ts)) {
+      return { ok: false, status: 401, reason: 'timestamp not numeric' };
+    }
+    const skew = Math.abs(nowSeconds - ts);
     if (skew > replayWindowSeconds) {
       return {
         ok: false,
@@ -164,8 +210,14 @@ export function verifyWakeAuth(params: {
         reason: 'signature timestamp outside replay window',
       };
     }
-    const expected = computeSignature(secret, parsed.timestampSeconds, rawBody);
-    if (!safeEqualHex(expected, parsed.mac)) {
+    if (!HEX_SIGNATURE_RE.test(sigHeader)) {
+      return { ok: false, status: 401, reason: 'malformed signature format' };
+    }
+    const expected = computeSignature(secret, ts, rawBody);
+    if (expected.length !== sigHeader.length) {
+      return { ok: false, status: 401, reason: 'signature length mismatch' };
+    }
+    if (!safeEqualHex(expected, sigHeader)) {
       return { ok: false, status: 401, reason: 'signature mismatch' };
     }
     return { ok: true, method: 'hmac' };
@@ -203,8 +255,6 @@ async function readBody(
     req.on('data', (chunk: Buffer) => {
       total += chunk.length;
       if (total > maxBytes) {
-        // Drop bytes past the limit but keep draining so the client can
-        // finish sending and still read our 413 response.
         overflowed = true;
         return;
       }
@@ -234,9 +284,54 @@ function sendJson(
 }
 
 /**
- * Build an http handler that processes a Paperclip wake on `POST /paperclip/wake`.
- * All other method/path combinations return 404 (so operators can layer this
- * onto an existing server if they want).
+ * Open the NDJSON streaming response on a `POST /paperclip/wake` request.
+ * Returns a `WakeStream` handle that writes `\n`-delimited JSON frames.
+ */
+function openWakeStream(res: http.ServerResponse): WakeStream {
+  res.statusCode = 200;
+  res.setHeader('content-type', 'application/x-ndjson');
+  res.setHeader('cache-control', 'no-cache');
+  // Flush headers immediately so the client can start reading.
+  if (typeof (res as http.ServerResponse & { flushHeaders?: () => void }).flushHeaders === 'function') {
+    (res as http.ServerResponse & { flushHeaders: () => void }).flushHeaders();
+  }
+  let closed = false;
+  const writeFrame = (frame: WakeFrame): void => {
+    if (closed) return;
+    try {
+      res.write(`${JSON.stringify(frame)}\n`);
+    } catch {
+      closed = true;
+    }
+  };
+  res.on('close', () => {
+    closed = true;
+  });
+  return {
+    log(stream, chunk) {
+      if (closed) return;
+      writeFrame({ type: 'log', stream, chunk });
+    },
+    done(frame) {
+      if (closed) return;
+      writeFrame({ type: 'done', ...frame });
+      closed = true;
+      try {
+        res.end();
+      } catch {
+        // ignore — connection already torn down
+      }
+    },
+    get closed() {
+      return closed;
+    },
+  };
+}
+
+/**
+ * Build an http handler that processes `POST /paperclip/wake` and the public
+ * `GET /paperclip/health` readiness probe. All other method/path combinations
+ * return 404.
  */
 export function createPaperclipWakeHandler(
   deps: PaperclipWakeDeps,
@@ -252,16 +347,25 @@ export function createPaperclipWakeHandler(
       'paperclip-wake: secret is required (set PAPERCLIP_WAKE_SECRET)',
     );
   }
+  const startedAt = now();
 
   return (req, res) => {
     const url = req.url || '';
+    // /paperclip/health — readiness probe, no auth required. The adapter's
+    // testEnvironment() preflight hits this; it also signs the request but
+    // ignores the response auth outcome.
+    if (req.method === 'GET' && url.startsWith(HEALTH_PATH)) {
+      sendJson(res, 200, {
+        ok: true,
+        uptime: Math.max(0, Math.floor((now() - startedAt) / 1000)),
+      });
+      return;
+    }
     if (req.method !== 'POST' || !url.startsWith(WAKE_PATH)) {
       sendJson(res, 404, { error: 'not found' });
       return;
     }
 
-    // readBody resolves once — fire-and-forget is fine here because the
-    // body-reading callback terminates the response either way.
     void readBody(req, maxBodyBytes).then((result) => {
       if (!result.ok) {
         sendJson(res, result.status, {
@@ -301,33 +405,45 @@ export function createPaperclipWakeHandler(
         return;
       }
 
-      // Respond 202 immediately; do the work async.
-      sendJson(res, 202, {
-        accepted: true,
-        runId: payload.runId ?? null,
-        agentId: payload.agentId ?? null,
-      });
-
-      void (async () => {
-        try {
-          await deps.onWake(payload, rawBody);
-        } catch (err) {
-          logger.error(
-            { err, runId: payload.runId, agentId: payload.agentId },
-            'paperclip-wake: onWake handler threw',
-          );
-        }
-      })();
+      const stream = openWakeStream(res);
 
       logger.info(
         {
           method: verification.method,
           runId: payload.runId,
           agentId: payload.agentId,
-          wakeReason: payload.context?.wakeReason,
+          containerId: payload.containerId,
+          taskId: payload.taskId,
         },
         'paperclip-wake: accepted',
       );
+
+      void (async () => {
+        try {
+          await deps.onWake(payload, rawBody, stream);
+        } catch (err) {
+          logger.error(
+            { err, runId: payload.runId, agentId: payload.agentId },
+            'paperclip-wake: onWake handler threw',
+          );
+          if (!stream.closed) {
+            stream.done({
+              exitCode: 1,
+              errorMessage:
+                err instanceof Error ? err.message : 'onWake handler error',
+            });
+          }
+          return;
+        }
+        // Handler returned without calling done(). Emit a synthetic terminal
+        // frame so the adapter's NDJSON parser doesn't wait forever.
+        if (!stream.closed) {
+          stream.done({
+            exitCode: 1,
+            errorMessage: 'onWake returned without terminal frame',
+          });
+        }
+      })();
     });
   };
 }
@@ -338,8 +454,8 @@ export interface StartWakeServerOptions extends PaperclipWakeDeps {
 }
 
 /**
- * Start a dedicated HTTP server for /paperclip/wake. Returns the server so
- * callers can close it on shutdown.
+ * Start a dedicated HTTP server for /paperclip/wake + /paperclip/health.
+ * Returns the server so callers can close it on shutdown.
  */
 export async function startPaperclipWakeServer(
   opts: StartWakeServerOptions,

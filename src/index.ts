@@ -59,6 +59,7 @@ import { startIpcWatcher } from './ipc.js';
 import {
   createPaperclipWakeHandler,
   PaperclipWakePayload,
+  type WakeStream,
 } from './paperclip-wake.js';
 import {
   createPaperclipRunsHandler,
@@ -591,57 +592,82 @@ function ensureContainerSystemRunning(): void {
 /**
  * Route a verified Paperclip wake to the target group's agent.
  *
- * Expects the wake payload to identify the target nanoclaw group via
- * `context.chatJid` (preferred) or `context.groupFolder`. The wake body is
- * written into the group's mounted IPC directory so the agent-runner can
- * read it, and a synthetic inbound message is stored to trigger processing
- * through the normal router flow.
+ * Routing identifiers — taken from the TOP-LEVEL wake body (never from inside
+ * `wakePayload.context`, which is opaque payload data meant for the agent
+ * runner, not the daemon):
+ *   - `containerId`  — matched against each registered group's folder name
+ *   - `workspacePath` — matched against each group's resolved workspace path
+ *
+ * The wake body is written into the group's mounted IPC directory so the
+ * agent-runner can read it, and a synthetic inbound message is stored to
+ * trigger processing through the normal router flow.
+ *
+ * The `stream` handle streams NDJSON frames back to the adapter on the still-
+ * open `POST /paperclip/wake` connection. We emit a few status log frames,
+ * record terminal state in the store, and close with a `done` frame so
+ * the adapter's parser terminates cleanly.
  */
 function handlePaperclipWake(
   payload: PaperclipWakePayload,
   rawBody: string,
+  stream: WakeStream,
 ): void {
-  const ctx = payload.context ?? {};
   const runId = typeof payload.runId === 'string' ? payload.runId : 'unknown';
   const agentId =
     typeof payload.agentId === 'string' ? payload.agentId : 'unknown';
-  const wakeReason =
-    typeof ctx.wakeReason === 'string' ? ctx.wakeReason : 'unknown';
+  const containerId =
+    typeof payload.containerId === 'string' ? payload.containerId : undefined;
+  const workspacePath =
+    typeof payload.workspacePath === 'string'
+      ? payload.workspacePath
+      : undefined;
 
   paperclipWakeStore?.recordWake(payload);
 
-  let chatJid = typeof ctx.chatJid === 'string' ? ctx.chatJid : undefined;
-  if (!chatJid && typeof ctx.groupFolder === 'string') {
-    for (const [jid, group] of Object.entries(registeredGroups)) {
-      if (group.folder === ctx.groupFolder) {
-        chatJid = jid;
-        break;
+  // Resolve target group by top-level containerId / workspacePath.
+  // containerId maps 1:1 onto the group folder name; workspacePath is the
+  // absolute host-side path emitted by resolveGroupFolderPath(folder).
+  let matchedJid: string | null = null;
+  let matchedGroup: RegisteredGroup | null = null;
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    if (containerId && group.folder === containerId) {
+      matchedJid = jid;
+      matchedGroup = group;
+      break;
+    }
+    if (workspacePath) {
+      try {
+        if (resolveGroupFolderPath(group.folder) === workspacePath) {
+          matchedJid = jid;
+          matchedGroup = group;
+          break;
+        }
+      } catch {
+        // Invalid folder name — skip.
       }
     }
   }
 
-  if (!chatJid) {
-    logger.warn(
-      { runId, agentId },
-      'paperclip-wake: payload missing context.chatJid / context.groupFolder — dropping',
-    );
-    return;
-  }
+  const fail = (reason: string, httpExitCode = 1): void => {
+    logger.warn({ runId, agentId, containerId, workspacePath }, reason);
+    paperclipWakeStore?.markError(runId, reason);
+    if (!stream.closed) {
+      stream.done({ exitCode: httpExitCode, errorMessage: reason });
+    }
+  };
 
-  const group = registeredGroups[chatJid];
-  if (!group) {
-    logger.warn(
-      { runId, agentId, chatJid },
-      'paperclip-wake: no registered group for chatJid — dropping',
+  if (!matchedGroup || !matchedJid) {
+    fail(
+      'paperclip-wake: no registered group matches containerId/workspacePath',
     );
     return;
   }
 
   // Drop full payload in the container-visible IPC dir so the agent-runner
-  // can read it with full fidelity (including apiUrl/apiKey if supplied).
+  // can read it with full fidelity.
   try {
     const wakeDir = path.join(
-      resolveGroupIpcPath(group.folder),
+      resolveGroupIpcPath(matchedGroup.folder),
       'paperclip-wakes',
     );
     fs.mkdirSync(wakeDir, { recursive: true });
@@ -650,24 +676,31 @@ function handlePaperclipWake(
     fs.writeFileSync(file, rawBody);
   } catch (err) {
     logger.error(
-      { err, runId, agentId, group: group.name },
+      { err, runId, agentId, group: matchedGroup.name },
       'paperclip-wake: failed to write wake payload to IPC dir',
     );
-    // Still fall through to notify the agent — the summary below has enough
-    // info to start a heartbeat.
+    // Still fall through — summary below is enough to trigger a heartbeat.
   }
 
   // Inject a synthetic inbound message so the normal processing loop picks
   // it up. Main groups process unconditionally; non-main groups require a
   // trigger, so we prefix the assistant trigger for those.
-  const isMain = group.isMain === true;
-  const trigger = isMain ? '' : `${group.trigger || DEFAULT_TRIGGER} `;
+  const isMain = matchedGroup.isMain === true;
+  const trigger = isMain ? '' : `${matchedGroup.trigger || DEFAULT_TRIGGER} `;
+  const ctx =
+    (payload.wakePayload?.context as Record<string, unknown> | undefined) ??
+    payload.context ??
+    {};
+  const wakeReason =
+    typeof ctx.wakeReason === 'string' ? ctx.wakeReason : 'unknown';
   const summary = [
     `Paperclip wake (${wakeReason})`,
     `runId=${runId}`,
     `agentId=${agentId}`,
-    ctx.taskId ? `taskId=${ctx.taskId}` : null,
-    ctx.wakeCommentId ? `commentId=${ctx.wakeCommentId}` : null,
+    payload.taskId ? `taskId=${payload.taskId}` : null,
+    typeof ctx.wakeCommentId === 'string'
+      ? `commentId=${ctx.wakeCommentId}`
+      : null,
   ]
     .filter(Boolean)
     .join(' ');
@@ -676,7 +709,7 @@ function handlePaperclipWake(
   const syntheticId = `paperclip-wake-${runId}-${Date.now()}`;
   storeMessage({
     id: syntheticId,
-    chat_jid: chatJid,
+    chat_jid: matchedJid,
     sender: 'paperclip',
     sender_name: 'Paperclip',
     content: body,
@@ -685,18 +718,31 @@ function handlePaperclipWake(
     is_bot_message: false,
   });
 
-  queue.enqueueMessageCheck(chatJid);
+  queue.enqueueMessageCheck(matchedJid);
 
   logger.info(
     {
       runId,
       agentId,
       wakeReason,
-      chatJid,
-      group: group.name,
+      chatJid: matchedJid,
+      group: matchedGroup.name,
     },
     'paperclip-wake: routed to group',
   );
+
+  // Surface status to the adapter on the open NDJSON stream.
+  stream.log(
+    'stdout',
+    `[nanoclaw] routed to group ${matchedGroup.name} (folder=${matchedGroup.folder})\n`,
+  );
+  paperclipWakeStore?.markDone(runId, {
+    summary: `routed to ${matchedGroup.name}`,
+  });
+  stream.done({
+    exitCode: 0,
+    summary: `routed to ${matchedGroup.name}`,
+  });
 }
 
 async function main(): Promise<void> {

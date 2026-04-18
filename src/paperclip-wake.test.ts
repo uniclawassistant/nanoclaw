@@ -6,11 +6,12 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   computeSignature,
   createPaperclipWakeHandler,
-  parseSignatureHeader,
+  HEALTH_PATH,
   PaperclipWakePayload,
   startPaperclipWakeServer,
   verifyWakeAuth,
   WAKE_PATH,
+  type WakeStream,
 } from './paperclip-wake.js';
 
 const SILENT_LOGGER = {
@@ -20,22 +21,37 @@ const SILENT_LOGGER = {
   debug: () => {},
 };
 
-function sigHeader(secret: string, ts: number, body: string): string {
-  return `t=${ts},v1=${computeSignature(secret, ts, body)}`;
+/**
+ * Sign `${ts}.${body}` exactly how the shipped adapter signs it in
+ * `@fury_ios/nanoclaw-paperclip-adapter@0.1.3/src/hmac.ts:signPayload`.
+ */
+function signHeaders(
+  secret: string,
+  ts: number,
+  body: string,
+): Record<string, string> {
+  return {
+    'x-paperclip-timestamp': String(ts),
+    'x-paperclip-signature': computeSignature(secret, ts, body),
+  };
 }
 
 async function postRaw(
   baseUrl: string,
   headers: Record<string, string>,
   body: string,
-): Promise<{ status: number; body: string }> {
+): Promise<{ status: number; contentType: string; body: string }> {
   const res = await fetch(`${baseUrl}${WAKE_PATH}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...headers },
     body,
   });
   const text = await res.text();
-  return { status: res.status, body: text };
+  return {
+    status: res.status,
+    contentType: res.headers.get('content-type') ?? '',
+    body: text,
+  };
 }
 
 async function withServer<T>(
@@ -55,28 +71,20 @@ async function withServer<T>(
   }
 }
 
-describe('parseSignatureHeader', () => {
-  it('parses well-formed header', () => {
-    const parsed = parseSignatureHeader('t=1700000000,v1=deadbeef');
-    expect(parsed).toEqual({ timestampSeconds: 1700000000, mac: 'deadbeef' });
+describe('computeSignature (pinned canonical form)', () => {
+  it('matches HMAC-SHA256 over "${t}.${body}"', () => {
+    // This pin reproduces the adapter-side signPayload() verbatim. If this
+    // breaks, the nanoclaw daemon has diverged from the contract.
+    const ref = crypto
+      .createHmac('sha256', 'k')
+      .update('100.{"a":1}')
+      .digest('hex');
+    expect(computeSignature('k', 100, '{"a":1}')).toBe(ref);
   });
 
-  it('tolerates extra whitespace and unknown keys', () => {
-    const parsed = parseSignatureHeader(
-      '  v2=future ,  t = 42 , v1 = abc , ignore=x ',
-    );
-    expect(parsed).toEqual({ timestampSeconds: 42, mac: 'abc' });
-  });
-
-  it('returns null when missing fields', () => {
-    expect(parseSignatureHeader('t=1')).toBeNull();
-    expect(parseSignatureHeader('v1=abc')).toBeNull();
-    expect(parseSignatureHeader('')).toBeNull();
-    expect(parseSignatureHeader(undefined)).toBeNull();
-  });
-
-  it('returns null when t is not a number', () => {
-    expect(parseSignatureHeader('t=nope,v1=abc')).toBeNull();
+  it('signs empty body (GET poll / health probe) as "${t}."', () => {
+    const ref = crypto.createHmac('sha256', 'k').update('100.').digest('hex');
+    expect(computeSignature('k', 100, '')).toBe(ref);
   });
 });
 
@@ -85,7 +93,19 @@ describe('verifyWakeAuth', () => {
   const body = '{"hello":"world"}';
   const now = 1_700_000_000;
 
-  it('accepts valid bearer token', () => {
+  it('accepts plain-hex signature + timestamp headers', () => {
+    const result = verifyWakeAuth({
+      secret,
+      headers: signHeaders(secret, now, body),
+      rawBody: body,
+      nowSeconds: now,
+      replayWindowSeconds: 300,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.method).toBe('hmac');
+  });
+
+  it('accepts valid bearer token (legacy compat)', () => {
     const result = verifyWakeAuth({
       secret,
       headers: { authorization: `Bearer ${secret}` },
@@ -108,24 +128,10 @@ describe('verifyWakeAuth', () => {
     expect(result.ok).toBe(false);
   });
 
-  it('accepts valid HMAC signature', () => {
-    const result = verifyWakeAuth({
-      secret,
-      headers: { 'x-paperclip-signature': sigHeader(secret, now, body) },
-      rawBody: body,
-      nowSeconds: now,
-      replayWindowSeconds: 300,
-    });
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.method).toBe('hmac');
-  });
-
   it('rejects HMAC with wrong secret', () => {
     const result = verifyWakeAuth({
       secret,
-      headers: {
-        'x-paperclip-signature': sigHeader('other-secret', now, body),
-      },
+      headers: signHeaders('other-secret', now, body),
       rawBody: body,
       nowSeconds: now,
       replayWindowSeconds: 300,
@@ -136,9 +142,7 @@ describe('verifyWakeAuth', () => {
   it('rejects HMAC computed over a different body', () => {
     const result = verifyWakeAuth({
       secret,
-      headers: {
-        'x-paperclip-signature': sigHeader(secret, now, 'other-body'),
-      },
+      headers: signHeaders(secret, now, 'other-body'),
       rawBody: body,
       nowSeconds: now,
       replayWindowSeconds: 300,
@@ -149,9 +153,7 @@ describe('verifyWakeAuth', () => {
   it('rejects HMAC outside the replay window', () => {
     const result = verifyWakeAuth({
       secret,
-      headers: {
-        'x-paperclip-signature': sigHeader(secret, now - 3600, body),
-      },
+      headers: signHeaders(secret, now - 3600, body),
       rawBody: body,
       nowSeconds: now,
       replayWindowSeconds: 300,
@@ -163,14 +165,34 @@ describe('verifyWakeAuth', () => {
   it('accepts HMAC just inside the window (boundary)', () => {
     const result = verifyWakeAuth({
       secret,
-      headers: {
-        'x-paperclip-signature': sigHeader(secret, now - 300, body),
-      },
+      headers: signHeaders(secret, now - 300, body),
       rawBody: body,
       nowSeconds: now,
       replayWindowSeconds: 300,
     });
     expect(result.ok).toBe(true);
+  });
+
+  it('rejects signature without paired timestamp', () => {
+    const result = verifyWakeAuth({
+      secret,
+      headers: { 'x-paperclip-signature': 'a'.repeat(64) },
+      rawBody: body,
+      nowSeconds: now,
+      replayWindowSeconds: 300,
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects timestamp without paired signature', () => {
+    const result = verifyWakeAuth({
+      secret,
+      headers: { 'x-paperclip-timestamp': String(now) },
+      rawBody: body,
+      nowSeconds: now,
+      replayWindowSeconds: 300,
+    });
+    expect(result.ok).toBe(false);
   });
 
   it('rejects when both auth methods are absent', () => {
@@ -185,10 +207,13 @@ describe('verifyWakeAuth', () => {
     if (!result.ok) expect(result.reason).toMatch(/missing auth/);
   });
 
-  it('rejects malformed signature header', () => {
+  it('rejects signature that is not 64-char hex', () => {
     const result = verifyWakeAuth({
       secret,
-      headers: { 'x-paperclip-signature': 'not-a-real-header' },
+      headers: {
+        'x-paperclip-timestamp': String(now),
+        'x-paperclip-signature': 'not-hex',
+      },
       rawBody: body,
       nowSeconds: now,
       replayWindowSeconds: 300,
@@ -227,12 +252,27 @@ describe('paperclip-wake server (end-to-end)', () => {
     );
   });
 
-  it('returns 404 for wrong method', async () => {
+  it('returns 404 for POST to non-wake path', async () => {
     await withServer(
       { host: '127.0.0.1', port: 0, secret, onWake: () => {} },
       async (baseUrl) => {
-        const res = await fetch(`${baseUrl}${WAKE_PATH}`, { method: 'GET' });
+        const res = await fetch(`${baseUrl}/paperclip/other`, {
+          method: 'GET',
+        });
         expect(res.status).toBe(404);
+      },
+    );
+  });
+
+  it('GET /paperclip/health returns 200 without auth', async () => {
+    await withServer(
+      { host: '127.0.0.1', port: 0, secret, onWake: () => {} },
+      async (baseUrl) => {
+        const res = await fetch(`${baseUrl}${HEALTH_PATH}`);
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { ok: boolean; uptime: number };
+        expect(body.ok).toBe(true);
+        expect(typeof body.uptime).toBe('number');
       },
     );
   });
@@ -247,13 +287,31 @@ describe('paperclip-wake server (end-to-end)', () => {
     );
   });
 
-  it('accepts valid bearer and invokes onWake with parsed payload', async () => {
-    const onWake = vi.fn<(p: PaperclipWakePayload, raw: string) => void>();
-    const body = JSON.stringify({
-      agentId: 'agent-1',
-      runId: 'run-xyz',
-      context: { wakeReason: 'issue_commented', chatJid: 'chat@example' },
+  it('accepts adapter-signed request and streams NDJSON (done frame)', async () => {
+    const onWake = vi.fn<
+      (
+        p: PaperclipWakePayload,
+        raw: string,
+        stream: WakeStream,
+      ) => void | Promise<void>
+    >((_payload, _raw, stream) => {
+      stream.log('stdout', 'hello\n');
+      stream.done({ exitCode: 0, summary: 'ok' });
     });
+    const body = JSON.stringify({
+      runId: 'run-xyz',
+      taskId: 't-1',
+      agentId: 'agent-1',
+      containerId: 'main',
+      workspacePath: '/workspace/main',
+      wakePayload: {
+        env: {},
+        config: {},
+        context: { wakeReason: 'issue_commented' },
+        runtime: {},
+      },
+    });
+    const ts = Math.floor(Date.now() / 1000);
 
     await withServer(
       {
@@ -263,46 +321,84 @@ describe('paperclip-wake server (end-to-end)', () => {
         onWake,
       },
       async (baseUrl) => {
-        const r = await postRaw(
-          baseUrl,
-          { authorization: `Bearer ${secret}` },
-          body,
-        );
-        expect(r.status).toBe(202);
-        const parsed = JSON.parse(r.body);
-        expect(parsed).toMatchObject({
-          accepted: true,
-          runId: 'run-xyz',
-          agentId: 'agent-1',
-        });
+        const r = await postRaw(baseUrl, signHeaders(secret, ts, body), body);
+        expect(r.status).toBe(200);
+        expect(r.contentType).toContain('application/x-ndjson');
+        // Response body is newline-delimited JSON frames.
+        const lines = r.body.split('\n').filter(Boolean);
+        const frames = lines.map((l) => JSON.parse(l));
+        expect(frames.some((f) => f.type === 'log' && f.chunk === 'hello\n'))
+          .toBe(true);
+        const done = frames.find((f) => f.type === 'done');
+        expect(done).toBeDefined();
+        expect(done.exitCode).toBe(0);
+        expect(done.summary).toBe('ok');
       },
     );
 
-    // onWake is invoked after the response resolves — poll until the call lands.
-    await vi.waitFor(() => expect(onWake).toHaveBeenCalledOnce());
+    expect(onWake).toHaveBeenCalledOnce();
     const [payload, raw] = onWake.mock.calls[0];
-    expect(payload.agentId).toBe('agent-1');
-    expect(payload.context?.wakeReason).toBe('issue_commented');
+    expect(payload.runId).toBe('run-xyz');
+    expect(payload.containerId).toBe('main');
+    expect(payload.workspacePath).toBe('/workspace/main');
+    expect(payload.wakePayload?.context).toMatchObject({
+      wakeReason: 'issue_commented',
+    });
     expect(raw).toBe(body);
   });
 
-  it('accepts valid HMAC signature', async () => {
-    const onWake = vi.fn<(p: PaperclipWakePayload, raw: string) => void>();
-    const body = JSON.stringify({ agentId: 'a', runId: 'r' });
+  it('emits synthetic done frame when onWake returns without calling done()', async () => {
+    const body = JSON.stringify({ runId: 'r', agentId: 'a' });
     const ts = Math.floor(Date.now() / 1000);
-
     await withServer(
-      { host: '127.0.0.1', port: 0, secret, onWake },
+      {
+        host: '127.0.0.1',
+        port: 0,
+        secret,
+        onWake: () => {
+          /* no-op: never calls stream.done() */
+        },
+      },
       async (baseUrl) => {
-        const r = await postRaw(
-          baseUrl,
-          { 'x-paperclip-signature': sigHeader(secret, ts, body) },
-          body,
-        );
-        expect(r.status).toBe(202);
+        const r = await postRaw(baseUrl, signHeaders(secret, ts, body), body);
+        expect(r.status).toBe(200);
+        const frames = r.body
+          .split('\n')
+          .filter(Boolean)
+          .map((l) => JSON.parse(l));
+        const done = frames.find((f) => f.type === 'done');
+        expect(done).toBeDefined();
+        expect(done.exitCode).toBe(1);
+        expect(done.errorMessage).toMatch(/without terminal frame/);
       },
     );
-    await vi.waitFor(() => expect(onWake).toHaveBeenCalledOnce());
+  });
+
+  it('emits error done frame when onWake throws', async () => {
+    const body = JSON.stringify({ runId: 'r' });
+    const ts = Math.floor(Date.now() / 1000);
+    await withServer(
+      {
+        host: '127.0.0.1',
+        port: 0,
+        secret,
+        onWake: () => {
+          throw new Error('boom');
+        },
+      },
+      async (baseUrl) => {
+        const r = await postRaw(baseUrl, signHeaders(secret, ts, body), body);
+        expect(r.status).toBe(200);
+        const frames = r.body
+          .split('\n')
+          .filter(Boolean)
+          .map((l) => JSON.parse(l));
+        const done = frames.find((f) => f.type === 'done');
+        expect(done).toBeDefined();
+        expect(done.exitCode).toBe(1);
+        expect(done.errorMessage).toBe('boom');
+      },
+    );
   });
 
   it('rejects bodies larger than the configured limit with 413', async () => {
@@ -338,45 +434,5 @@ describe('paperclip-wake server (end-to-end)', () => {
         expect(r.status).toBe(400);
       },
     );
-  });
-
-  it('swallows onWake handler errors but still returns 202', async () => {
-    const errors: unknown[] = [];
-    const loggerWithCapture = {
-      ...SILENT_LOGGER,
-      error: (obj: unknown) => {
-        errors.push(obj);
-      },
-    };
-    await withServer(
-      {
-        host: '127.0.0.1',
-        port: 0,
-        secret,
-        logger: loggerWithCapture,
-        onWake: async () => {
-          throw new Error('boom');
-        },
-      },
-      async (baseUrl) => {
-        const r = await postRaw(
-          baseUrl,
-          { authorization: `Bearer ${secret}` },
-          '{"runId":"r"}',
-        );
-        expect(r.status).toBe(202);
-      },
-    );
-    // onWake runs after the response resolves; poll until the catch fires.
-    await vi.waitFor(() => expect(errors.length).toBe(1));
-  });
-
-  it('signs and verifies a round trip for the documented canonical form', () => {
-    // Pinned reference: if you change computeSignature you must change here too.
-    const ref = crypto
-      .createHmac('sha256', 'k')
-      .update('100.{"a":1}')
-      .digest('hex');
-    expect(computeSignature('k', 100, '{"a":1}')).toBe(ref);
   });
 });

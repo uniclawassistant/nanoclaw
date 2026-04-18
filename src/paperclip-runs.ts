@@ -1,18 +1,26 @@
-import crypto from 'crypto';
 import http from 'http';
 
 import { logger as defaultLogger } from './logger.js';
 import {
-  parseSignatureHeader,
-  computeSignature,
+  verifyWakeAuth,
   WAKE_PATH,
+  HEALTH_PATH,
   type PaperclipWakePayload,
   type WakeLogger,
+  type WakeDoneFrame,
 } from './paperclip-wake.js';
 
 export const RUNS_PATH_PREFIX = '/paperclip/runs/';
 
-export type RunStatus = 'pending' | 'done' | 'error';
+/**
+ * Run lifecycle state.
+ *
+ * Maps 1:1 onto the adapter's `parsePollResult` accept list in
+ * `@fury_ios/nanoclaw-paperclip-adapter@0.1.3/src/wake.ts`:
+ *   - "running" → keep polling (parser returns null)
+ *   - "done" | "error" | "timeout" → terminal, parser returns a done frame
+ */
+export type RunStatus = 'running' | 'done' | 'error' | 'timeout';
 
 export interface RunRecord {
   runId: string;
@@ -20,22 +28,60 @@ export interface RunRecord {
   status: RunStatus;
   startedAt: number;
   finishedAt: number | null;
-  error: string | null;
+  /** Process exit code on terminal states. 0 on done, non-zero otherwise. */
+  exitCode: number | null;
+  /** Optional diagnostic — surfaces to the adapter for error/timeout status. */
+  errorMessage: string | null;
+  /** Optional terminal-frame fields echoed from the handler's done() call. */
+  signal: string | null;
+  timedOut: boolean;
+  usage: WakeDoneFrame['usage'] | null;
+  sessionParams: Record<string, unknown> | null;
+  sessionDisplayId: string | null;
+  provider: string | null;
+  model: string | null;
+  costUsd: number | null;
+  summary: string | null;
+  resultJson: Record<string, unknown> | null;
+}
+
+export interface TerminalPatch {
+  status: 'done' | 'error' | 'timeout';
+  exitCode?: number | null;
+  errorMessage?: string | null;
+  signal?: string | null;
+  timedOut?: boolean;
+  usage?: WakeDoneFrame['usage'] | null;
+  sessionParams?: Record<string, unknown> | null;
+  sessionDisplayId?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  costUsd?: number | null;
+  summary?: string | null;
+  resultJson?: Record<string, unknown> | null;
 }
 
 export interface WakeStore {
   recordWake(payload: PaperclipWakePayload): void;
-  markDone(runId: string): void;
-  markError(runId: string, error: string): void;
+  /** Mark a run as terminal with the adapter-visible fields. */
+  markTerminal(runId: string, patch: TerminalPatch): void;
+  /** Back-compat convenience: done with exitCode=0. */
+  markDone(runId: string, patch?: Omit<TerminalPatch, 'status'>): void;
+  /** Back-compat convenience: error with exitCode=1 unless overridden. */
+  markError(
+    runId: string,
+    error: string,
+    patch?: Omit<TerminalPatch, 'status' | 'errorMessage'>,
+  ): void;
   get(runId: string): RunRecord | undefined;
   size(): number;
   prune(olderThanMs: number): number;
 }
 
 /**
- * In-memory store for Paperclip run status. Holds the last N wakes by runId so
- * the Paperclip adapter plugin can reconnect with a status poll after a dropped
- * wake response. Not persisted across nanoclaw restarts.
+ * In-memory LRU store for Paperclip run status. Holds the last N wakes by
+ * runId so the adapter can reconnect with a status poll after a dropped
+ * NDJSON wake stream. Not persisted across nanoclaw restarts.
  */
 export function createWakeStore(opts?: {
   now?: () => number;
@@ -53,6 +99,35 @@ export function createWakeStore(opts?: {
     }
   };
 
+  const blankTerminal = (): Pick<
+    RunRecord,
+    | 'exitCode'
+    | 'errorMessage'
+    | 'signal'
+    | 'timedOut'
+    | 'usage'
+    | 'sessionParams'
+    | 'sessionDisplayId'
+    | 'provider'
+    | 'model'
+    | 'costUsd'
+    | 'summary'
+    | 'resultJson'
+  > => ({
+    exitCode: null,
+    errorMessage: null,
+    signal: null,
+    timedOut: false,
+    usage: null,
+    sessionParams: null,
+    sessionDisplayId: null,
+    provider: null,
+    model: null,
+    costUsd: null,
+    summary: null,
+    resultJson: null,
+  });
+
   return {
     recordWake(payload) {
       if (typeof payload.runId !== 'string' || payload.runId.length === 0) {
@@ -63,25 +138,48 @@ export function createWakeStore(opts?: {
       runs.set(payload.runId, {
         runId: payload.runId,
         agentId: typeof payload.agentId === 'string' ? payload.agentId : null,
-        status: 'pending',
+        status: 'running',
         startedAt: now(),
         finishedAt: null,
-        error: null,
+        ...blankTerminal(),
       });
       evictIfFull();
     },
-    markDone(runId) {
+    markTerminal(runId, patch) {
       const rec = runs.get(runId);
-      if (!rec || rec.status !== 'pending') return;
-      rec.status = 'done';
+      if (!rec || rec.status !== 'running') return;
+      rec.status = patch.status;
       rec.finishedAt = now();
+      const defaultExit = patch.status === 'done' ? 0 : 1;
+      rec.exitCode =
+        typeof patch.exitCode === 'number' ? patch.exitCode : defaultExit;
+      rec.errorMessage = patch.errorMessage ?? null;
+      rec.signal = patch.signal ?? null;
+      rec.timedOut =
+        patch.timedOut ?? (patch.status === 'timeout' ? true : false);
+      rec.usage = patch.usage ?? null;
+      rec.sessionParams = patch.sessionParams ?? null;
+      rec.sessionDisplayId = patch.sessionDisplayId ?? null;
+      rec.provider = patch.provider ?? null;
+      rec.model = patch.model ?? null;
+      rec.costUsd = patch.costUsd ?? null;
+      rec.summary = patch.summary ?? null;
+      rec.resultJson = patch.resultJson ?? null;
     },
-    markError(runId, error) {
-      const rec = runs.get(runId);
-      if (!rec || rec.status !== 'pending') return;
-      rec.status = 'error';
-      rec.finishedAt = now();
-      rec.error = error;
+    markDone(runId, patch) {
+      this.markTerminal(runId, {
+        status: 'done',
+        exitCode: 0,
+        ...(patch ?? {}),
+      });
+    },
+    markError(runId, error, patch) {
+      this.markTerminal(runId, {
+        status: 'error',
+        exitCode: 1,
+        errorMessage: error,
+        ...(patch ?? {}),
+      });
     },
     get(runId) {
       return runs.get(runId);
@@ -103,92 +201,6 @@ export function createWakeStore(opts?: {
   };
 }
 
-/**
- * Verify a status-lookup request using the same shared secret as the wake
- * endpoint. Accepts bearer or Stripe-style HMAC — reusing the wake auth shape
- * rather than growing a second one.
- *
- * For the GET path there is no body, so the HMAC canonical string is
- * `${timestamp}.${method}.${path}`.
- */
-function verifyRunsAuth(params: {
-  secret: string;
-  method: string;
-  pathForSig: string;
-  headers: http.IncomingHttpHeaders;
-  nowSeconds: number;
-  replayWindowSeconds: number;
-}):
-  | { ok: true; method: 'bearer' | 'hmac' }
-  | { ok: false; status: 401; reason: string } {
-  const {
-    secret,
-    method,
-    pathForSig,
-    headers,
-    nowSeconds,
-    replayWindowSeconds,
-  } = params;
-
-  const authHeader = headerString(headers['authorization']);
-  const sigHeader = headerString(headers['x-paperclip-signature']);
-
-  if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
-    const presented = authHeader.slice(7).trim();
-    if (
-      presented.length === secret.length &&
-      crypto.timingSafeEqual(Buffer.from(presented), Buffer.from(secret))
-    ) {
-      return { ok: true, method: 'bearer' };
-    }
-  }
-
-  if (sigHeader) {
-    const parsed = parseSignatureHeader(sigHeader);
-    if (!parsed) {
-      return { ok: false, status: 401, reason: 'malformed signature header' };
-    }
-    if (Math.abs(nowSeconds - parsed.timestampSeconds) > replayWindowSeconds) {
-      return {
-        ok: false,
-        status: 401,
-        reason: 'signature timestamp outside replay window',
-      };
-    }
-    const canonical = `${method.toUpperCase()}.${pathForSig}`;
-    const expected = computeSignature(
-      secret,
-      parsed.timestampSeconds,
-      canonical,
-    );
-    if (!safeEqualHex(expected, parsed.mac)) {
-      return { ok: false, status: 401, reason: 'signature mismatch' };
-    }
-    return { ok: true, method: 'hmac' };
-  }
-
-  if (authHeader) {
-    return { ok: false, status: 401, reason: 'bearer token mismatch' };
-  }
-  return { ok: false, status: 401, reason: 'missing auth' };
-}
-
-function headerString(
-  value: string | string[] | undefined,
-): string | undefined {
-  if (Array.isArray(value)) return value[0];
-  return value;
-}
-
-function safeEqualHex(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
-  } catch {
-    return false;
-  }
-}
-
 function sendJson(
   res: http.ServerResponse,
   status: number,
@@ -197,6 +209,18 @@ function sendJson(
   res.statusCode = status;
   res.setHeader('content-type', 'application/json');
   res.end(JSON.stringify(body));
+}
+
+async function readEmptyBody(req: http.IncomingMessage): Promise<string> {
+  // Shipped adapter never sends a GET body, but drain to be safe.
+  return new Promise((resolve) => {
+    let body = '';
+    req.on('data', (chunk: Buffer) => {
+      body += chunk.toString('utf8');
+    });
+    req.on('end', () => resolve(body));
+    req.on('error', () => resolve(body));
+  });
 }
 
 export interface PaperclipRunsDeps {
@@ -208,8 +232,12 @@ export interface PaperclipRunsDeps {
 }
 
 /**
- * Build an http handler for `GET /paperclip/runs/{runId}`. Other methods and
- * paths return 404 so this can be composed onto a shared server.
+ * Build an http handler for `GET /paperclip/runs/{runId}`.
+ *
+ * Auth: same HMAC rules as `/paperclip/wake` — but the canonical signed
+ * string is `${timestamp}.` (empty rawBody, because GET has no body).
+ * See adapter `src/hmac.ts` and `src/wake.ts:pollForResult` where
+ * `body = ""` is passed to `buildSignedHeaders`.
  */
 export function createPaperclipRunsHandler(
   deps: PaperclipRunsDeps,
@@ -235,35 +263,48 @@ export function createPaperclipRunsHandler(
       return;
     }
 
-    const verification = verifyRunsAuth({
-      secret: deps.secret,
-      method: 'GET',
-      pathForSig: url,
-      headers: req.headers,
-      nowSeconds: Math.floor(now() / 1000),
-      replayWindowSeconds,
-    });
-    if (!verification.ok) {
-      logger.warn(
-        { reason: verification.reason, runId },
-        'paperclip-runs: auth failed',
-      );
-      sendJson(res, verification.status, { error: verification.reason });
-      return;
-    }
+    void readEmptyBody(req).then((rawBody) => {
+      const verification = verifyWakeAuth({
+        secret: deps.secret,
+        headers: req.headers,
+        rawBody,
+        nowSeconds: Math.floor(now() / 1000),
+        replayWindowSeconds,
+      });
+      if (!verification.ok) {
+        logger.warn(
+          { reason: verification.reason, runId },
+          'paperclip-runs: auth failed',
+        );
+        sendJson(res, verification.status, { error: verification.reason });
+        return;
+      }
 
-    const rec = deps.store.get(runId);
-    if (!rec) {
-      sendJson(res, 404, { runId, status: 'not_found' });
-      return;
-    }
-    sendJson(res, 200, {
-      runId: rec.runId,
-      agentId: rec.agentId,
-      status: rec.status,
-      startedAt: rec.startedAt,
-      finishedAt: rec.finishedAt,
-      error: rec.error,
+      const rec = deps.store.get(runId);
+      if (!rec) {
+        sendJson(res, 404, { runId, status: 'not_found' });
+        return;
+      }
+      // Response shape — matches adapter's parsePollResult expectations.
+      sendJson(res, 200, {
+        runId: rec.runId,
+        agentId: rec.agentId,
+        status: rec.status,
+        startedAt: rec.startedAt,
+        finishedAt: rec.finishedAt,
+        exitCode: rec.exitCode,
+        signal: rec.signal,
+        timedOut: rec.timedOut,
+        errorMessage: rec.errorMessage,
+        usage: rec.usage,
+        sessionParams: rec.sessionParams,
+        sessionDisplayId: rec.sessionDisplayId,
+        provider: rec.provider,
+        model: rec.model,
+        costUsd: rec.costUsd,
+        summary: rec.summary,
+        resultJson: rec.resultJson,
+      });
     });
   };
 }
@@ -279,7 +320,7 @@ export function createPaperclipServerHandler(
 ): (req: http.IncomingMessage, res: http.ServerResponse) => void {
   return (req, res) => {
     const url = req.url || '';
-    if (url.startsWith(WAKE_PATH)) {
+    if (url.startsWith(WAKE_PATH) || url.startsWith(HEALTH_PATH)) {
       wakeHandler(req, res);
       return;
     }
@@ -317,7 +358,7 @@ export async function startPaperclipServer(
   });
   (opts.logger ?? defaultLogger).info(
     { host: opts.host, port: opts.port },
-    'paperclip: listening (wake + runs)',
+    'paperclip: listening (wake + runs + health)',
   );
   return server;
 }

@@ -17,18 +17,16 @@ const SILENT_LOGGER = {
   debug: () => {},
 };
 
-function sigHeader(
-  secret: string,
-  ts: number,
-  method: string,
-  pathForSig: string,
-): string {
-  const mac = computeSignature(
-    secret,
-    ts,
-    `${method.toUpperCase()}.${pathForSig}`,
-  );
-  return `t=${ts},v1=${mac}`;
+/**
+ * Sign a GET poll request exactly how the adapter signs it in
+ * `@fury_ios/nanoclaw-paperclip-adapter@0.1.3/src/wake.ts:pollForResult` —
+ * with an EMPTY rawBody (GET has no body).
+ */
+function signGetHeaders(secret: string, ts: number): Record<string, string> {
+  return {
+    'x-paperclip-timestamp': String(ts),
+    'x-paperclip-signature': computeSignature(secret, ts, ''),
+  };
 }
 
 async function withServer<T>(
@@ -55,16 +53,17 @@ async function withServer<T>(
 }
 
 describe('createWakeStore', () => {
-  it('records and retrieves a wake by runId', () => {
+  it('records and retrieves a wake by runId in "running" state', () => {
     const store = createWakeStore({ now: () => 1000 });
     store.recordWake({ runId: 'r1', agentId: 'a1' });
     const rec = store.get('r1');
     expect(rec).toMatchObject({
       runId: 'r1',
       agentId: 'a1',
-      status: 'pending',
+      status: 'running',
       startedAt: 1000,
       finishedAt: null,
+      exitCode: null,
     });
   });
 
@@ -83,24 +82,37 @@ describe('createWakeStore', () => {
     expect(store.get('r1')?.startedAt).toBe(1000);
   });
 
-  it('markDone moves pending → done with finishedAt', () => {
+  it('markDone moves running → done with exitCode=0 and finishedAt', () => {
     let t = 1000;
     const store = createWakeStore({ now: () => t });
     store.recordWake({ runId: 'r1' });
     t = 2500;
-    store.markDone('r1');
+    store.markDone('r1', { summary: 'all good' });
     const rec = store.get('r1');
     expect(rec?.status).toBe('done');
+    expect(rec?.exitCode).toBe(0);
     expect(rec?.finishedAt).toBe(2500);
+    expect(rec?.summary).toBe('all good');
   });
 
-  it('markError moves pending → error with message', () => {
+  it('markError moves running → error with exitCode=1', () => {
     const store = createWakeStore({ now: () => 1000 });
     store.recordWake({ runId: 'r1' });
     store.markError('r1', 'boom');
     const rec = store.get('r1');
     expect(rec?.status).toBe('error');
-    expect(rec?.error).toBe('boom');
+    expect(rec?.exitCode).toBe(1);
+    expect(rec?.errorMessage).toBe('boom');
+  });
+
+  it('markTerminal with timeout defaults timedOut=true', () => {
+    const store = createWakeStore({ now: () => 1000 });
+    store.recordWake({ runId: 'r1' });
+    store.markTerminal('r1', { status: 'timeout' });
+    const rec = store.get('r1');
+    expect(rec?.status).toBe('timeout');
+    expect(rec?.timedOut).toBe(true);
+    expect(rec?.exitCode).toBe(1);
   });
 
   it('does not re-transition a terminal run', () => {
@@ -154,9 +166,10 @@ describe('paperclip-runs handler', () => {
       expect(body).toMatchObject({
         runId: 'r1',
         agentId: 'a1',
-        status: 'pending',
+        status: 'running',
         startedAt: 5000,
         finishedAt: null,
+        exitCode: null,
       });
     });
   });
@@ -173,20 +186,41 @@ describe('paperclip-runs handler', () => {
     });
   });
 
-  it('accepts HMAC signature over METHOD.path (no body)', async () => {
+  it('accepts adapter-shaped HMAC signature over empty body', async () => {
     const store = createWakeStore({ now: () => 1700000000_000 });
     store.recordWake({ runId: 'r2' });
     await withServer(
       { secret: SECRET, store, now: () => 1700000000_000 },
       async (baseUrl) => {
         const ts = 1700000000;
-        const path = `${RUNS_PATH_PREFIX}r2`;
-        const res = await fetch(`${baseUrl}${path}`, {
-          headers: {
-            'x-paperclip-signature': sigHeader(SECRET, ts, 'GET', path),
-          },
+        const res = await fetch(`${baseUrl}${RUNS_PATH_PREFIX}r2`, {
+          headers: signGetHeaders(SECRET, ts),
         });
         expect(res.status).toBe(200);
+      },
+    );
+  });
+
+  it('rejects HMAC where signature was computed over non-empty body', async () => {
+    const store = createWakeStore({ now: () => 1700000000_000 });
+    store.recordWake({ runId: 'r2b' });
+    await withServer(
+      { secret: SECRET, store, now: () => 1700000000_000 },
+      async (baseUrl) => {
+        const ts = 1700000000;
+        // Simulate a broken client that signs over "GET./paperclip/runs/r2b"
+        // instead of empty body — must be rejected.
+        const res = await fetch(`${baseUrl}${RUNS_PATH_PREFIX}r2b`, {
+          headers: {
+            'x-paperclip-timestamp': String(ts),
+            'x-paperclip-signature': computeSignature(
+              SECRET,
+              ts,
+              `GET.${RUNS_PATH_PREFIX}r2b`,
+            ),
+          },
+        });
+        expect(res.status).toBe(401);
       },
     );
   });
@@ -203,15 +237,37 @@ describe('paperclip-runs handler', () => {
       },
       async (baseUrl) => {
         const ts = 1700000000 - 120;
-        const path = `${RUNS_PATH_PREFIX}r3`;
-        const res = await fetch(`${baseUrl}${path}`, {
-          headers: {
-            'x-paperclip-signature': sigHeader(SECRET, ts, 'GET', path),
-          },
+        const res = await fetch(`${baseUrl}${RUNS_PATH_PREFIX}r3`, {
+          headers: signGetHeaders(SECRET, ts),
         });
         expect(res.status).toBe(401);
       },
     );
+  });
+
+  it('terminal record surfaces exitCode + summary to the adapter response', async () => {
+    const store = createWakeStore({ now: () => 1000 });
+    store.recordWake({ runId: 'r4', agentId: 'a' });
+    store.markDone('r4', {
+      summary: 'ok',
+      sessionDisplayId: 'sess-1',
+      sessionParams: { foo: 'bar' },
+    });
+    await withServer({ secret: SECRET, store }, async (baseUrl) => {
+      const res = await fetch(`${baseUrl}${RUNS_PATH_PREFIX}r4`, {
+        headers: { authorization: `Bearer ${SECRET}` },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body).toMatchObject({
+        runId: 'r4',
+        status: 'done',
+        exitCode: 0,
+        summary: 'ok',
+        sessionDisplayId: 'sess-1',
+      });
+      expect(body.sessionParams).toEqual({ foo: 'bar' });
+    });
   });
 
   it('rejects wrong bearer', async () => {
