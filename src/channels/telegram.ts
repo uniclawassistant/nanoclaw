@@ -2,7 +2,7 @@ import fs from 'fs';
 import https from 'https';
 import path from 'path';
 
-import { Api, Bot, InputFile } from 'grammy';
+import { Api, Bot } from 'grammy';
 
 import { execSync } from 'child_process';
 
@@ -544,28 +544,6 @@ export class TelegramChannel implements Channel {
       this.bot.stop();
       this.bot = null;
       logger.info('Telegram bot stopped');
-    }
-  }
-
-  async sendVoice(
-    jid: string,
-    audio: Buffer,
-    threadId?: string,
-  ): Promise<void> {
-    if (!this.bot) return;
-    try {
-      const numericId = jid.replace(/^tg:/, '');
-      const options = threadId
-        ? { message_thread_id: parseInt(threadId, 10) }
-        : {};
-      await this.bot.api.sendVoice(
-        numericId,
-        new InputFile(audio, 'voice.ogg'),
-        options,
-      );
-      logger.info({ jid }, 'Telegram voice message sent');
-    } catch (err) {
-      logger.error({ jid, err }, 'Failed to send Telegram voice message');
     }
   }
 

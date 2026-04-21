@@ -61,7 +61,6 @@ import {
   startPaperclipWakeServer,
 } from './paperclip-wake.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
-import { extractTtsDirective, synthesize } from './tts.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -90,17 +89,6 @@ let paperclipWakeServer: import('http').Server | null = null;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
-
-async function sendWithTts(channel: Channel, jid: string, text: string): Promise<void> {
-  const directive = extractTtsDirective(text);
-  if (directive && channel.sendVoice) {
-    const audio = await synthesize(directive.ttsText);
-    if (audio) await channel.sendVoice(jid, audio);
-    if (directive.cleanText) await channel.sendMessage(jid, directive.cleanText);
-  } else {
-    await channel.sendMessage(jid, text);
-  }
-}
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
@@ -318,7 +306,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
-        await sendWithTts(channel, chatJid, text);
+        await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -851,14 +839,14 @@ async function main(): Promise<void> {
         return;
       }
       const text = formatOutbound(rawText);
-      if (text) await sendWithTts(channel, jid, text);
+      if (text) await channel.sendMessage(jid, text);
     },
   });
   startIpcWatcher({
     sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return sendWithTts(channel, jid, text);
+      return channel.sendMessage(jid, text);
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
