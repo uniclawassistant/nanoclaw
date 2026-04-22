@@ -87,20 +87,26 @@ async function sleep(ms: number): Promise<void> {
 
 server.tool(
   'react',
-  `Set or clear an emoji reaction on a Telegram message. Useful as a lightweight signal that you've received a request and it's being processed (e.g. 👀 while working, ✅ when done), instead of sending a noisy chat message.
+  `Set or clear an emoji reaction on a Telegram message. Useful as a lightweight signal that you've received a request and it's being processed (e.g. 👀 while working, 👌 when done), instead of sending a noisy chat message.
 
 WHEN TO USE:
 • Task will take more than a couple of seconds — react with 👀 so the user sees you've picked it up.
-• Replace with a different emoji to signal state changes (👀 → ✅ for success, 👀 → 💔 for failure, 👀 → 🤔 to ask for clarification).
-• Pass \`emoji: null\` to remove the reaction entirely when no follow-up signal is needed.
+• Replace with a different emoji to signal state changes (👀 → 👌 for done, 👀 → 💔 for failure, 👀 → 🤔 to ask for clarification).
+• Pass \`emoji: null\` (JSON null, or empty string "") to remove the reaction entirely when no follow-up signal is needed. Any other value is validated against the allowlist.
+
+DONE-EMOJI HINT: ✅ is NOT in the Telegram-bot-allowed list. For "done" use one of: 👌 (got it) / 🫡 (on it) / 💯 (solid) / ❤ (warm ack) / 🔥 (great).
+
+LIFECYCLE (important):
+• Use react within a single turn: \`react(👀)\` at the start, replace or \`react(null)\` before finishing the same response.
+• The \`message_id\` fallback resolves to the most recent incoming user message on the host side. If the user sent another message between your 👀 and your clear/replace, a cross-turn call without explicit \`message_id\` will hit the NEW message, leaving the old 👀 orphaned. For any cross-turn use, pass \`message_id\` explicitly (the tool returns it in the success response so you can persist it).
 
 GROUP CHATS: you MUST pass \`message_id\` explicitly in group chats. Without it the fallback picks the most recent non-bot message, which may be from someone else while you were working. In 1-on-1 DMs the fallback is safe.
 
 LIMITATIONS:
 • Telegram only. Other channels will return an error.
-• Only emoji from the Telegram-bot-allowed list (👍 ❤ 🔥 🎉 🤔 👀 …). Unknown emoji returns an error.
+• Only emoji from the Telegram-bot-allowed list (👍 ❤ 🔥 👀 🎉 🤔 👌 🫡 💯 …). Unknown emoji returns an error.
 • This tool is for your (the agent's) own use. Do not call it from hooks or automation.
-• Replacing 👀 with ✅ is one call — do not remove then add separately.`,
+• Replacing 👀 with 👌 is one call — do not remove then add separately.`,
   {
     emoji: z
       .string()
@@ -156,10 +162,14 @@ LIMITATIONS:
           const resp = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
           fs.unlinkSync(responsePath);
           if (resp.success) {
+            const idSuffix =
+              typeof resp.message_id === 'string'
+                ? ` on message ${resp.message_id}`
+                : '';
             const summary =
               emoji === null
-                ? 'Reaction removed.'
-                : `Reaction set to ${emoji}.`;
+                ? `Reaction cleared${idSuffix}.`
+                : `Reaction ${emoji} set${idSuffix}.`;
             return {
               content: [{ type: 'text' as const, text: summary }],
             };

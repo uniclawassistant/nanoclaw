@@ -795,6 +795,7 @@ async function main(): Promise<void> {
         }
       }
       await channel.setReaction(jid, resolvedId, emoji);
+      return resolvedId;
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

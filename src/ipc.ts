@@ -16,7 +16,7 @@ export interface IpcDeps {
     jid: string,
     messageId: string | null,
     emoji: string | null,
-  ) => Promise<void>;
+  ) => Promise<string>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -35,7 +35,7 @@ const RESPONSE_TTL_MS = 60_000;
 function writeIpcResponse(
   responsesDir: string,
   requestId: string,
-  payload: { success: boolean; error?: string },
+  payload: { success: boolean; error?: string; message_id?: string },
 ): void {
   fs.mkdirSync(responsesDir, { recursive: true });
   const responsePath = path.join(responsesDir, `${requestId}.json`);
@@ -174,7 +174,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   });
                 } else {
                   try {
-                    await deps.setReaction(
+                    const resolvedMessageId = await deps.setReaction(
                       data.chatJid,
                       typeof data.message_id === 'string'
                         ? data.message_id
@@ -186,11 +186,13 @@ export function startIpcWatcher(deps: IpcDeps): void {
                         chatJid: data.chatJid,
                         sourceGroup,
                         emoji: data.emoji,
+                        messageId: resolvedMessageId,
                       },
                       'IPC reaction applied',
                     );
                     writeIpcResponse(responsesDir, data.requestId, {
                       success: true,
+                      message_id: resolvedMessageId,
                     });
                   } catch (err) {
                     const errMsg =

@@ -674,6 +674,10 @@ export class TelegramChannel implements Channel {
     const normalizedEmoji = emoji === '' ? null : emoji;
     const cacheKey = `${jid}:${messageId}`;
     if (this.lastReactions.get(cacheKey) === normalizedEmoji) {
+      logger.debug(
+        { jid, messageId, emoji: normalizedEmoji },
+        'Telegram reaction idempotent cache hit, skipping API',
+      );
       return;
     }
 
@@ -696,6 +700,10 @@ export class TelegramChannel implements Channel {
       : [];
 
     await this.bot.api.setMessageReaction(numericId, numMsgId, reaction);
+    logger.info(
+      { jid, messageId, emoji: normalizedEmoji },
+      'Telegram reaction API called',
+    );
 
     if (this.lastReactions.has(cacheKey)) {
       this.lastReactions.delete(cacheKey);
