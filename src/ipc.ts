@@ -17,6 +17,7 @@ export interface IpcDeps {
     messageId: string | null,
     emoji: string | null,
   ) => Promise<string>;
+  autoClearEyeReaction?: (jid: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -144,6 +145,32 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
                   );
+                }
+              } else if (
+                data.type === 'auto_clear_eye' &&
+                typeof data.chatJid === 'string'
+              ) {
+                const targetGroup = registeredGroups[data.chatJid];
+                const authorized =
+                  isMain || (targetGroup && targetGroup.folder === sourceGroup);
+                if (!authorized) {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC auto_clear_eye attempt blocked',
+                  );
+                } else if (deps.autoClearEyeReaction) {
+                  try {
+                    await deps.autoClearEyeReaction(data.chatJid);
+                  } catch (err) {
+                    logger.warn(
+                      {
+                        chatJid: data.chatJid,
+                        sourceGroup,
+                        err: err instanceof Error ? err.message : String(err),
+                      },
+                      'IPC auto_clear_eye failed',
+                    );
+                  }
                 }
               } else if (
                 data.type === 'reaction' &&

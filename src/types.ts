@@ -108,6 +108,10 @@ export interface Channel {
     messageId: string,
     emoji: string | null,
   ): Promise<void>;
+  // Optional: read the cached last-set reaction for a message.
+  // Returns `undefined` if no state has been recorded (never set by this process),
+  // `null` if explicitly cleared, or the emoji string if currently set.
+  getCachedReaction?(jid: string, messageId: string): string | null | undefined;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
 }
