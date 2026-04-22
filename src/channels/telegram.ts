@@ -22,7 +22,7 @@ import {
 } from '../types.js';
 
 const ALLOWED_REACTIONS: ReadonlySet<string> = new Set(allowedReactions);
-const REACTION_CACHE_CAP = 1000;
+const REACTION_CACHE_CAP = 5000;
 
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
@@ -625,6 +625,10 @@ export class TelegramChannel implements Channel {
       if (oldestKey === undefined) break;
       this.lastReactions.delete(oldestKey);
     }
+  }
+
+  getCachedReaction(jid: string, messageId: string): string | null | undefined {
+    return this.lastReactions.get(`${jid}:${messageId}`);
   }
 
   isConnected(): boolean {

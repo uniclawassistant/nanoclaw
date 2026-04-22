@@ -157,6 +157,38 @@ function getSessionSummary(
 }
 
 /**
+ * Auto-clear 👀 on turn end. Writes a fire-and-forget IPC request to the host,
+ * which checks the cached reaction state and clears it only if it's still 👀.
+ * Non-👀 reactions (explicit done-signals set by the agent) are left as-is.
+ */
+function createAutoClearEyeHook(containerInput: ContainerInput): HookCallback {
+  const ipcDir = '/workspace/ipc/messages';
+  return async () => {
+    try {
+      fs.mkdirSync(ipcDir, { recursive: true });
+      const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+      const filepath = path.join(ipcDir, filename);
+      const tempPath = `${filepath}.tmp`;
+      fs.writeFileSync(
+        tempPath,
+        JSON.stringify({
+          type: 'auto_clear_eye',
+          chatJid: containerInput.chatJid,
+          groupFolder: containerInput.groupFolder,
+          timestamp: new Date().toISOString(),
+        }),
+      );
+      fs.renameSync(tempPath, filepath);
+    } catch (err) {
+      log(
+        `[stop hook] auto_clear_eye IPC write failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return {};
+  };
+}
+
+/**
  * Archive the full transcript to conversations/ before compaction.
  */
 function createPreCompactHook(assistantName?: string): HookCallback {
@@ -439,6 +471,7 @@ async function runQuery(
     prompt: stream,
     options: {
       model: 'claude-opus-4-6',
+      maxThinkingTokens: 16000,
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
@@ -490,6 +523,7 @@ async function runQuery(
         PreCompact: [
           { hooks: [createPreCompactHook(containerInput.assistantName)] },
         ],
+        Stop: [{ hooks: [createAutoClearEyeHook(containerInput)] }],
       },
     },
   })) {
@@ -626,7 +660,7 @@ async function main(): Promise<void> {
   // No real secrets exist in the container environment.
   const sdkEnv: Record<string, string | undefined> = {
     ...process.env,
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '165000',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '900000',
   };
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
