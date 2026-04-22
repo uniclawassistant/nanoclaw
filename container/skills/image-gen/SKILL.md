@@ -46,11 +46,35 @@ The path **must** come from the system hint shown above. Do not guess paths or t
 
 If multiple images are in flight and the user is asking about one that isn't the most recent, ask them to reply (Telegram reply) to the specific preview message — for now, when in doubt, just send the most recent original and confirm in text whether that's the right one.
 
-## Rules
+## Message layout: tag in its own message, never mixed with text
 
-- One image tag per message. Put it on its own line for clarity.
-- Any text outside the tag is sent as a regular text message alongside the photo/document.
-- Tags can be combined with `[[tts]]` — image is processed first, then TTS runs on remaining text.
+**Important.** Put each `[[image:]]` / `[[image-edit:]]` / `[[image-file:]]` tag in a **separate assistant message**, with no surrounding text in the same message. The host strips the tag from the text before sending; if any text was alongside it in the same message, you get visible "holes" (empty lines / dangling whitespace) in the chat where the tag used to be.
+
+❌ **Anti-pattern** — tag mixed with text in one message:
+
+```
+Вот тебе обложка, попробую в нуарной эстетике:
+[[image: dramatic noir portrait of a photographer]]
+Жду реакцию!
+```
+→ chat sees: `Вот тебе обложка, попробую в нуарной эстетике:\n\n\nЖду реакцию!` with a visible empty gap.
+
+✅ **Correct** — split into two assistant messages within the same turn (a `tool_use` between them, e.g. a `react` call, makes Claude actually emit two separate text blocks):
+
+```
+Message 1 (text only):  Вот тебе обложка, в нуарной эстетике. Сейчас прилетит.
+(tool_use here — react / TodoWrite / anything)
+Message 2 (tag only):   [[image: dramatic noir portrait of a photographer]]
+```
+
+When a message contains **only** a tag and nothing else, the cleaned text after stripping is empty, the host sends nothing visible from that message, and just the photo/document arrives — clean.
+
+The same rule applies to `[[tts:]]` and any other host-side strip-tag: **tag-only messages = clean delivery, mixed messages = visible holes**.
+
+## Other rules
+
+- One image tag per message (host only matches the first).
+- Tags can be combined with `[[tts]]` across messages — image is processed in its message, TTS in its message, both run independently.
 - Generated images are saved as `attachments/image_<timestamp>.png` (original) and `attachments/image_<timestamp>.jpg` (preview that ships to chat).
 - If generation fails (API error, missing source file, network), the tag is silently dropped and only the text part is sent.
 - If JPEG conversion fails (sips not available or errors), the host falls back to sending the PNG directly as photo — you don't need to handle this.
