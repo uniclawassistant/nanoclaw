@@ -700,6 +700,40 @@ export class TelegramChannel implements Channel {
     logger.error({ jid }, 'Failed to send Telegram photo after 3 attempts');
   }
 
+  async sendDocument(
+    jid: string,
+    filePath: string,
+    caption?: string,
+    threadId?: string,
+  ): Promise<void> {
+    if (!this.bot) return;
+    const numericId = jid.replace(/^tg:/, '');
+    const options: Record<string, unknown> = {};
+    if (caption) options.caption = caption;
+    if (threadId) options.message_thread_id = parseInt(threadId, 10);
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await this.bot.api.sendDocument(
+          numericId,
+          new InputFile(fs.readFileSync(filePath), path.basename(filePath)),
+          options,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          AbortSignal.timeout(120_000) as any,
+        );
+        logger.info({ jid }, 'Telegram document sent');
+        return;
+      } catch (err) {
+        logger.warn({ jid, attempt, err }, 'sendDocument attempt failed');
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    logger.error(
+      { jid },
+      'Failed to send Telegram document after 3 attempts',
+    );
+  }
+
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
     if (!this.bot || !isTyping) return;
     try {

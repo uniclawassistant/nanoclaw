@@ -100,6 +100,13 @@ export interface Channel {
     caption?: string,
     threadId?: string,
   ): Promise<void>;
+  // Optional: send a file as a document (no compression by Telegram).
+  sendDocument?(
+    jid: string,
+    filePath: string,
+    caption?: string,
+    threadId?: string,
+  ): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: set a reaction on a message. `emoji: null` removes the reaction.

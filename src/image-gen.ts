@@ -1,22 +1,41 @@
+import { execFile } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { promisify } from 'util';
 
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
+const execFileP = promisify(execFile);
+
 export interface ImageDirective {
-  type: 'generate' | 'edit';
+  type: 'generate' | 'edit' | 'file';
   prompt: string;
-  sourcePath?: string; // For edit: relative path within group dir
+  sourcePath?: string; // For edit: relative path within group dir. For file: relative path to existing image.
   cleanText: string;
+}
+
+export interface ImageGenResult {
+  previewPath: string; // jpeg if conversion succeeded, otherwise the original png — this is what ships as photo
+  originalPath: string; // the untouched png file — for [[image-file: ...]] follow-ups
 }
 
 // [[image: prompt text here]]
 const IMAGE_GEN_RE = /\[\[image:\s*([\s\S]*?)\]\]/i;
 // [[image-edit: path/to/source.jpg | prompt text here]]
 const IMAGE_EDIT_RE = /\[\[image-edit:\s*([\s\S]*?)\]\]/i;
+// [[image-file: path/to/file.png]]
+const IMAGE_FILE_RE = /\[\[image-file:\s*([\s\S]*?)\]\]/i;
 
 export function extractImageDirective(text: string): ImageDirective | null {
+  const fileMatch = text.match(IMAGE_FILE_RE);
+  if (fileMatch) {
+    const sourcePath = fileMatch[1].trim();
+    if (!sourcePath) return null;
+    const cleanText = text.replace(IMAGE_FILE_RE, '').trim();
+    return { type: 'file', prompt: '', sourcePath, cleanText };
+  }
+
   const editMatch = text.match(IMAGE_EDIT_RE);
   if (editMatch) {
     const inner = editMatch[1].trim();
@@ -45,10 +64,36 @@ function getApiKey(): string | undefined {
   return process.env.OPENAI_TTS_API_KEY || env.OPENAI_TTS_API_KEY;
 }
 
+/**
+ * Convert PNG → JPEG (q=85) via macOS native sips. Returns the jpeg path on
+ * success, null on failure. The png is left untouched on disk.
+ */
+async function convertToJpegPreview(pngPath: string): Promise<string | null> {
+  const jpegPath = pngPath.replace(/\.png$/i, '.jpg');
+  try {
+    await execFileP('sips', [
+      '-s',
+      'format',
+      'jpeg',
+      '-s',
+      'formatOptions',
+      '85',
+      pngPath,
+      '--out',
+      jpegPath,
+    ]);
+    fs.statSync(jpegPath); // assert the file exists, throw otherwise
+    return jpegPath;
+  } catch (err) {
+    logger.warn({ err, pngPath }, 'sips conversion failed, falling back to PNG');
+    return null;
+  }
+}
+
 export async function generateImage(
   prompt: string,
   attachmentsDir: string,
-): Promise<string | null> {
+): Promise<ImageGenResult | null> {
   const apiKey = getApiKey();
   if (!apiKey) {
     logger.warn('Image gen: no OPENAI_TTS_API_KEY configured');
@@ -96,21 +141,33 @@ export async function generateImage(
 
   fs.mkdirSync(attachmentsDir, { recursive: true });
   const filename = `image_${Date.now()}.png`;
-  const filePath = path.join(attachmentsDir, filename);
+  const pngPath = path.join(attachmentsDir, filename);
   const buf = Buffer.from(b64, 'base64');
-  fs.writeFileSync(filePath, buf);
+  fs.writeFileSync(pngPath, buf);
+
+  const jpegPath = await convertToJpegPreview(pngPath);
+  const previewPath = jpegPath ?? pngPath;
+  const previewBytes = fs.statSync(previewPath).size;
+
   logger.info(
-    { filePath, bytes: buf.length, promptLen: prompt.length },
+    {
+      pngPath,
+      pngBytes: buf.length,
+      previewPath,
+      previewBytes,
+      jpegConverted: jpegPath !== null,
+      promptLen: prompt.length,
+    },
     'Image generated',
   );
-  return filePath;
+  return { previewPath, originalPath: pngPath };
 }
 
 export async function editImage(
   sourcePath: string,
   prompt: string,
   attachmentsDir: string,
-): Promise<string | null> {
+): Promise<ImageGenResult | null> {
   const apiKey = getApiKey();
   if (!apiKey) {
     logger.warn('Image edit: no OPENAI_TTS_API_KEY configured');
@@ -166,12 +223,25 @@ export async function editImage(
 
   fs.mkdirSync(attachmentsDir, { recursive: true });
   const filename = `image_${Date.now()}.png`;
-  const filePath = path.join(attachmentsDir, filename);
+  const pngPath = path.join(attachmentsDir, filename);
   const buf = Buffer.from(b64, 'base64');
-  fs.writeFileSync(filePath, buf);
+  fs.writeFileSync(pngPath, buf);
+
+  const jpegPath = await convertToJpegPreview(pngPath);
+  const previewPath = jpegPath ?? pngPath;
+  const previewBytes = fs.statSync(previewPath).size;
+
   logger.info(
-    { filePath, bytes: buf.length, sourcePath, promptLen: prompt.length },
+    {
+      pngPath,
+      pngBytes: buf.length,
+      previewPath,
+      previewBytes,
+      jpegConverted: jpegPath !== null,
+      sourcePath,
+      promptLen: prompt.length,
+    },
     'Image edited',
   );
-  return filePath;
+  return { previewPath, originalPath: pngPath };
 }
