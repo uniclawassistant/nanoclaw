@@ -52,6 +52,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { autoClearEyeIfSet } from './auto-clear-eye.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -796,6 +797,17 @@ async function main(): Promise<void> {
       }
       await channel.setReaction(jid, resolvedId, emoji);
       return resolvedId;
+    },
+    autoClearEyeReaction: async (jid) => {
+      const channel = findChannel(channels, jid);
+      const cleared = await autoClearEyeIfSet(
+        channel,
+        getLastUserMessageId,
+        jid,
+      );
+      if (cleared) {
+        logger.info({ jid }, 'Auto-cleared 👀 reaction on turn end');
+      }
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

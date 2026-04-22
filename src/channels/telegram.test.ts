@@ -1274,7 +1274,7 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       await channel.connect();
 
-      for (let i = 0; i < 1005; i++) {
+      for (let i = 0; i < 5005; i++) {
         await channel.setReaction('tg:100200300', String(i), '👀');
       }
 
@@ -1285,8 +1285,53 @@ describe('TelegramChannel', () => {
 
       // Last insert still cached — idempotent no-op
       currentBot().api.setMessageReaction.mockClear();
-      await channel.setReaction('tg:100200300', '1004', '👀');
+      await channel.setReaction('tg:100200300', '5004', '👀');
       expect(currentBot().api.setMessageReaction).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- getCachedReaction ---
+
+  describe('getCachedReaction', () => {
+    it('returns undefined when no reaction has been set', () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      expect(channel.getCachedReaction('tg:100200300', '42')).toBeUndefined();
+    });
+
+    it('returns the emoji after setReaction', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      await channel.setReaction('tg:100200300', '42', '👀');
+
+      expect(channel.getCachedReaction('tg:100200300', '42')).toBe('👀');
+    });
+
+    it('returns null after setReaction(null)', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      await channel.setReaction('tg:100200300', '42', null);
+
+      expect(channel.getCachedReaction('tg:100200300', '42')).toBeNull();
+    });
+
+    it('reflects replacement (👀 → 👌)', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      await channel.setReaction('tg:100200300', '42', '👀');
+      await channel.setReaction('tg:100200300', '42', '👌');
+
+      expect(channel.getCachedReaction('tg:100200300', '42')).toBe('👌');
+    });
+
+    it('scoped by (jid, messageId) — independent keys', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      await channel.setReaction('tg:100200300', '42', '👀');
+      await channel.setReaction('tg:100200300', '43', '👌');
+
+      expect(channel.getCachedReaction('tg:100200300', '42')).toBe('👀');
+      expect(channel.getCachedReaction('tg:100200300', '43')).toBe('👌');
+      expect(channel.getCachedReaction('tg:999', '42')).toBeUndefined();
     });
   });
 });
