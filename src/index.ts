@@ -100,26 +100,41 @@ async function sendWithTts(
     const imgDirective = extractImageDirective(text);
     if (imgDirective) {
       const attachmentsDir = path.join(GROUPS_DIR, groupFolder, 'attachments');
-      let imagePath: string | null = null;
 
-      if (imgDirective.type === 'generate') {
-        imagePath = await generateImage(imgDirective.prompt, attachmentsDir);
-      } else if (imgDirective.sourcePath) {
-        const sourceFull = path.join(
-          GROUPS_DIR,
-          groupFolder,
-          imgDirective.sourcePath,
-        );
-        imagePath = await editImage(
-          sourceFull,
-          imgDirective.prompt,
-          attachmentsDir,
-        );
-      }
-
-      if (imagePath && channel.sendPhoto) {
-        await channel.sendPhoto(jid, imagePath, undefined, threadId);
-      }
+      // Fire-and-forget: generation + delivery run in the background so the
+      // agent loop is not blocked by OpenAI latency or Telegram retries (can
+      // add up to several minutes in the worst case). Text ships immediately
+      // through the TTS branch below; the photo lands when it lands.
+      void (async () => {
+        try {
+          let imagePath: string | null = null;
+          if (imgDirective.type === 'generate') {
+            imagePath = await generateImage(
+              imgDirective.prompt,
+              attachmentsDir,
+            );
+          } else if (imgDirective.sourcePath) {
+            const sourceFull = path.join(
+              GROUPS_DIR,
+              groupFolder,
+              imgDirective.sourcePath,
+            );
+            imagePath = await editImage(
+              sourceFull,
+              imgDirective.prompt,
+              attachmentsDir,
+            );
+          }
+          if (imagePath && channel.sendPhoto) {
+            await channel.sendPhoto(jid, imagePath, undefined, threadId);
+          }
+        } catch (err) {
+          logger.error(
+            { err, jid, type: imgDirective.type },
+            'Async image delivery failed',
+          );
+        }
+      })();
 
       text = imgDirective.cleanText;
       if (!text) return;
