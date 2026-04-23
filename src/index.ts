@@ -121,9 +121,13 @@ async function sendImageGenFailureSignal(
   threadId: string | undefined,
   groupFolder: string | undefined,
   outcome: Extract<Awaited<ReturnType<typeof generateImage>>, { ok: false }>,
+  isEdit: boolean,
 ): Promise<void> {
-  // 'transient' (network, 5xx, 429, missing b64) is pure noise for the agent.
-  if (outcome.reason === 'transient') return;
+  // For generate, transient (5xx/429/network) is pure noise — the user
+  // hasn't seen an artifact yet, agent can retry silently. For edit, the
+  // user ALREADY has a preview and expects a new one — silent drop leaves
+  // them staring at nothing. Signal on edit-transient only.
+  if (outcome.reason === 'transient' && !isEdit) return;
 
   let body: string;
   if (outcome.reason === 'moderation') {
@@ -136,6 +140,13 @@ async function sendImageGenFailureSignal(
     // generation.original_png_path for any preview it has sent.
     const detail = outcome.message ?? 'Source file not found';
     body = `[host] Image edit failed: ${detail}. Call get_message on the preview you want to edit to get the correct generation.original_png_path, or verify the file exists under attachments/.`;
+  } else if (outcome.reason === 'transient') {
+    // Only reachable for isEdit === true (gated above). Network blip or
+    // timeout on the edit call — source file is fine, agent should retry.
+    // If it fails again, smaller size/quality/format will cut compute
+    // time and fall under our clamp.
+    body =
+      '[host] Image edit timed out or network blipped. The source file is intact — retry the same tag. If it fails again, drop size/quality (high + large + png is slow and can exceed our 10-min ceiling).';
   } else {
     const codeHint = outcome.code ? ` reason: ${outcome.code}` : '';
     body = `[host] OpenAI declined image generation (${codeHint.trim() || 'user error'}). Adjust the request and try again.`;
@@ -294,6 +305,7 @@ export async function sendWithTts(
                 threadId,
                 groupFolder,
                 outcome,
+                imgDirective.type === 'edit',
               );
               return;
             }
