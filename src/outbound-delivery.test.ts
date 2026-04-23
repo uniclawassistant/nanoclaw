@@ -71,7 +71,10 @@ beforeEach(() => {
   storeChatMetadata('tg:123', '2026-04-23T00:00:00.000Z');
   storeChatMetadata('tg:1', '2026-04-23T00:00:00.000Z');
   vi.clearAllMocks();
-  const base = path.join(os.tmpdir(), `nanoclaw-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const base = path.join(
+    os.tmpdir(),
+    `nanoclaw-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
   tmpPreview = `${base}.jpg`;
   tmpOriginal = `${base}.png`;
   fs.writeFileSync(tmpPreview, Buffer.alloc(1024));
@@ -150,11 +153,10 @@ describe('sendWithTts — image tag dispatch (fix for IPC/scheduler silent-drop)
     );
 
     await vi.waitFor(() => {
-      expect(generateImage).toHaveBeenCalledWith(
-        'a cat',
-        expect.any(String),
-        ['portrait', 'hd'],
-      );
+      expect(generateImage).toHaveBeenCalledWith('a cat', expect.any(String), [
+        'portrait',
+        'hd',
+      ]);
     });
   });
 
