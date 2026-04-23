@@ -40,6 +40,7 @@ import {
   getAllTasks,
   getLastBotMessageTimestamp,
   getLastUserMessageId,
+  getMessageById,
   getMessagesSince,
   getNewMessages,
   getRouterState,
@@ -49,6 +50,7 @@ import {
   setSession,
   storeChatMetadata,
   storeMessage,
+  storeOutgoingMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
@@ -86,21 +88,45 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-// Per-group: relative path (within group folder) of the most recently-generated
-// PNG original. Used to inject a system hint into the next prompt so the agent
-// can answer "send me the original" with [[image-file: <path>]] without guessing.
-// In-memory only — clears on restart, replaced on each new generation.
-const lastImageOriginalByGroup = new Map<string, string>();
-
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
 function isPathWithinGroup(absPath: string, groupFolder: string): boolean {
   const groupRoot = path.resolve(GROUPS_DIR, groupFolder);
   const resolved = path.resolve(absPath);
-  return (
-    resolved === groupRoot || resolved.startsWith(groupRoot + path.sep)
-  );
+  return resolved === groupRoot || resolved.startsWith(groupRoot + path.sep);
+}
+
+function recordOutgoing(
+  jid: string,
+  messageId: string | undefined,
+  args: {
+    content: string;
+    messageType: 'text' | 'photo' | 'document' | 'voice' | 'video';
+    filePath?: string;
+    generation?: {
+      prompt: string;
+      preset?: string;
+      original_png_path: string;
+    };
+  },
+): void {
+  if (!messageId) return;
+  try {
+    storeOutgoingMessage({
+      id: messageId,
+      chat_jid: jid,
+      sender: ASSISTANT_NAME,
+      sender_name: ASSISTANT_NAME,
+      content: args.content,
+      timestamp: new Date().toISOString(),
+      message_type: args.messageType,
+      file_path: args.filePath ?? null,
+      generation: args.generation ?? null,
+    });
+  } catch (err) {
+    logger.warn({ err, jid, messageId }, 'Failed to record outgoing message');
+  }
 }
 
 async function sendWithTts(
@@ -124,17 +150,23 @@ async function sendWithTts(
             'image-file path escapes group folder, refusing',
           );
         } else {
+          const relSource = imgDirective.sourcePath;
           // Fire-and-forget document delivery — same backpressure rationale as
           // the photo branch below.
           void (async () => {
             try {
               if (channel.sendDocument) {
-                await channel.sendDocument(
+                const msgId = await channel.sendDocument(
                   jid,
                   sourceFull,
                   undefined,
                   threadId,
                 );
+                recordOutgoing(jid, msgId, {
+                  content: `[Document] (${relSource})`,
+                  messageType: 'document',
+                  filePath: relSource,
+                });
               }
             } catch (err) {
               logger.error(
@@ -149,15 +181,13 @@ async function sendWithTts(
         // agent loop is not blocked by OpenAI latency or Telegram retries (can
         // add up to several minutes in the worst case). Text ships immediately
         // through the TTS branch below; the photo lands when it lands.
+        const genPrompt = imgDirective.prompt;
         void (async () => {
           try {
             let result: { previewPath: string; originalPath: string } | null =
               null;
             if (imgDirective.type === 'generate') {
-              result = await generateImage(
-                imgDirective.prompt,
-                attachmentsDir,
-              );
+              result = await generateImage(imgDirective.prompt, attachmentsDir);
             } else if (
               imgDirective.type === 'edit' &&
               imgDirective.sourcePath
@@ -178,14 +208,26 @@ async function sendWithTts(
                 groupRootAbs,
                 result.originalPath,
               );
-              lastImageOriginalByGroup.set(groupFolder, relOriginal);
+              const relPreview = path.relative(
+                groupRootAbs,
+                result.previewPath,
+              );
               if (channel.sendPhoto) {
-                await channel.sendPhoto(
+                const msgId = await channel.sendPhoto(
                   jid,
                   result.previewPath,
                   undefined,
                   threadId,
                 );
+                recordOutgoing(jid, msgId, {
+                  content: `[Photo] (${relPreview})`,
+                  messageType: 'photo',
+                  filePath: relPreview,
+                  generation: {
+                    prompt: genPrompt,
+                    original_png_path: relOriginal,
+                  },
+                });
               }
             }
           } catch (err) {
@@ -205,11 +247,27 @@ async function sendWithTts(
   const directive = extractTtsDirective(text);
   if (directive && channel.sendVoice) {
     const audio = await synthesize(directive.ttsText);
-    if (audio) await channel.sendVoice(jid, audio, threadId);
-    if (directive.cleanText)
-      await channel.sendMessage(jid, directive.cleanText, threadId);
+    if (audio) {
+      const msgId = await channel.sendVoice(jid, audio, threadId);
+      recordOutgoing(jid, msgId, {
+        content: `[Voice] ${directive.ttsText}`,
+        messageType: 'voice',
+      });
+    }
+    if (directive.cleanText) {
+      const msgId = await channel.sendMessage(
+        jid,
+        directive.cleanText,
+        threadId,
+      );
+      recordOutgoing(jid, msgId, {
+        content: directive.cleanText,
+        messageType: 'text',
+      });
+    }
   } else {
-    await channel.sendMessage(jid, text, threadId);
+    const msgId = await channel.sendMessage(jid, text, threadId);
+    recordOutgoing(jid, msgId, { content: text, messageType: 'text' });
   }
 }
 
@@ -388,15 +446,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  let prompt = formatMessages(missedMessages, TIMEZONE);
-  const lastOriginal = lastImageOriginalByGroup.get(group.folder);
-  if (lastOriginal) {
-    // Prepend a system hint with the path to the most recently generated PNG
-    // so the agent can answer "send me the original" with [[image-file: ...]]
-    // without guessing or having to ls the attachments dir. Goes into the
-    // prompt only — never echoed back to the user.
-    prompt = `[system: last generated image original: ${lastOriginal}. if user asks for the original/file/uncompressed version, respond with [[image-file: ${lastOriginal}]]]\n\n${prompt}`;
-  }
+  const prompt = formatMessages(missedMessages, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -921,6 +971,7 @@ async function main(): Promise<void> {
         writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
       }
     },
+    getMessage: (messageId, jid) => getMessageById(messageId, jid),
   });
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);

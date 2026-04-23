@@ -5,7 +5,13 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import {
+  createTask,
+  deleteTask,
+  getTaskById,
+  MessageRecord,
+  updateTask,
+} from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -29,6 +35,7 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+  getMessage: (messageId: string, jid: string) => MessageRecord | null;
 }
 
 const RESPONSE_TTL_MS = 60_000;
@@ -36,7 +43,12 @@ const RESPONSE_TTL_MS = 60_000;
 function writeIpcResponse(
   responsesDir: string,
   requestId: string,
-  payload: { success: boolean; error?: string; message_id?: string },
+  payload: {
+    success: boolean;
+    error?: string;
+    message_id?: string;
+    data?: unknown;
+  },
 ): void {
   fs.mkdirSync(responsesDir, { recursive: true });
   const responsePath = path.join(responsesDir, `${requestId}.json`);
@@ -171,6 +183,65 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       'IPC auto_clear_eye failed',
                     );
                   }
+                }
+              } else if (
+                data.type === 'get_message' &&
+                typeof data.requestId === 'string' &&
+                typeof data.message_id === 'string'
+              ) {
+                const queryJid =
+                  typeof data.chatJid === 'string' && data.chatJid
+                    ? data.chatJid
+                    : null;
+                const responsesDir = path.join(
+                  ipcBaseDir,
+                  sourceGroup,
+                  'responses',
+                );
+                // Authorization: non-main callers may only read messages from
+                // their own chat. Main may query any JID.
+                let authorized = false;
+                let effectiveJid: string | null = queryJid;
+                if (queryJid) {
+                  if (isMain) {
+                    authorized = true;
+                  } else {
+                    const targetGroup = registeredGroups[queryJid];
+                    authorized =
+                      !!targetGroup && targetGroup.folder === sourceGroup;
+                  }
+                } else {
+                  // No jid — default to the caller's own chat
+                  const mine = Object.entries(registeredGroups).find(
+                    ([, g]) => g.folder === sourceGroup,
+                  );
+                  if (mine) {
+                    effectiveJid = mine[0];
+                    authorized = true;
+                  }
+                }
+
+                if (!authorized || !effectiveJid) {
+                  logger.warn(
+                    { queryJid, sourceGroup },
+                    'Unauthorized IPC get_message attempt blocked',
+                  );
+                  writeIpcResponse(responsesDir, data.requestId, {
+                    success: false,
+                    error: 'unauthorized',
+                  });
+                } else {
+                  const record = deps.getMessage(data.message_id, effectiveJid);
+                  writeIpcResponse(responsesDir, data.requestId, {
+                    success: true,
+                    data: record
+                      ? record
+                      : {
+                          found: false,
+                          message_id: data.message_id,
+                          chat_jid: effectiveJid,
+                        },
+                  });
                 }
               } else if (
                 data.type === 'reaction' &&

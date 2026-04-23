@@ -46,6 +46,7 @@ Read the allowed tools from your SDK configuration. You always have access to:
 The NanoClaw MCP server exposes these tools (via `mcp__nanoclaw__*` prefix):
 - `send_message` — send a message to the user/group
 - `react` — set/clear an emoji reaction on a Telegram message (👀 while working, ✅ when done)
+- `get_message` — look up a stored message by id (text, attachment path, image-gen prompt, …)
 - `schedule_task` — schedule a recurring or one-time task
 - `list_tasks` — list scheduled tasks
 - `pause_task` — pause a scheduled task
@@ -53,6 +54,17 @@ The NanoClaw MCP server exposes these tools (via `mcp__nanoclaw__*` prefix):
 - `cancel_task` — cancel and delete a task
 - `update_task` — update an existing task
 - `register_group` — register a new chat/group (main only)
+
+## Looking up a message by ID
+
+When you see `reply_to_<id>` in an incoming message and need to understand what the user is referring to, call `get_message({message_id: <id>})`. Returns the full record of that message: sender, text, attachment paths, and feature-specific metadata (e.g. the original prompt for images you previously generated).
+
+Use it for:
+- "what was the prompt for this image?" (user replied to a generated image)
+- "remind me what I wrote there" (user referring back to own text)
+- "send the original / re-attach that file" (combine with `[[image-file: <path>]]` using the returned `file_path` or `generation.original_png_path`)
+
+Don't spam calls — only query when the reply context is actually needed to answer.
 
 ### 4. Container skills (Bash tools)
 

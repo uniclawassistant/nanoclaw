@@ -55,6 +55,10 @@ export interface NewMessage {
   reply_to_message_id?: string;
   reply_to_message_content?: string;
   reply_to_sender_name?: string;
+  // Optional media metadata — set by channels that deliver attachments.
+  // Used by get_message to return attachment paths without parsing content.
+  message_type?: 'text' | 'photo' | 'document' | 'voice' | 'video' | 'sticker';
+  file_path?: string;
 }
 
 export interface ScheduledTask {
@@ -87,26 +91,37 @@ export interface TaskRunLog {
 export interface Channel {
   name: string;
   connect(): Promise<void>;
-  sendMessage(jid: string, text: string, threadId?: string): Promise<void>;
+  // Returns the channel-native message_id for the first delivered chunk, or
+  // undefined on failure. Used by the host to log outgoing messages for
+  // get_message recall.
+  sendMessage(
+    jid: string,
+    text: string,
+    threadId?: string,
+  ): Promise<string | undefined>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
   // Optional: send a voice message (OGG Opus buffer).
-  sendVoice?(jid: string, audio: Buffer, threadId?: string): Promise<void>;
+  sendVoice?(
+    jid: string,
+    audio: Buffer,
+    threadId?: string,
+  ): Promise<string | undefined>;
   // Optional: send a photo from a local file path.
   sendPhoto?(
     jid: string,
     filePath: string,
     caption?: string,
     threadId?: string,
-  ): Promise<void>;
+  ): Promise<string | undefined>;
   // Optional: send a file as a document (no compression by Telegram).
   sendDocument?(
     jid: string,
     filePath: string,
     caption?: string,
     threadId?: string,
-  ): Promise<void>;
+  ): Promise<string | undefined>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: set a reaction on a message. `emoji: null` removes the reaction.
