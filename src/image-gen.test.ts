@@ -31,9 +31,7 @@ describe('extractImageDirective — presets parsing', () => {
   });
 
   it('three presets: [[image:auto,hd,transparent: prompt]]', () => {
-    const d = extractImageDirective(
-      '[[image:auto,hd,transparent: a logo]]',
-    );
+    const d = extractImageDirective('[[image:auto,hd,transparent: a logo]]');
     expect(d?.presets).toEqual(['auto', 'hd', 'transparent']);
     expect(d?.prompt).toBe('a logo');
   });
