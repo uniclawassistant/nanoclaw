@@ -129,6 +129,13 @@ async function sendImageGenFailureSignal(
   if (outcome.reason === 'moderation') {
     body =
       '[host] OpenAI declined image generation (moderation). Rephrase the prompt and try again.';
+  } else if (outcome.reason === 'source_missing') {
+    // Agent-side pre-flight failure for image-edit: path is wrong / file
+    // got rotated / tag parsed weirdly and the path landed malformed.
+    // Nudge the agent toward get_message, which returns the canonical
+    // generation.original_png_path for any preview it has sent.
+    const detail = outcome.message ?? 'Source file not found';
+    body = `[host] Image edit failed: ${detail}. Call get_message on the preview you want to edit to get the correct generation.original_png_path, or verify the file exists under attachments/.`;
   } else {
     const codeHint = outcome.code ? ` reason: ${outcome.code}` : '';
     body = `[host] OpenAI declined image generation (${codeHint.trim() || 'user error'}). Adjust the request and try again.`;

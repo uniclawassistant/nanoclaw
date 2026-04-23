@@ -56,11 +56,7 @@ describe('extractImageDirective — presets parsing', () => {
     const d = extractImageDirective(
       '[[image:format=webp,compression=95,1024x1024: a logo]]',
     );
-    expect(d?.presets).toEqual([
-      'format=webp',
-      'compression=95',
-      '1024x1024',
-    ]);
+    expect(d?.presets).toEqual(['format=webp', 'compression=95', '1024x1024']);
     expect(d?.prompt).toBe('a logo');
   });
 
@@ -246,11 +242,7 @@ describe('resolvePresets — keyword params', () => {
   });
 
   it('full combo: format=png,quality=high,size=1536x1024 → PNG strips compression', () => {
-    const r = resolvePresets([
-      'format=png',
-      'quality=high',
-      'size=1536x1024',
-    ]);
+    const r = resolvePresets(['format=png', 'quality=high', 'size=1536x1024']);
     expect(r).toEqual({
       size: '1536x1024',
       quality: 'high',
@@ -260,7 +252,9 @@ describe('resolvePresets — keyword params', () => {
   });
 
   it('format=webp,compression=95,1024x1024', () => {
-    expect(resolvePresets(['format=webp', 'compression=95', '1024x1024'])).toEqual({
+    expect(
+      resolvePresets(['format=webp', 'compression=95', '1024x1024']),
+    ).toEqual({
       size: '1024x1024',
       quality: 'medium',
       output_format: 'webp',

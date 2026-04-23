@@ -403,6 +403,97 @@ describe('sendWithTts — image-gen failure signalling', () => {
     }
   });
 
+  it('source_missing (edit preflight) → [host] signal with get_message hint', async () => {
+    (editImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      reason: 'source_missing',
+      message: 'Source file not found: photo_3385.jpg',
+    });
+    const channel = makeMockChannel();
+
+    await sendWithTts(
+      channel,
+      'tg:123',
+      '[[image-edit: attachments/nope.jpg | bluer]]',
+      undefined,
+      'main',
+    );
+
+    await vi.waitFor(() => {
+      expect(channel.__calls.sendMessage).toHaveBeenCalled();
+    });
+    const text = channel.__calls.sendMessage.mock.calls[0][1];
+    expect(text).toMatch(/^\[host\]/);
+    expect(text).toContain('photo_3385.jpg');
+    expect(text).toContain('get_message');
+    expect(channel.__calls.sendPhoto).not.toHaveBeenCalled();
+  });
+
+  it('source_missing handles "unreadable" and "empty" message variants', async () => {
+    (editImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      reason: 'source_missing',
+      message: 'Source file is empty: broken.jpg',
+    });
+    const channel = makeMockChannel();
+    await sendWithTts(
+      channel,
+      'tg:123',
+      '[[image-edit: attachments/broken.jpg | redo]]',
+      undefined,
+      'main',
+    );
+    await vi.waitFor(() => {
+      expect(channel.__calls.sendMessage).toHaveBeenCalled();
+    });
+    expect(channel.__calls.sendMessage.mock.calls[0][1]).toContain(
+      'Source file is empty: broken.jpg',
+    );
+  });
+
+  it('source_missing handles "unreadable" variant (permission denied etc)', async () => {
+    (editImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      reason: 'source_missing',
+      message: 'Source file unreadable: locked.jpg',
+    });
+    const channel = makeMockChannel();
+    await sendWithTts(
+      channel,
+      'tg:123',
+      '[[image-edit: attachments/locked.jpg | redo]]',
+      undefined,
+      'main',
+    );
+    await vi.waitFor(() => {
+      expect(channel.__calls.sendMessage).toHaveBeenCalled();
+    });
+    expect(channel.__calls.sendMessage.mock.calls[0][1]).toContain(
+      'Source file unreadable: locked.jpg',
+    );
+  });
+
+  it('source_missing with no message falls back to generic "Source file not found"', async () => {
+    (editImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      reason: 'source_missing',
+    });
+    const channel = makeMockChannel();
+    await sendWithTts(
+      channel,
+      'tg:123',
+      '[[image-edit: attachments/anything.jpg | redo]]',
+      undefined,
+      'main',
+    );
+    await vi.waitFor(() => {
+      expect(channel.__calls.sendMessage).toHaveBeenCalled();
+    });
+    expect(channel.__calls.sendMessage.mock.calls[0][1]).toContain(
+      'Source file not found',
+    );
+  });
+
   it('host signal is stored with sender=host, is_from_me=1, is_bot_message=0 (agent context, not user-fallback)', async () => {
     (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: false,
