@@ -21,17 +21,18 @@ export interface ImageGenResult {
   originalPath: string; // the untouched png file — for [[image-file: ...]] follow-ups
 }
 
-// Outcome of a generate/edit call that actually reached the API. `null` is
-// still returned for pre-flight failures (no API key, missing source) so
-// callers don't have to special-case those.
+// Outcome of a generate/edit call. `null` is returned only when there's
+// nothing useful to signal back to the agent (e.g. missing API key — a
+// config issue, not an agent-visible failure).
 export type ImageGenOutcome =
   | ({ ok: true } & ImageGenResult)
   | {
       ok: false;
-      // 'moderation' — OpenAI safety system rejection (code moderation_block).
-      // 'generic'    — any other API-level user error (bad param, size, etc).
-      // 'transient'  — network/timeout/5xx; agent-side signalling is pointless.
-      reason: 'moderation' | 'generic' | 'transient';
+      // 'moderation'      — OpenAI safety system rejection (code moderation_block).
+      // 'generic'         — any other API-level user error (bad param, size, etc).
+      // 'transient'       — network/timeout/5xx; agent-side signalling is pointless.
+      // 'source_missing'  — pre-flight: edit source file not found / unreadable / empty.
+      reason: 'moderation' | 'generic' | 'transient' | 'source_missing';
       code?: string;
       message?: string;
     };
@@ -487,9 +488,42 @@ export async function editImage(
     return null;
   }
 
+  // Pre-flight source checks. Failures here are the single most common
+  // agent-side slip (typo'd path, wrong extension, cached reference to a
+  // file that got rotated, etc) and they used to return null — silent
+  // drop, no way for the agent to notice. Now they return a signalable
+  // outcome so sendImageGenFailureSignal can tell the agent to fix the
+  // path on the next turn.
+  const baseName = path.basename(sourcePath);
   if (!fs.existsSync(sourcePath)) {
     logger.error({ sourcePath }, 'Image edit: source file not found');
-    return null;
+    return {
+      ok: false,
+      reason: 'source_missing',
+      message: `Source file not found: ${baseName}`,
+    };
+  }
+  let imageBuffer: Buffer;
+  try {
+    imageBuffer = fs.readFileSync(sourcePath);
+  } catch (err) {
+    logger.error(
+      { err, sourcePath },
+      'Image edit: source file unreadable',
+    );
+    return {
+      ok: false,
+      reason: 'source_missing',
+      message: `Source file unreadable: ${baseName}`,
+    };
+  }
+  if (imageBuffer.length === 0) {
+    logger.error({ sourcePath }, 'Image edit: source file is empty');
+    return {
+      ok: false,
+      reason: 'source_missing',
+      message: `Source file is empty: ${baseName}`,
+    };
   }
 
   const resolved = resolvePresets(presets);
@@ -499,7 +533,6 @@ export async function editImage(
   // the source may be a JPEG (default output format) or a legacy PNG.
   const sourceExt = path.extname(sourcePath).toLowerCase();
   const sourceMime = sourceExt === '.png' ? 'image/png' : 'image/jpeg';
-  const imageBuffer = fs.readFileSync(sourcePath);
   const imageFile = new File([imageBuffer], path.basename(sourcePath), {
     type: sourceMime,
   });
