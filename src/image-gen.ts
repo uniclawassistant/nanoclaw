@@ -13,6 +13,7 @@ export interface ImageDirective {
   prompt: string;
   sourcePath?: string; // For edit: relative path within group dir. For file: relative path to existing image.
   cleanText: string;
+  presets?: string[]; // Raw preset tokens before validation, e.g. ['portrait', 'hd']
 }
 
 export interface ImageGenResult {
@@ -20,12 +21,108 @@ export interface ImageGenResult {
   originalPath: string; // the untouched png file — for [[image-file: ...]] follow-ups
 }
 
-// [[image: prompt text here]]
+// [[image: prompt text here]] or [[image:portrait,hd: prompt text here]]
 const IMAGE_GEN_RE = /\[\[image:\s*([\s\S]*?)\]\]/i;
-// [[image-edit: path/to/source.jpg | prompt text here]]
+// [[image-edit: path | prompt]] or [[image-edit:portrait,hd: path | prompt]]
 const IMAGE_EDIT_RE = /\[\[image-edit:\s*([\s\S]*?)\]\]/i;
-// [[image-file: path/to/file.png]]
+// [[image-file: path/to/file.png]] — no presets, works on existing files
 const IMAGE_FILE_RE = /\[\[image-file:\s*([\s\S]*?)\]\]/i;
+
+// Known preset vocabulary. Kept as the single source of truth — resolvePresets
+// validates against this set and logs+ignores unknown tokens.
+export const KNOWN_PRESETS = new Set([
+  'portrait',
+  'landscape',
+  'auto',
+  'hd',
+  'med',
+  'transparent',
+]);
+const SIZE_PRESETS = new Set(['portrait', 'landscape', 'auto']);
+
+/**
+ * If the inner body starts with a comma-separated list of lowercase ASCII
+ * tokens followed by a colon, strip it off and return as presets. Otherwise
+ * the entire inner is prompt/body and presets are empty.
+ *
+ * Examples:
+ *   "a cat"                     → { presets: [],                body: "a cat" }
+ *   "portrait: a cat"           → { presets: ["portrait"],      body: "a cat" }
+ *   "portrait,hd: a cat"        → { presets: ["portrait","hd"], body: "a cat" }
+ *   "Plot: a graph"             → { presets: [],                body: "Plot: a graph" }  (uppercase → not preset syntax)
+ *   "foo bar: text"             → { presets: [],                body: "foo bar: text" } (space → not preset syntax)
+ */
+function splitPresetsAndBody(inner: string): {
+  presets: string[];
+  body: string;
+} {
+  // Match even an empty body after the preset colon, so callers can
+  // distinguish "presets present, prompt missing" (→ null directive) from
+  // "no preset section at all" (→ body is whole inner).
+  const m = inner.match(/^([a-z0-9_,-]+)\s*:\s*([\s\S]*)$/);
+  if (!m) return { presets: [], body: inner.trim() };
+  const presets = m[1]
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return { presets, body: m[2].trim() };
+}
+
+export interface ResolvedPresets {
+  size: '1024x1024' | '1024x1536' | '1536x1024' | 'auto';
+  quality: 'low' | 'medium' | 'high';
+  background?: 'transparent';
+  output_format?: 'png';
+}
+
+/**
+ * Resolve raw preset tokens to OpenAI API params. Unknown tokens log a
+ * warning and are ignored. Conflicting size presets fall back to default
+ * with a warning. Quality "last wins" among hd/med.
+ */
+export function resolvePresets(presets: string[] | undefined): ResolvedPresets {
+  const out: ResolvedPresets = { size: '1024x1024', quality: 'low' };
+  if (!presets || presets.length === 0) return out;
+
+  const sizeTokens: string[] = [];
+  const qualityTokens: string[] = [];
+  let transparent = false;
+
+  for (const p of presets) {
+    if (!KNOWN_PRESETS.has(p)) {
+      logger.warn({ preset: p }, 'image-gen: unknown preset, ignoring');
+      continue;
+    }
+    if (SIZE_PRESETS.has(p)) sizeTokens.push(p);
+    else if (p === 'hd' || p === 'med') qualityTokens.push(p);
+    else if (p === 'transparent') transparent = true;
+  }
+
+  if (sizeTokens.length > 1) {
+    logger.warn(
+      { sizeTokens },
+      'image-gen: conflicting size presets, falling back to default size',
+    );
+  } else if (sizeTokens.length === 1) {
+    const s = sizeTokens[0];
+    if (s === 'portrait') out.size = '1024x1536';
+    else if (s === 'landscape') out.size = '1536x1024';
+    else if (s === 'auto') out.size = 'auto';
+  }
+
+  // Last quality token wins (explicit per spec)
+  for (const q of qualityTokens) {
+    if (q === 'hd') out.quality = 'high';
+    else if (q === 'med') out.quality = 'medium';
+  }
+
+  if (transparent) {
+    out.background = 'transparent';
+    out.output_format = 'png';
+  }
+
+  return out;
+}
 
 export function extractImageDirective(text: string): ImageDirective | null {
   const fileMatch = text.match(IMAGE_FILE_RE);
@@ -38,22 +135,22 @@ export function extractImageDirective(text: string): ImageDirective | null {
 
   const editMatch = text.match(IMAGE_EDIT_RE);
   if (editMatch) {
-    const inner = editMatch[1].trim();
-    const pipeIdx = inner.indexOf('|');
+    const { presets, body } = splitPresetsAndBody(editMatch[1].trim());
+    const pipeIdx = body.indexOf('|');
     if (pipeIdx === -1) return null;
-    const sourcePath = inner.slice(0, pipeIdx).trim();
-    const prompt = inner.slice(pipeIdx + 1).trim();
+    const sourcePath = body.slice(0, pipeIdx).trim();
+    const prompt = body.slice(pipeIdx + 1).trim();
     if (!sourcePath || !prompt) return null;
     const cleanText = text.replace(IMAGE_EDIT_RE, '').trim();
-    return { type: 'edit', prompt, sourcePath, cleanText };
+    return { type: 'edit', prompt, sourcePath, cleanText, presets };
   }
 
   const genMatch = text.match(IMAGE_GEN_RE);
   if (genMatch) {
-    const prompt = genMatch[1].trim();
-    if (!prompt) return null;
+    const { presets, body } = splitPresetsAndBody(genMatch[1].trim());
+    if (!body) return null;
     const cleanText = text.replace(IMAGE_GEN_RE, '').trim();
-    return { type: 'generate', prompt, cleanText };
+    return { type: 'generate', prompt: body, cleanText, presets };
   }
 
   return null;
@@ -96,6 +193,7 @@ async function convertToJpegPreview(pngPath: string): Promise<string | null> {
 export async function generateImage(
   prompt: string,
   attachmentsDir: string,
+  presets?: string[],
 ): Promise<ImageGenResult | null> {
   const apiKey = getApiKey();
   if (!apiKey) {
@@ -103,25 +201,34 @@ export async function generateImage(
     return null;
   }
 
+  const resolved = resolvePresets(presets);
+
   let resp: Response;
   try {
+    const body: Record<string, unknown> = {
+      model: 'gpt-image-2',
+      prompt,
+      n: 1,
+      size: resolved.size,
+      quality: resolved.quality,
+    };
+    if (resolved.background) body.background = resolved.background;
+    if (resolved.output_format) body.output_format = resolved.output_format;
+
     resp = await fetch('https://api.openai.com/v1/images/generations', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model: 'gpt-image-2',
-        prompt,
-        n: 1,
-        size: '1024x1024',
-        quality: 'low',
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(180_000),
     });
   } catch (err) {
-    logger.error({ err, promptLen: prompt.length }, 'Image gen: fetch failed');
+    logger.error(
+      { err, promptLen: prompt.length, resolved },
+      'Image gen: fetch failed',
+    );
     return null;
   }
 
@@ -160,6 +267,7 @@ export async function generateImage(
       previewBytes,
       jpegConverted: jpegPath !== null,
       promptLen: prompt.length,
+      resolved,
     },
     'Image generated',
   );
@@ -170,6 +278,7 @@ export async function editImage(
   sourcePath: string,
   prompt: string,
   attachmentsDir: string,
+  presets?: string[],
 ): Promise<ImageGenResult | null> {
   const apiKey = getApiKey();
   if (!apiKey) {
@@ -182,6 +291,8 @@ export async function editImage(
     return null;
   }
 
+  const resolved = resolvePresets(presets);
+
   const imageBuffer = fs.readFileSync(sourcePath);
   const imageFile = new File([imageBuffer], path.basename(sourcePath), {
     type: 'image/png',
@@ -191,8 +302,11 @@ export async function editImage(
   form.append('model', 'gpt-image-2');
   form.append('image[]', imageFile);
   form.append('prompt', prompt);
-  form.append('size', '1024x1024');
-  form.append('quality', 'low');
+  form.append('size', resolved.size);
+  form.append('quality', resolved.quality);
+  if (resolved.background) form.append('background', resolved.background);
+  if (resolved.output_format)
+    form.append('output_format', resolved.output_format);
 
   let resp: Response;
   try {
@@ -203,7 +317,7 @@ export async function editImage(
       signal: AbortSignal.timeout(180_000),
     });
   } catch (err) {
-    logger.error({ err, sourcePath }, 'Image edit: fetch failed');
+    logger.error({ err, sourcePath, resolved }, 'Image edit: fetch failed');
     return null;
   }
 
@@ -243,6 +357,7 @@ export async function editImage(
       jpegConverted: jpegPath !== null,
       sourcePath,
       promptLen: prompt.length,
+      resolved,
     },
     'Image edited',
   );
