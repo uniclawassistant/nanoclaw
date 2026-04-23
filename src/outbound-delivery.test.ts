@@ -285,7 +285,7 @@ describe('sendWithTts — image-gen failure signalling', () => {
     expect(text).toContain('invalid_value');
   });
 
-  it('transient (5xx, network) → NO [host] signal (noise for the agent)', async () => {
+  it('GENERATE + transient (5xx, network) → NO [host] signal (agent has no preview to worry about)', async () => {
     (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: false,
       reason: 'transient',
@@ -297,6 +297,31 @@ describe('sendWithTts — image-gen failure signalling', () => {
     // Give the fire-and-forget a tick to settle.
     await new Promise((r) => setTimeout(r, 50));
     expect(channel.__calls.sendMessage).not.toHaveBeenCalled();
+    expect(channel.__calls.sendPhoto).not.toHaveBeenCalled();
+  });
+
+  it('EDIT + transient (timeout, network) → [host] signal with retry guidance (user had a preview waiting)', async () => {
+    (editImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      reason: 'transient',
+    });
+    const channel = makeMockChannel();
+
+    await sendWithTts(
+      channel,
+      'tg:123',
+      '[[image-edit: attachments/foo.jpg | bluer]]',
+      undefined,
+      'main',
+    );
+
+    await vi.waitFor(() => {
+      expect(channel.__calls.sendMessage).toHaveBeenCalled();
+    });
+    const text = channel.__calls.sendMessage.mock.calls[0][1];
+    expect(text).toMatch(/^\[host\]/);
+    expect(text).toContain('Image edit');
+    expect(text).toContain('retry');
     expect(channel.__calls.sendPhoto).not.toHaveBeenCalled();
   });
 
