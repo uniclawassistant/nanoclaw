@@ -122,18 +122,14 @@ describe('extractTtsDirective — simple mode', () => {
   });
 
   it('preserves cleanText alongside simple-mode tag', () => {
-    const d = extractTtsDirective(
-      'intro line\n[[tts(Kore): the briefing]]',
-    );
+    const d = extractTtsDirective('intro line\n[[tts(Kore): the briefing]]');
     expect(d?.ttsText).toBe('the briefing');
     expect(d?.cleanText).toBe('intro line');
     expect(d?.directive).toEqual({ voice: 'Kore' });
   });
 
   it('inline [tags] in spoken text pass through as-is', () => {
-    const d = extractTtsDirective(
-      '[[tts(Kore): [whispers] тише, смотри]]',
-    );
+    const d = extractTtsDirective('[[tts(Kore): [whispers] тише, смотри]]');
     expect(d?.ttsText).toBe('[whispers] тише, смотри');
   });
 });
@@ -146,7 +142,7 @@ describe('extractTtsDirective — block mode', () => {
         'voice: Leda',
         'profile: warm grandmother',
         'scene: quiet room',
-        "director: unhurried",
+        'director: unhurried',
         'Жил-был единорог.',
         ']]',
       ].join('\n'),
@@ -186,9 +182,7 @@ describe('extractTtsDirective — block mode', () => {
   });
 
   it('duplicate keys — last-write-wins', () => {
-    const d = extractTtsDirective(
-      '[[tts\nvoice: Kore\nvoice: Leda\nhi\n]]',
-    );
+    const d = extractTtsDirective('[[tts\nvoice: Kore\nvoice: Leda\nhi\n]]');
     expect(d?.directive?.voice).toBe('Leda');
   });
 
@@ -249,7 +243,7 @@ describe('buildPromptPrefix', () => {
       director: 'hard-boiled, cynical',
     });
     expect(out).toBe(
-      "[Audio Profile] detective noir\n" +
+      '[Audio Profile] detective noir\n' +
         '[Scene] rainy night\n' +
         "[Director's Note] hard-boiled, cynical\n\n",
     );
@@ -301,7 +295,9 @@ describe('synthesize — provider wiring (mocked fetch)', () => {
         candidates: [
           {
             content: {
-              parts: [{ inlineData: { data: Buffer.from('x').toString('base64') } }],
+              parts: [
+                { inlineData: { data: Buffer.from('x').toString('base64') } },
+              ],
             },
           },
         ],
@@ -310,7 +306,7 @@ describe('synthesize — provider wiring (mocked fetch)', () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     // ffmpeg isn't available in test env — swallow the PCM→Opus conversion.
     // Instead of running it, stub execFileSync via spy on child_process.
-await synthesize('hello');
+    await synthesize('hello');
 
     const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     const body = JSON.parse(call[1].body as string);
@@ -329,16 +325,21 @@ await synthesize('hello');
         candidates: [
           {
             content: {
-              parts: [{ inlineData: { data: Buffer.from('x').toString('base64') } }],
+              parts: [
+                { inlineData: { data: Buffer.from('x').toString('base64') } },
+              ],
             },
           },
         ],
       }),
     }));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-await synthesize('hello', { voice: 'Leda' });
+    await synthesize('hello', { voice: 'Leda' });
 
-    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    const body = JSON.parse(
+      (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1]
+        .body as string,
+    );
     expect(
       body.generationConfig.speech_config.voice_config.prebuilt_voice_config
         .voice_name,
@@ -353,19 +354,24 @@ await synthesize('hello', { voice: 'Leda' });
         candidates: [
           {
             content: {
-              parts: [{ inlineData: { data: Buffer.from('x').toString('base64') } }],
+              parts: [
+                { inlineData: { data: Buffer.from('x').toString('base64') } },
+              ],
             },
           },
         ],
       }),
     }));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-await synthesize('spoken text', {
+    await synthesize('spoken text', {
       profile: 'warm grandmother',
       director: 'unhurried',
     });
 
-    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    const body = JSON.parse(
+      (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1]
+        .body as string,
+    );
     const sent = body.contents[0].parts[0].text;
     expect(sent).toBe(
       '[Audio Profile] warm grandmother\n' +
@@ -390,7 +396,10 @@ await synthesize('spoken text', {
     });
 
     expect(fetchMock).toHaveBeenCalledOnce();
-    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    const body = JSON.parse(
+      (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1]
+        .body as string,
+    );
     expect(body.input).toBe('hello world');
     expect(body.model).toBe('gpt-4o-mini-tts');
     // Verify the directive did NOT leak into the input

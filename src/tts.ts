@@ -95,8 +95,7 @@ function parseSimpleMode(raw: string, cleanText: string): TtsDirective {
   }
   const directive: VoiceDirective = {};
   if (voice) directive.voice = voice;
-  if (directorTokens.length > 0)
-    directive.director = directorTokens.join(', ');
+  if (directorTokens.length > 0) directive.director = directorTokens.join(', ');
   return {
     ttsText: text,
     cleanText,
@@ -165,8 +164,7 @@ export function buildPromptPrefix(directive: VoiceDirective): string {
   const parts: string[] = [];
   if (directive.profile) parts.push(`[Audio Profile] ${directive.profile}`);
   if (directive.scene) parts.push(`[Scene] ${directive.scene}`);
-  if (directive.director)
-    parts.push(`[Director's Note] ${directive.director}`);
+  if (directive.director) parts.push(`[Director's Note] ${directive.director}`);
   return parts.length > 0 ? parts.join('\n') + '\n\n' : '';
 }
 
@@ -247,10 +245,7 @@ function pcmToOggOpus(pcm: Buffer): Buffer {
   );
 }
 
-async function synthesizeOpenAI(
-  text: string,
-  apiKey: string,
-): Promise<Buffer> {
+async function synthesizeOpenAI(text: string, apiKey: string): Promise<Buffer> {
   const resp = await fetch('https://api.openai.com/v1/audio/speech', {
     method: 'POST',
     headers: {
