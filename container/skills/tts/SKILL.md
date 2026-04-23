@@ -5,129 +5,128 @@ description: Speak your response as a voice message via Gemini 3.1 Flash TTS. In
 
 # TTS (Gemini Flash)
 
-`[[tts]]` — тег который хост парсит из моего ответа и синтезирует через Gemini 3.1 Flash TTS, отправляет как voice-message в Telegram. Всё что в теге — произносится, всё вне — остаётся текстом.
+`[[tts]]` is a tag the host parses out of my reply and runs through Gemini 3.1 Flash TTS, then sends as a voice message to Telegram. Whatever is inside the tag gets spoken; everything outside stays as text.
 
-Дефолтный голос — **Enceladus** (M, Breathy, close-mic). Это мой голос. Менять только когда озвучиваю **не себя** (персонаж, пересказ от лица другого, multi-speaker сценка).
+The default voice is **configured per instance** via the `TTS_DEFAULT_VOICE` env var (ships as `Enceladus` if unset). That's my voice. Only change it when voicing **someone other than myself** — a character, a retelling from another POV, or a multi-speaker scene.
 
-## Когда использовать
+## When to use
 
-- Пользователь прислал voice message → отвечаю `[[tts]]`
-- Пользователь просит голосом
-- Короткий разговорный ответ где голос ощущается естественнее текста
+- User sent a voice message → reply with `[[tts]]` to stay in voice mode
+- User explicitly asks for voice
+- Short conversational replies where voice feels more natural than text
 
-## Когда НЕ использовать
+## When NOT to use
 
-- Длинные сообщения с кодом, списками, структурой
-- Пользователь явно читает/печатает, не слушает
-- Больше ~60 секунд озвучки в одном посте — дроби на несколько постов (Gemini сам так советует в docs, плюс Telegram UI это и так естественный разделитель)
+- Long messages with code, lists, or structured data
+- User is clearly reading/typing, not listening
+- More than ~60 seconds of audio in a single post — split across posts (Gemini docs recommend this, plus Telegram UI handles the separation naturally)
 
 ---
 
-## Синтаксис — три уровня
+## Syntax — three levels
 
-### 1. Baseline (дефолт)
-
-```
-Привет, как дела? [[tts]]
-```
-
-Весь surrounding текст (минус тег) → синтез голосом Enceladus, без каких-либо директив. Как раньше.
+### 1. Baseline (default)
 
 ```
-Вот ответ текстом с кодом и подробностями.
-А кратко скажу голосом: [[tts:Всё норм, делаю.]]
+Hey, how's it going? [[tts]]
 ```
 
-Озвучивается только payload между `[[tts:` и `]]`.
+All surrounding text (minus the tag) is synthesized with this instance's default voice, no directives. Same as before.
 
-**Используй это в 80% случаев.** Остальные два уровня — когда реально нужен контроль.
+```
+Here's the detailed answer with code and specifics.
+Short version, spoken: [[tts:Everything's good, on it.]]
+```
 
-### 2. Simple mode — одна строка
+Only the payload between `[[tts:` and `]]` is spoken.
+
+**Use this for 80% of cases.** The other two levels — when you actually need control.
+
+### 2. Simple mode — one line
 
 ```
 [[tts(<voice_spec>): <text>]]
 ```
 
-`<voice_spec>` — csv токены в круглых скобках:
-- Первый токен, матчащий one of 30 known voices — становится `voice`
-- Всё остальное (join через `, `) — director prose, накладывается на подачу
+`<voice_spec>` is csv tokens inside parens:
+- The first token matching one of the 30 known voices becomes `voice`
+- Everything else (joined with `, `) goes into director prose, applied to the delivery
 
-Примеры:
-
-```
-[[tts(Kore): Серьёзный бриф по продукту.]]
-```
-Смена голоса без режиссуры — Kore (F, Firm) для сухого тона.
+Examples:
 
 ```
-[[tts(whispered, close to mic): Тссс, это секрет.]]
+[[tts(Kore): Serious product briefing.]]
 ```
-Свой голос (Enceladus), но режиссура "шёпотом, близко к микрофону".
+Voice change, no direction — Kore (F, Firm) for a dry tone.
 
 ```
-[[tts(Leda, warm storyteller tone, unhurried): Жил-был единорог в лесу...]]
+[[tts(whispered, close to mic): Shhh, it's a secret.]]
 ```
-Leda (F, Youthful) + подача "тёплый рассказчик, неспешно".
+Own voice (instance default), but directed "whispered, close to mic".
 
 ```
-[[tts(Algenib, tired late-night sarcasm): Ну и денёк был, скажу я тебе...]]
+[[tts(Leda, warm storyteller tone, unhurried): Once upon a time there was a unicorn in the forest...]]
 ```
-Algenib (M, Gravelly) + "уставший ночной сарказм".
+Leda (F, Youthful) + delivery "warm storyteller tone, unhurried".
 
-Если ни один токен не совпал с known voice — всё идёт в director, голос остаётся Enceladus.
+```
+[[tts(Algenib, tired late-night sarcasm): What a day it's been, let me tell you...]]
+```
+Algenib (M, Gravelly) + "tired late-night sarcasm".
 
-### 3. Rich block mode — для сложных сцен
+If no token matches a known voice, everything goes into director and the voice stays at the instance default.
 
-Триггер: newline сразу после `[[tts` (никакого текста до newline).
+### 3. Rich block mode — for complex scenes
+
+Trigger: newline immediately after `[[tts` (no text before the newline).
 
 ```
 [[tts
-voice: <Name>              # опц.
-profile: <free prose>      # опц., Audio Profile персоны
-scene: <free prose>        # опц., окружение/контекст
-director: <free prose>     # опц., Director's note — стиль/темп/акцент
-<транскрипт, любой длины, с пустыми строками внутри>
+voice: <Name>              # optional
+profile: <free prose>      # optional, persona's Audio Profile
+scene: <free prose>        # optional, environment / context
+director: <free prose>     # optional, Director's note — style/pace/accent
+<transcript, any length, with blank lines allowed>
 ]]
 ```
 
-Все ключи опциональны, порядок любой. Первая строка **не** матчащая `^(voice|profile|scene|director):\s+(.+)$` — начало транскрипта; всё до `]]` = текст для озвучки.
+All keys are optional, any order. The first line **not** matching `^(voice|profile|scene|director):\s+(.+)$` starts the transcript; everything up to `]]` is the spoken text.
 
-Пример — storytelling:
+Example — storytelling:
 
 ```
 [[tts
 voice: Leda
-profile: тёплая бабушка рассказывает сказку внуку перед сном
-scene: тихая комната, мягкий свет лампы, ребёнок засыпает
-director: неспешно, с долгими паузами, в конце тише
-Жил-был в далёком лесу маленький единорог. [whispers] Он был очень
-застенчивый... И только ночью выходил на поляну, чтобы посмотреть
-на звёзды.
+profile: warm grandmother telling a bedtime story to her grandchild
+scene: quiet room, soft lamplight, child drifting off
+director: unhurried, with long pauses, softer toward the end
+Once upon a time, in a faraway forest, there lived a little unicorn. [whispers] He was very
+shy... and only came out at night, to the clearing, to look at the stars.
 ]]
 ```
 
-Пример — монолог персонажа:
+Example — character monologue:
 
 ```
 [[tts
 voice: Algenib
-profile: детектив нуар, 40s, уставший, курит у окна
-scene: дождливая ночь, мигающий неон за окном, пепельница полная
-director: hard-boiled delivery, cynical, с длинными затяжками между фразами
-Этот город меня сжирает. [sighs] Каждую ночь одно и то же —
-звонок, труп, вопросы без ответов.
+profile: noir detective, 40s, tired, smoking by the window
+scene: rainy night, flickering neon outside, ashtray overflowing
+director: hard-boiled delivery, cynical, long drags between lines
+This city's eating me alive. [sighs] Every night it's the same —
+a call, a body, questions with no answers.
 ]]
 ```
 
-**⚠️ Edge case:** если транскрипт сам начинается со строки вида `voice: ...` / `profile: ...` / `scene: ...` / `director: ...` — парсер её съест как ключ. Если критично — начни транскрипт с пустой строки или переформулируй.
+**⚠️ Edge case:** if the transcript itself starts with a line like `voice: ...` / `profile: ...` / `scene: ...` / `director: ...`, the parser will swallow it as a key. If that matters, start the transcript with a blank line or rephrase.
 
 ---
 
-## Voices catalog (30 голосов)
+## Voices catalog (30 voices)
 
-Дефолт — **Enceladus**. Имена **case-sensitive** — `Kore` работает, `kore` уходит в director prose. Full catalog:
+Default voice is per-instance (see `TTS_DEFAULT_VOICE` env). Voice names are **case-sensitive** — `Kore` works, `kore` becomes director prose. Full catalog:
 
-| Имя | Пол | Характеристика |
+| Name | Gender | Characteristic |
 |---|---|---|
 | Achernar | F | Soft |
 | Achird | M | Friendly |
@@ -139,7 +138,7 @@ director: hard-boiled delivery, cynical, с длинными затяжками 
 | Callirrhoe | F | Easy-going |
 | Charon | M | Informative |
 | Despina | F | Smooth |
-| **Enceladus** | **M** | **Breathy — мой дефолт** |
+| Enceladus | M | Breathy (ships default) |
 | Erinome | F | Clear |
 | Fenrir | M | Excitable |
 | Gacrux | F | Mature |
@@ -160,78 +159,78 @@ director: hard-boiled delivery, cynical, с длинными затяжками 
 | Zephyr | F | Bright |
 | Zubenelgenubi | M | Casual |
 
-Баланс: 16 M / 14 F.
+Balance: 16 M / 14 F.
 
-## Voice-selection guide — под задачу
+## Voice-selection guide — by use case
 
-- **Я → Fedor, дефолт:** Enceladus (M, Breathy). Писать `voice:` не нужно.
-- **Storytelling, сказки, воспоминания:** Leda (F, Youthful), Sulafat (F, Warm), Achernar (F, Soft)
-- **News / briefing / сухая сводка:** Charon (M, Informative), Rasalgethi (M, Informative), Kore (F, Firm)
-- **Late-night rant, тёмное, саркастичное:** Algenib (M, Gravelly), Gacrux (F, Mature)
-- **Upbeat / excited / промо:** Puck (M, Upbeat), Laomedeia (F, Upbeat), Fenrir (M, Excitable)
+- **Me → Fedor, default:** whatever this instance's default is. No `voice:` needed.
+- **Storytelling, fairy tales, memories:** Leda (F, Youthful), Sulafat (F, Warm), Achernar (F, Soft)
+- **News / briefing / dry summary:** Charon (M, Informative), Rasalgethi (M, Informative), Kore (F, Firm)
+- **Late-night rant, dark, sarcastic:** Algenib (M, Gravelly), Gacrux (F, Mature)
+- **Upbeat / excited / promo:** Puck (M, Upbeat), Laomedeia (F, Upbeat), Fenrir (M, Excitable)
 - **Calm / reassuring / soothing:** Vindemiatrix (F, Gentle), Achernar (F, Soft), Umbriel (M, Easy-going)
 - **Authoritative / firm / executive:** Orus (M, Firm), Alnilam (M, Firm), Kore (F, Firm)
 - **Technical explainer / clear:** Iapetus (M, Clear), Erinome (F, Clear), Sadaltager (M, Knowledgeable)
 - **Casual / friendly chat:** Achird (M, Friendly), Zubenelgenubi (M, Casual), Callirrhoe (F, Easy-going)
 
-Характеристика = baseline тембра. `director` / `profile` / `scene` накладываются сверху — любой голос можно окрасить по-разному. Незнакомый голос перед продакшеном — проверить в AI Studio на тестовом промпте, чтобы не промахнуться с настроением.
+The characteristic is the baseline timbre. `director` / `profile` / `scene` layer on top — any voice can be colored differently. Before using an unfamiliar voice in production, audition it in AI Studio on a test prompt to avoid surprises with mood.
 
 ---
 
-## Multi-speaker диалоги
+## Multi-speaker dialogs
 
-**Не через API `MultiSpeakerVoiceConfig`.** Через **последовательность постов** — каждый speaker-turn = отдельный пост со своим `[[tts]]` тегом.
+**Not via the `MultiSpeakerVoiceConfig` API.** Instead, use a **sequence of posts** — each speaker turn is a separate post with its own `[[tts]]` tag.
 
-Почему:
-- Telegram UI сам визуально разделяет реплики — "ощущение разных актёров" бесплатно
-- Никакого audio-stitching, никаких opus-merge боли
-- Можно длинную сцену дробить естественно (как в мессенджере)
-- Один turn ≤ ~60s → можно перегонять без риска потери качества
+Why:
+- Telegram UI visually separates the turns — "different actors" feeling comes for free
+- No audio stitching, no opus-merge pain
+- Long scenes can be broken up naturally (messenger-style)
+- Each turn ≤ ~60s → stays within safe synthesis range
 
-Паттерн:
+Pattern:
 ```
-Post 1: [[tts(Puck, восторженно): А ты видел единорога?]]
-Post 2: [[tts(Algenib, устало): Видел. В прошлый вторник, в Starbucks.]]
-Post 3: [[tts(Puck, разочарованно): Фу, какая проза.]]
+Post 1: [[tts(Puck, excitedly): Did you see a unicorn?]]
+Post 2: [[tts(Algenib, wearily): Saw one. Last Tuesday, at Starbucks.]]
+Post 3: [[tts(Puck, disappointed): Ugh, how prosaic.]]
 ```
 
 ## Inline tags (`[whispers]`, `[laughs]`, `[sighs]`)
 
-Работают как **семантические подсказки**, а не структурированные директивы. Gemini слушает смысл текста вокруг них. Если текст "И он сказал [whispers] тише" — шёпот будет. Если `[newscaster voice, 2x speed]` — модель скорее всего проигнорит темп, шепот уловит.
+These work as **semantic hints**, not structured directives. Gemini listens to the meaning of the surrounding text. If the text is "and he said [whispers] quietly" — whisper will happen. If you write `[newscaster voice, 2x speed]` — the model will probably ignore the pacing, whisper it will likely catch.
 
-**Правило:** надёжный контроль тембра/темпа/стиля — через `director:` прозу. Inline tags — cherry on top для мелких эмоциональных акцентов.
+**Rule:** reliable control over timbre / pacing / style — via `director:` prose. Inline tags are cherry on top for small emotional accents.
 
-Список, который точно работает (baseline): `[laughs]`, `[giggles]`, `[sighs]`, `[gasp]`, `[whispers]`, `[shouting]`, `[crying]`, `[cough]`, `[excited]`, `[curious]`, `[sarcastic]`, `[serious]`, `[tired]`, `[trembling]`, `[mischievously]`.
+Baseline list that works: `[laughs]`, `[giggles]`, `[sighs]`, `[gasp]`, `[whispers]`, `[shouting]`, `[crying]`, `[cough]`, `[excited]`, `[curious]`, `[sarcastic]`, `[serious]`, `[tired]`, `[trembling]`, `[mischievously]`.
 
-## Имя Fedor — всегда с Ё
+## The name Fedor — always with Ё
 
 - ✅ `Фёдор` / `Fёdor`
-- ❌ `Fedor` (читается "Феда"/"Фидор"), `Fyodor` (не его вариант)
+- ❌ `Fedor` (reads as "Feda"/"Fidor"), `Fyodor` (not his variant)
 
-Работает даже посреди английского текста — буква Ё сама триггерит правильную озвучку.
+Works even in the middle of English text — the letter Ё itself triggers correct pronunciation.
 
-## Ограничения
+## Limits
 
-- **Длинные сцены (>~60s)** — дроби на посты. Gemini TTS сам это советует в docs.
-- **OpenAI fallback** — когда Gemini недоступен, синтез уходит на gpt-4o-mini-tts. `directive` (voice/profile/scene/director) **дропается** — gpt прочитает prefix буквально. В логах warn. Voice контроль в fallback отсутствует.
-- **Accent на не-английских текстах** — работает ограниченно, в v1 не тестировано на русском. Если в director написано "British accent" для русского текста — эффект непредсказуем.
-- **Неизвестное voice name** — simple mode fall-through на legacy (voice остаётся дефолтный, всё считается director prose). Warn в лог.
+- **Long scenes (>~60s)** — split across posts. Gemini TTS docs recommend this themselves.
+- **OpenAI fallback** — when Gemini is unavailable, synthesis falls back to gpt-4o-mini-tts. The `directive` (voice/profile/scene/director) is **dropped** — gpt would read the prefix literally. Logged as warn. No voice control in fallback.
+- **Accent on non-English text** — works with limitations, not tested on Russian in v1. If `director` says "British accent" for Russian text — the effect is unpredictable.
+- **Unknown voice name** — simple mode falls through to legacy (default voice stays, everything treated as director prose). Warn in logs.
 
-## Scar — не цитировать живой синтаксис в чат
+## Scar — don't quote live syntax in chat
 
-Парсер хоста не отличает "пример в сообщении" от "реальная директива". Любой `[[tts(...)]]` который я напишу в чате — хост попытается озвучить. В SOUL уже есть scar про image-теги; для tts-тегов тот же принцип:
+The host parser doesn't distinguish "example in a message" from "real directive." Any `[[tts(...)]]` I write in chat — the host will try to synthesize it. SOUL already has a scar about image tags; same principle for tts tags:
 
-- Примеры в брифах/скиллах → **файл**, путь передаю Fedor'у
-- В самом чате — либо без тригерных скобок ("двойные квадратные, tts, двоеточие..."), либо через «» / ⟦⟧ замену
-- Бэктики — ненадёжно (парсер смотрит сырой текст, markdown может не экранировать)
+- Examples in briefs / skills → **files**, path shared with Fedor
+- In the chat itself — either skip the trigger brackets ("double square, tts, colon...") or substitute with «» / ⟦⟧
+- Backticks are unreliable (the parser looks at raw text, markdown may not escape)
 
-## Дефолт-first
+## Default-first
 
-Если нет явной причины — голый `[[tts]]`. Не тащить `(voice, director, profile)` ради красоты. Дефолт Enceladus с твоим натуральным текстом звучит хорошо — это проверено, выбрано, моё.
+If there's no explicit reason — bare `[[tts]]`. Don't drag in `(voice, director, profile)` for the sake of it. The instance default with natural text sounds good — it's been validated, chosen, it's mine.
 
-Контрольные уровни включаются **осознанно**, когда:
-- Озвучиваю **не себя** (персонаж, пересказ от лица другого) → voice + profile
-- Нужен конкретный **тон** который текст сам не передаёт → director
-- Многоголосая **сценка** → multi-post с разными voice на каждый turn
+Control levels engage **consciously**, when:
+- Voicing **not myself** (character, retelling from another POV) → voice + profile
+- Need a specific **tone** the text itself doesn't convey → director
+- Multi-voice **scene** → multi-post with different voice per turn
 
-Иначе — baseline.
+Otherwise — baseline.

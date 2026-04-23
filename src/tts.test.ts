@@ -261,7 +261,8 @@ describe('KNOWN_VOICES catalog', () => {
     expect(KNOWN_VOICES.size).toBe(30);
   });
 
-  it('includes the default Enceladus', () => {
+  it('ships default is Enceladus (no env)', () => {
+    // Default for the suite — TTS_DEFAULT_VOICE is unset in test env.
     expect(KNOWN_VOICES.has(DEFAULT_VOICE)).toBe(true);
     expect(DEFAULT_VOICE).toBe('Enceladus');
   });
@@ -405,5 +406,48 @@ describe('synthesize — provider wiring (mocked fetch)', () => {
     // Verify the directive did NOT leak into the input
     expect(body.input).not.toContain('[Director');
     expect(body.input).not.toContain('whispered');
+  });
+});
+
+describe('DEFAULT_VOICE env override', () => {
+  // DEFAULT_VOICE is resolved once at module init. Toggle via env +
+  // vi.resetModules() + dynamic re-import so each case sees a fresh
+  // module with the env it expects.
+  const originalEnv = process.env.TTS_DEFAULT_VOICE;
+
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env.TTS_DEFAULT_VOICE;
+    else process.env.TTS_DEFAULT_VOICE = originalEnv;
+    vi.resetModules();
+  });
+
+  it('TTS_DEFAULT_VOICE=Algenib → DEFAULT_VOICE is Algenib', async () => {
+    process.env.TTS_DEFAULT_VOICE = 'Algenib';
+    vi.resetModules();
+    const mod = await import('./tts.js');
+    expect(mod.DEFAULT_VOICE).toBe('Algenib');
+  });
+
+  it('unknown voice in env → falls back to Enceladus (warn logged)', async () => {
+    const warnSpy = vi.fn();
+    vi.doMock('./logger.js', () => ({
+      logger: { warn: warnSpy, info: vi.fn(), error: vi.fn() },
+    }));
+    process.env.TTS_DEFAULT_VOICE = 'NotAVoice';
+    vi.resetModules();
+    const mod = await import('./tts.js');
+    expect(mod.DEFAULT_VOICE).toBe('Enceladus');
+    expect(warnSpy).toHaveBeenCalledWith(
+      { env: 'NotAVoice' },
+      expect.stringContaining('TTS_DEFAULT_VOICE'),
+    );
+    vi.doUnmock('./logger.js');
+  });
+
+  it('no env → Enceladus', async () => {
+    delete process.env.TTS_DEFAULT_VOICE;
+    vi.resetModules();
+    const mod = await import('./tts.js');
+    expect(mod.DEFAULT_VOICE).toBe('Enceladus');
   });
 });

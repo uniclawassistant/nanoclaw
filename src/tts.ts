@@ -53,7 +53,21 @@ export const KNOWN_VOICES = new Set([
   'Zubenelgenubi',
 ]);
 
-export const DEFAULT_VOICE = 'Enceladus';
+// Per-instance default voice via env. Lets Unic (e.g. Algenib) and Chef
+// (default Enceladus) share the codebase while speaking with different
+// baseline voices. Resolved once at module init — change requires a
+// process restart, which matches how the rest of .env is treated.
+function resolveDefaultVoice(): string {
+  const env = process.env.TTS_DEFAULT_VOICE;
+  if (!env) return 'Enceladus';
+  if (KNOWN_VOICES.has(env)) return env;
+  logger.warn(
+    { env },
+    'TTS_DEFAULT_VOICE: unknown voice name, falling back to Enceladus',
+  );
+  return 'Enceladus';
+}
+export const DEFAULT_VOICE = resolveDefaultVoice();
 
 // Outer tag matches four shapes via a first-char discriminator:
 //   [[tts]]                → baseline, no payload
