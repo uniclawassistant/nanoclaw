@@ -507,10 +507,7 @@ export async function editImage(
   try {
     imageBuffer = fs.readFileSync(sourcePath);
   } catch (err) {
-    logger.error(
-      { err, sourcePath },
-      'Image edit: source file unreadable',
-    );
+    logger.error({ err, sourcePath }, 'Image edit: source file unreadable');
     return {
       ok: false,
       reason: 'source_missing',
