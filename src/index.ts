@@ -381,7 +381,7 @@ export async function sendWithTts(
 
   const directive = extractTtsDirective(text);
   if (directive && channel.sendVoice) {
-    const audio = await synthesize(directive.ttsText, directive.directive);
+    const audio = await synthesize(directive.ttsText);
     if (audio) {
       const msgId = await channel.sendVoice(jid, audio, threadId);
       recordOutgoing(jid, msgId, {
