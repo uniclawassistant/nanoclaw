@@ -15,13 +15,7 @@ You can generate, edit, and re-send images by including special tags in your res
 
 The host generates an image from the prompt, converts it to a JPEG preview (q=85), and sends the JPEG as a photo. The full-resolution PNG is kept on disk under `attachments/image_<timestamp>.png`.
 
-After a successful generation, the next prompt you receive will start with a system hint like:
-
-```
-[system: last generated image original: attachments/image_1776894040343.png. if user asks for the original/file/uncompressed version, respond with [[image-file: attachments/image_1776894040343.png]]]
-```
-
-That hint is **only visible to you** — it never appears in the chat.
+The host records the send in the message store with generation metadata attached. If the user later replies to the preview and asks for the original, the prompt, or an edit, call `get_message({message_id: <reply_to_id>})` — the response includes `file_path` (the JPEG preview), `generation.prompt`, and `generation.original_png_path` (the untouched PNG for `[[image-file: ...]]` follow-ups).
 
 ## Edit an existing image
 
@@ -42,9 +36,9 @@ The host sends the file as a Telegram **document** (no compression, full resolut
 - The user explicitly asks for the original / file / without compression / unprocessed (in any language: «оригинал», «файлом», «без сжатия», «raw», «full resolution», ...)
 - You're forwarding a previously generated image and want to preserve quality
 
-The path **must** come from the system hint shown above. Do not guess paths or try to `ls` the attachments folder — the hint tells you exactly which PNG corresponds to the most recent preview you sent.
+The path must come from `generation.original_png_path` returned by `get_message` for the preview message the user is referring to. Do not guess paths or try to `ls` the attachments folder — the stored record tells you exactly which PNG corresponds to each preview you sent.
 
-If multiple images are in flight and the user is asking about one that isn't the most recent, ask them to reply (Telegram reply) to the specific preview message — for now, when in doubt, just send the most recent original and confirm in text whether that's the right one.
+If the user didn't Telegram-reply to a specific preview and there's any ambiguity about which image they mean, ask them to reply to the one they want before calling `[[image-file:]]`.
 
 ## Message layout: tag in its own message, never mixed with text
 

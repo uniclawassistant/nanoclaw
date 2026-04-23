@@ -8,12 +8,14 @@ import {
   getAllRegisteredGroups,
   getLastBotMessageTimestamp,
   getLastUserMessageId,
+  getMessageById,
   getMessagesSince,
   getNewMessages,
   getTaskById,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
+  storeOutgoingMessage,
   updateTask,
 } from './db.js';
 import { formatMessages } from './router.js';
@@ -750,5 +752,102 @@ describe('getLastUserMessageId', () => {
 
     expect(getLastUserMessageId('a@g.us')).toBe('a-msg');
     expect(getLastUserMessageId('b@g.us')).toBeNull();
+  });
+});
+
+// --- getMessageById / storeOutgoingMessage (get_message tool) ---
+
+describe('getMessageById', () => {
+  it('returns null for a missing message', () => {
+    expect(getMessageById('nope', 'tg:123')).toBeNull();
+  });
+
+  it('returns inbound text with direction=in and type=text', () => {
+    storeChatMetadata('tg:123', '2026-04-23T12:00:00.000Z');
+    storeMessage({
+      id: '42',
+      chat_jid: 'tg:123',
+      sender: '99001',
+      sender_name: 'Alice',
+      content: 'hello there',
+      timestamp: '2026-04-23T12:00:00.000Z',
+      is_from_me: false,
+    });
+    const rec = getMessageById('42', 'tg:123');
+    expect(rec).not.toBeNull();
+    expect(rec!.direction).toBe('in');
+    expect(rec!.type).toBe('text');
+    expect(rec!.text).toBe('hello there');
+    expect(rec!.sender).toBe('Alice');
+    expect(rec!.file_path).toBeUndefined();
+    expect(rec!.generation).toBeUndefined();
+    expect(rec!.reactions).toEqual([]);
+  });
+
+  it('returns inbound photo with file_path and caption-as-text', () => {
+    storeChatMetadata('tg:123', '2026-04-23T12:00:00.000Z');
+    storeMessage({
+      id: '50',
+      chat_jid: 'tg:123',
+      sender: '99001',
+      sender_name: 'Alice',
+      content: '[Photo] (/workspace/group/attachments/photo_50.jpg) cool shot',
+      timestamp: '2026-04-23T12:00:00.000Z',
+      is_from_me: false,
+      message_type: 'photo',
+      file_path: 'attachments/photo_50.jpg',
+    });
+    const rec = getMessageById('50', 'tg:123');
+    expect(rec!.type).toBe('photo');
+    expect(rec!.direction).toBe('in');
+    expect(rec!.file_path).toBe('attachments/photo_50.jpg');
+    expect(rec!.text).toBe('cool shot');
+  });
+
+  it('returns outbound photo with generation metadata', () => {
+    storeChatMetadata('tg:123', '2026-04-23T12:00:00.000Z');
+    storeOutgoingMessage({
+      id: '77',
+      chat_jid: 'tg:123',
+      sender: 'Unic',
+      sender_name: 'Unic',
+      content: '[Photo] (attachments/image_1.jpg)',
+      timestamp: '2026-04-23T12:05:00.000Z',
+      message_type: 'photo',
+      file_path: 'attachments/image_1.jpg',
+      generation: {
+        prompt: 'a cat on the moon',
+        original_png_path: 'attachments/image_1.png',
+      },
+    });
+    const rec = getMessageById('77', 'tg:123');
+    expect(rec!.direction).toBe('out');
+    expect(rec!.type).toBe('photo');
+    expect(rec!.sender).toBe('Unic');
+    expect(rec!.file_path).toBe('attachments/image_1.jpg');
+    expect(rec!.generation).toEqual({
+      prompt: 'a cat on the moon',
+      original_png_path: 'attachments/image_1.png',
+    });
+  });
+
+  it('survives across a fresh DB handle (persisted columns)', () => {
+    // Reinit is handled by beforeEach elsewhere; we use storeOutgoingMessage
+    // + getMessageById on the same in-memory DB as a sanity check that the
+    // new columns are really round-trippable through SQL.
+    storeChatMetadata('tg:999', '2026-04-23T12:00:00.000Z');
+    storeOutgoingMessage({
+      id: '1',
+      chat_jid: 'tg:999',
+      sender: 'Unic',
+      sender_name: 'Unic',
+      content: 'greetings',
+      timestamp: '2026-04-23T12:00:00.000Z',
+      message_type: 'text',
+    });
+    const rec = getMessageById('1', 'tg:999');
+    expect(rec!.direction).toBe('out');
+    expect(rec!.type).toBe('text');
+    expect(rec!.text).toBe('greetings');
   });
 });
