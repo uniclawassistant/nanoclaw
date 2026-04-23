@@ -15,15 +15,42 @@ You can generate, edit, and re-send images by including special tags in your res
 
 The host generates an image from the prompt, converts it to a JPEG preview (q=85), and sends the JPEG as a photo. The full-resolution PNG is kept on disk under `attachments/image_<timestamp>.png`.
 
+**Default** is `1024x1024` at `quality=low` — fast and cheap, suitable for most chat replies. When the user explicitly wants sharp / detailed / print-quality output, use the `hd` preset below.
+
 The host records the send in the message store with generation metadata attached. If the user later replies to the preview and asks for the original, the prompt, or an edit, call `get_message({message_id: <reply_to_id>})` — the response includes `file_path` (the JPEG preview), `generation.prompt`, and `generation.original_png_path` (the untouched PNG for `[[image-file: ...]]` follow-ups).
+
+## Presets
+
+Adjust size, quality, and format with comma-separated presets between the colons:
+
+```
+[[image:portrait: prompt]]
+[[image:landscape,hd: prompt]]
+[[image:auto,hd,transparent: prompt]]
+```
+
+| Preset | Effect |
+|---|---|
+| *(none)* | square, fast/cheap (default: 1024x1024, quality=low) |
+| `portrait` | 1024x1536 |
+| `landscape` | 1536x1024 |
+| `auto` | OpenAI picks aspect ratio from the prompt |
+| `hd` | quality=high (slower, more expensive) |
+| `med` | quality=medium |
+| `transparent` | transparent background, PNG output |
+
+Combine freely (`portrait,hd`). Unknown presets are ignored with a warning. Conflicting size presets (e.g. `portrait,landscape`) fall back to the default square size. Same syntax works for `[[image-edit:portrait,hd: path | prompt]]`.
+
+Note: the preset list must be lowercase ASCII words separated by commas with no spaces. If the host sees `[[image:Word: ...]]` with uppercase or a space before the second colon, it treats the whole inner text as the prompt instead — so Cyrillic prompts like `[[image: котик]]` work as expected.
 
 ## Edit an existing image
 
 ```
 [[image-edit: attachments/photo_12345.jpg | describe the changes you want]]
+[[image-edit:portrait,hd: attachments/photo_12345.jpg | describe the changes]]
 ```
 
-The path is relative to your group directory (`/workspace/group/`). Use paths from photos the user sent you or from previously generated images. Same JPEG-preview + PNG-original behavior as `[[image:]]`.
+The path is relative to your group directory (`/workspace/group/`). Use paths from photos the user sent you or from previously generated images. Same JPEG-preview + PNG-original behavior as `[[image:]]`, and the same presets apply.
 
 ## Send the original PNG (no compression)
 
@@ -72,3 +99,4 @@ The same rule applies to `[[tts:]]` and any other host-side strip-tag: **tag-onl
 - Generated images are saved as `attachments/image_<timestamp>.png` (original) and `attachments/image_<timestamp>.jpg` (preview that ships to chat).
 - If generation fails (API error, missing source file, network), the tag is silently dropped and only the text part is sent.
 - If JPEG conversion fails (sips not available or errors), the host falls back to sending the PNG directly as photo — you don't need to handle this.
+- If the preview file is larger than Telegram's ~10MB photo cap (rare, but possible for large `transparent`/`hd` renders), the host automatically switches to sending the original PNG as a document so you still get full-fidelity delivery.
