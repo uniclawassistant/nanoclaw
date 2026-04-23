@@ -129,7 +129,7 @@ function recordOutgoing(
   }
 }
 
-async function sendWithTts(
+export async function sendWithTts(
   channel: Channel,
   jid: string,
   text: string,
@@ -939,14 +939,22 @@ async function main(): Promise<void> {
         return;
       }
       const text = formatOutbound(rawText);
-      if (text) await sendWithTts(channel, jid, text);
+      // Resolve folder from registered groups so [[image:...]] / [[image-edit:...]]
+      // tags emitted by scheduled tasks hit the image-gen pipeline instead of
+      // being sent as literal text. Mirror the IPC path below.
+      const folder = registeredGroups[jid]?.folder;
+      if (text) await sendWithTts(channel, jid, text, undefined, folder);
     },
   });
   startIpcWatcher({
     sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return sendWithTts(channel, jid, text);
+      // Same as the scheduler path: resolve folder so image tags emitted via
+      // mcp__nanoclaw__send_message (and from any intermediate, non-final
+      // assistant block) are processed instead of leaking as literal text.
+      const folder = registeredGroups[jid]?.folder;
+      return sendWithTts(channel, jid, text, undefined, folder);
     },
     setReaction: async (jid, messageId, emoji) => {
       const channel = findChannel(channels, jid);
