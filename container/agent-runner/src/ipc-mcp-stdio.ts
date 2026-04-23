@@ -193,6 +193,78 @@ LIMITATIONS:
 );
 
 server.tool(
+  'get_message',
+  `Fetch a stored message by chat JID and message ID. Returns sender, timestamp, text, attachments, and any feature-specific metadata (e.g. the generation prompt for images we previously created).
+
+WHEN TO USE:
+• You see a reply_to_<id> marker in an incoming message and need the original's context.
+• The user refers to "that image you sent", "my earlier message", etc. — query the message by id to get the exact text or attachment path.
+• You need the generation prompt of an image you produced earlier (e.g. to re-run, edit, or explain it).
+
+RETURN SHAPE (success case):
+{ message_id, chat_jid, timestamp, sender, direction: "in"|"out", type: "text"|"photo"|"document"|"voice"|"video"|"sticker"|"system", text?, reply_to_message_id?, file_path? (group-relative), generation?: {prompt, preset?, original_png_path}, reactions: [] }
+
+Missing message returns { found: false, message_id, chat_jid } — not an error.
+
+Don't spam calls — query only when you actually need the referenced message's content.`,
+  {
+    message_id: z
+      .string()
+      .describe(
+        'The channel-native message_id to look up (string or stringified number).',
+      ),
+    jid: z
+      .string()
+      .optional()
+      .describe('Chat JID. Defaults to the current chat if omitted.'),
+  },
+  async (args) => {
+    const requestId = crypto.randomUUID();
+    const data: Record<string, string> = {
+      type: 'get_message',
+      chatJid: args.jid ?? chatJid,
+      message_id: args.message_id,
+      requestId,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    const responsePath = path.join(RESPONSES_DIR, `${requestId}.json`);
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(responsePath)) {
+        try {
+          const resp = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+          fs.unlinkSync(responsePath);
+          if (!resp.success) {
+            return toolError(
+              `get_message failed: ${resp.error ?? 'unknown error'}`,
+            );
+          }
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify(resp.data, null, 2),
+              },
+            ],
+          };
+        } catch (err) {
+          return toolError(
+            `Failed to read get_message response: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      await sleep(100);
+    }
+
+    return toolError('get_message request timed out after 5s.');
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
 

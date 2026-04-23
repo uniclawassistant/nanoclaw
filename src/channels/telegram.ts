@@ -16,6 +16,7 @@ import { registerChannel, ChannelOpts } from './registry.js';
 import allowedReactions from './telegram-allowed-reactions.json' with { type: 'json' };
 import {
   Channel,
+  NewMessage,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
@@ -43,16 +44,16 @@ async function sendTelegramMessage(
   chatId: string | number,
   text: string,
   options: { message_thread_id?: number } = {},
-): Promise<void> {
+): Promise<{ message_id: number } | undefined> {
   try {
-    await api.sendMessage(chatId, text, {
+    return await api.sendMessage(chatId, text, {
       ...options,
       parse_mode: 'Markdown',
     });
   } catch (err) {
     // Fallback: send as plain text if Markdown parsing fails
     logger.debug({ err }, 'Markdown send failed, falling back to plain text');
-    await api.sendMessage(chatId, text, options);
+    return await api.sendMessage(chatId, text, options);
   }
 }
 
@@ -435,7 +436,11 @@ export class TelegramChannel implements Channel {
     const storeMedia = (
       ctx: any,
       placeholder: string,
-      opts?: { fileId?: string; filename?: string },
+      opts?: {
+        fileId?: string;
+        filename?: string;
+        messageType?: NonNullable<NewMessage['message_type']>;
+      },
     ) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
@@ -478,7 +483,7 @@ export class TelegramChannel implements Channel {
         isGroup,
       );
 
-      const deliver = (content: string) => {
+      const deliver = (content: string, groupRelPath?: string) => {
         const final = needsTriggerPrefix
           ? `@${ASSISTANT_NAME} ${content}`
           : content;
@@ -490,6 +495,8 @@ export class TelegramChannel implements Channel {
           content: final,
           timestamp,
           is_from_me: false,
+          message_type: opts?.messageType,
+          file_path: groupRelPath,
         });
       };
 
@@ -502,7 +509,14 @@ export class TelegramChannel implements Channel {
         this.downloadFile(opts.fileId, group.folder, filename).then(
           (filePath) => {
             if (filePath) {
-              deliver(`${placeholder} (${filePath})${caption}`);
+              // downloadFile returns a container-absolute path like
+              // /workspace/group/attachments/photo_123.jpg; strip the mount
+              // prefix so the stored file_path is group-relative.
+              const groupRel = filePath.replace(
+                /^\/workspace\/group\//,
+                '',
+              );
+              deliver(`${placeholder} (${filePath})${caption}`, groupRel);
             } else {
               deliver(`${placeholder}${caption}`);
             }
@@ -521,18 +535,21 @@ export class TelegramChannel implements Channel {
       storeMedia(ctx, '[Photo]', {
         fileId: largest?.file_id,
         filename: `photo_${ctx.message.message_id}`,
+        messageType: 'photo',
       });
     });
     this.bot.on('message:video', (ctx) => {
       storeMedia(ctx, '[Video]', {
         fileId: ctx.message.video?.file_id,
         filename: `video_${ctx.message.message_id}`,
+        messageType: 'video',
       });
     });
     this.bot.on('message:voice', (ctx) => {
       storeMedia(ctx, '[Voice message]', {
         fileId: ctx.message.voice?.file_id,
         filename: `voice_${ctx.message.message_id}`,
+        messageType: 'voice',
       });
     });
     this.bot.on('message:audio', (ctx) => {
@@ -541,6 +558,7 @@ export class TelegramChannel implements Channel {
       storeMedia(ctx, '[Audio]', {
         fileId: ctx.message.audio?.file_id,
         filename: name,
+        messageType: 'voice',
       });
     });
     this.bot.on('message:document', (ctx) => {
@@ -548,11 +566,12 @@ export class TelegramChannel implements Channel {
       storeMedia(ctx, `[Document: ${name}]`, {
         fileId: ctx.message.document?.file_id,
         filename: name,
+        messageType: 'document',
       });
     });
     this.bot.on('message:sticker', (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';
-      storeMedia(ctx, `[Sticker ${emoji}]`);
+      storeMedia(ctx, `[Sticker ${emoji}]`, { messageType: 'sticker' });
     });
     this.bot.on('message:location', (ctx) => storeMedia(ctx, '[Location]'));
     this.bot.on('message:contact', (ctx) => storeMedia(ctx, '[Contact]'));
@@ -627,10 +646,10 @@ export class TelegramChannel implements Channel {
     jid: string,
     text: string,
     threadId?: string,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     if (!this.bot) {
       logger.warn('Telegram bot not initialized');
-      return;
+      return undefined;
     }
 
     try {
@@ -639,26 +658,40 @@ export class TelegramChannel implements Channel {
         ? { message_thread_id: parseInt(threadId, 10) }
         : {};
 
-      // Telegram has a 4096 character limit per message — split if needed
+      // Telegram has a 4096 character limit per message — split if needed.
+      // We return the message_id of the FIRST chunk, which is how agents can
+      // reference the logical send via get_message.
       const MAX_LENGTH = 4096;
+      let firstMessageId: string | undefined;
       if (text.length <= MAX_LENGTH) {
-        await sendTelegramMessage(this.bot.api, numericId, text, options);
+        const sent = await sendTelegramMessage(
+          this.bot.api,
+          numericId,
+          text,
+          options,
+        );
+        firstMessageId = sent?.message_id?.toString();
       } else {
         for (let i = 0; i < text.length; i += MAX_LENGTH) {
-          await sendTelegramMessage(
+          const sent = await sendTelegramMessage(
             this.bot.api,
             numericId,
             text.slice(i, i + MAX_LENGTH),
             options,
           );
+          if (firstMessageId === undefined) {
+            firstMessageId = sent?.message_id?.toString();
+          }
         }
       }
       logger.info(
         { jid, length: text.length, threadId },
         'Telegram message sent',
       );
+      return firstMessageId;
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
+      return undefined;
     }
   }
 
@@ -740,21 +773,23 @@ export class TelegramChannel implements Channel {
     jid: string,
     audio: Buffer,
     threadId?: string,
-  ): Promise<void> {
-    if (!this.bot) return;
+  ): Promise<string | undefined> {
+    if (!this.bot) return undefined;
     try {
       const numericId = jid.replace(/^tg:/, '');
       const options = threadId
         ? { message_thread_id: parseInt(threadId, 10) }
         : {};
-      await this.bot.api.sendVoice(
+      const sent = await this.bot.api.sendVoice(
         numericId,
         new InputFile(audio, 'voice.ogg'),
         options,
       );
       logger.info({ jid }, 'Telegram voice message sent');
+      return sent?.message_id?.toString();
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram voice message');
+      return undefined;
     }
   }
 
@@ -763,8 +798,8 @@ export class TelegramChannel implements Channel {
     filePath: string,
     caption?: string,
     threadId?: string,
-  ): Promise<void> {
-    if (!this.bot) return;
+  ): Promise<string | undefined> {
+    if (!this.bot) return undefined;
     const numericId = jid.replace(/^tg:/, '');
     const options: Record<string, unknown> = {};
     if (caption) options.caption = caption;
@@ -772,7 +807,7 @@ export class TelegramChannel implements Channel {
 
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        await this.bot.api.sendPhoto(
+        const sent = await this.bot.api.sendPhoto(
           numericId,
           new InputFile(fs.readFileSync(filePath), path.basename(filePath)),
           options,
@@ -780,13 +815,14 @@ export class TelegramChannel implements Channel {
           AbortSignal.timeout(120_000) as any,
         );
         logger.info({ jid }, 'Telegram photo sent');
-        return;
+        return sent?.message_id?.toString();
       } catch (err) {
         logger.warn({ jid, attempt, err }, 'sendPhoto attempt failed');
         if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
       }
     }
     logger.error({ jid }, 'Failed to send Telegram photo after 3 attempts');
+    return undefined;
   }
 
   async sendDocument(
@@ -794,8 +830,8 @@ export class TelegramChannel implements Channel {
     filePath: string,
     caption?: string,
     threadId?: string,
-  ): Promise<void> {
-    if (!this.bot) return;
+  ): Promise<string | undefined> {
+    if (!this.bot) return undefined;
     const numericId = jid.replace(/^tg:/, '');
     const options: Record<string, unknown> = {};
     if (caption) options.caption = caption;
@@ -803,7 +839,7 @@ export class TelegramChannel implements Channel {
 
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        await this.bot.api.sendDocument(
+        const sent = await this.bot.api.sendDocument(
           numericId,
           new InputFile(fs.readFileSync(filePath), path.basename(filePath)),
           options,
@@ -811,7 +847,7 @@ export class TelegramChannel implements Channel {
           AbortSignal.timeout(120_000) as any,
         );
         logger.info({ jid }, 'Telegram document sent');
-        return;
+        return sent?.message_id?.toString();
       } catch (err) {
         logger.warn({ jid, attempt, err }, 'sendDocument attempt failed');
         if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
@@ -821,6 +857,7 @@ export class TelegramChannel implements Channel {
       { jid },
       'Failed to send Telegram document after 3 attempts',
     );
+    return undefined;
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {

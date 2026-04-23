@@ -157,6 +157,26 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+
+  // Add pull-based recall columns (get_message tool): per-message type,
+  // attachment path, and feature-specific metadata like image-gen prompts.
+  try {
+    database.exec(
+      `ALTER TABLE messages ADD COLUMN message_type TEXT DEFAULT 'text'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN file_path TEXT`);
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN generation_json TEXT`);
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -285,7 +305,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name, message_type, file_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -298,7 +318,148 @@ export function storeMessage(msg: NewMessage): void {
     msg.reply_to_message_id ?? null,
     msg.reply_to_message_content ?? null,
     msg.reply_to_sender_name ?? null,
+    msg.message_type ?? 'text',
+    msg.file_path ?? null,
   );
+}
+
+/**
+ * Store a message we sent (bot outbound). Stored with is_bot_message=1 so it
+ * doesn't leak back into the agent's context via getNewMessages /
+ * getMessagesSince, but is still addressable by get_message(message_id).
+ */
+export function storeOutgoingMessage(msg: {
+  id: string;
+  chat_jid: string;
+  sender: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  message_type: 'text' | 'photo' | 'document' | 'voice' | 'video';
+  file_path?: string | null;
+  generation?: {
+    prompt: string;
+    preset?: string;
+    original_png_path: string;
+  } | null;
+}): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, message_type, file_path, generation_json) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)`,
+  ).run(
+    msg.id,
+    msg.chat_jid,
+    msg.sender,
+    msg.sender_name,
+    msg.content,
+    msg.timestamp,
+    msg.message_type,
+    msg.file_path ?? null,
+    msg.generation ? JSON.stringify(msg.generation) : null,
+  );
+}
+
+export interface MessageRecord {
+  message_id: string;
+  chat_jid: string;
+  timestamp: string;
+  sender: string;
+  direction: 'in' | 'out';
+  type: 'text' | 'photo' | 'document' | 'voice' | 'video' | 'sticker' | 'system';
+  text?: string;
+  reply_to_message_id?: string;
+  file_path?: string;
+  generation?: {
+    prompt: string;
+    preset?: string;
+    original_png_path: string;
+  };
+  reactions: Array<{ emoji: string; sender: string; timestamp: string }>;
+}
+
+/**
+ * Fetch a single message by id + chat_jid, translating the storage row into
+ * the get_message return shape. Returns null if the message is not found.
+ */
+export function getMessageById(
+  messageId: string,
+  chatJid: string,
+): MessageRecord | null {
+  const row = db
+    .prepare(
+      `SELECT id, chat_jid, sender, sender_name, content, timestamp,
+              is_from_me, is_bot_message, reply_to_message_id,
+              message_type, file_path, generation_json
+         FROM messages WHERE id = ? AND chat_jid = ?`,
+    )
+    .get(messageId, chatJid) as
+    | {
+        id: string;
+        chat_jid: string;
+        sender: string;
+        sender_name: string | null;
+        content: string | null;
+        timestamp: string;
+        is_from_me: number | null;
+        is_bot_message: number | null;
+        reply_to_message_id: string | null;
+        message_type: string | null;
+        file_path: string | null;
+        generation_json: string | null;
+      }
+    | undefined;
+  if (!row) return null;
+
+  const direction: 'in' | 'out' =
+    row.is_from_me || row.is_bot_message ? 'out' : 'in';
+  const rawType = row.message_type || 'text';
+  const type = (
+    [
+      'text',
+      'photo',
+      'document',
+      'voice',
+      'video',
+      'sticker',
+      'system',
+    ].includes(rawType)
+      ? rawType
+      : 'text'
+  ) as MessageRecord['type'];
+
+  // For media messages, content is stored as "[Marker] (path) caption".
+  // Strip the "[Marker] (path)" prefix so `text` holds just the caption.
+  let text: string | undefined = row.content ?? undefined;
+  if (row.file_path && text) {
+    const stripped = text
+      .replace(/^\s*\[[^\]]+\]\s*(?:\([^)]+\))?\s*/, '')
+      .trim();
+    text = stripped || undefined;
+  } else if (text) {
+    text = text.trim() || undefined;
+  }
+
+  let generation: MessageRecord['generation'] | undefined;
+  if (row.generation_json) {
+    try {
+      generation = JSON.parse(row.generation_json);
+    } catch {
+      generation = undefined;
+    }
+  }
+
+  return {
+    message_id: row.id,
+    chat_jid: row.chat_jid,
+    timestamp: row.timestamp,
+    sender: row.sender_name || row.sender,
+    direction,
+    type,
+    text,
+    reply_to_message_id: row.reply_to_message_id ?? undefined,
+    file_path: row.file_path ?? undefined,
+    generation,
+    reactions: [],
+  };
 }
 
 /**
