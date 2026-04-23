@@ -21,6 +21,41 @@ export interface ImageGenResult {
   originalPath: string; // the untouched png file — for [[image-file: ...]] follow-ups
 }
 
+// Outcome of a generate/edit call that actually reached the API. `null` is
+// still returned for pre-flight failures (no API key, missing source) so
+// callers don't have to special-case those.
+export type ImageGenOutcome =
+  | ({ ok: true } & ImageGenResult)
+  | {
+      ok: false;
+      // 'moderation' — OpenAI safety system rejection (code moderation_block).
+      // 'generic'    — any other API-level user error (bad param, size, etc).
+      // 'transient'  — network/timeout/5xx; agent-side signalling is pointless.
+      reason: 'moderation' | 'generic' | 'transient';
+      code?: string;
+      message?: string;
+    };
+
+// Parse an OpenAI error JSON body for the shape used by /v1/images/*.
+// Returns `null` if the body can't be parsed.
+function classifyApiError(
+  status: number,
+  body: string,
+): { reason: 'moderation' | 'generic'; code?: string; message?: string } {
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { code?: string; message?: string };
+    };
+    const code = parsed.error?.code;
+    const message = parsed.error?.message;
+    if (code === 'moderation_block') return { reason: 'moderation', code, message };
+    if (status === 400) return { reason: 'generic', code, message };
+  } catch {
+    // Fallthrough
+  }
+  return { reason: 'generic', message: body.slice(0, 300) };
+}
+
 // [[image: prompt text here]] or [[image:portrait,hd: prompt text here]]
 const IMAGE_GEN_RE = /\[\[image:\s*([\s\S]*?)\]\]/i;
 // [[image-edit: path | prompt]] or [[image-edit:portrait,hd: path | prompt]]
@@ -235,7 +270,7 @@ export async function generateImage(
   prompt: string,
   attachmentsDir: string,
   presets?: string[],
-): Promise<ImageGenResult | null> {
+): Promise<ImageGenOutcome | null> {
   const apiKey = getApiKey();
   if (!apiKey) {
     logger.warn('Image gen: no OPENAI_TTS_API_KEY configured');
@@ -268,7 +303,7 @@ export async function generateImage(
       { err, promptLen: prompt.length, resolved },
       'Image gen: fetch failed',
     );
-    return null;
+    return { ok: false, reason: 'transient' };
   }
 
   if (!resp.ok) {
@@ -277,7 +312,11 @@ export async function generateImage(
       { status: resp.status, body: body.slice(0, 300) },
       'Image gen failed',
     );
-    return null;
+    // 5xx and 429 are transient — don't bother the agent with a signal.
+    if (resp.status >= 500 || resp.status === 429) {
+      return { ok: false, reason: 'transient' };
+    }
+    return { ok: false, ...classifyApiError(resp.status, body) };
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -285,7 +324,7 @@ export async function generateImage(
   const b64 = json.data?.[0]?.b64_json;
   if (!b64) {
     logger.error('Image gen: no b64_json in response');
-    return null;
+    return { ok: false, reason: 'transient' };
   }
 
   fs.mkdirSync(attachmentsDir, { recursive: true });
@@ -310,7 +349,7 @@ export async function generateImage(
     },
     'Image generated',
   );
-  return { previewPath, originalPath: pngPath };
+  return { ok: true, previewPath, originalPath: pngPath };
 }
 
 export async function editImage(
@@ -318,7 +357,7 @@ export async function editImage(
   prompt: string,
   attachmentsDir: string,
   presets?: string[],
-): Promise<ImageGenResult | null> {
+): Promise<ImageGenOutcome | null> {
   const apiKey = getApiKey();
   if (!apiKey) {
     logger.warn('Image edit: no OPENAI_TTS_API_KEY configured');
@@ -354,7 +393,7 @@ export async function editImage(
     });
   } catch (err) {
     logger.error({ err, sourcePath, resolved }, 'Image edit: fetch failed');
-    return null;
+    return { ok: false, reason: 'transient' };
   }
 
   if (!resp.ok) {
@@ -363,7 +402,10 @@ export async function editImage(
       { status: resp.status, body: body.slice(0, 300) },
       'Image edit failed',
     );
-    return null;
+    if (resp.status >= 500 || resp.status === 429) {
+      return { ok: false, reason: 'transient' };
+    }
+    return { ok: false, ...classifyApiError(resp.status, body) };
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -371,7 +413,7 @@ export async function editImage(
   const b64 = json.data?.[0]?.b64_json;
   if (!b64) {
     logger.error('Image edit: no b64_json in response');
-    return null;
+    return { ok: false, reason: 'transient' };
   }
 
   fs.mkdirSync(attachmentsDir, { recursive: true });
@@ -397,5 +439,5 @@ export async function editImage(
     },
     'Image edited',
   );
-  return { previewPath, originalPath: pngPath };
+  return { ok: true, previewPath, originalPath: pngPath };
 }

@@ -26,7 +26,11 @@ vi.mock('./tts.js', async () => {
   };
 });
 
-import { _initTestDatabase, storeChatMetadata } from './db.js';
+import {
+  _initTestDatabase,
+  getMessageById,
+  storeChatMetadata,
+} from './db.js';
 import { sendWithTts } from './index.js';
 import { editImage, generateImage } from './image-gen.js';
 import type { Channel } from './types.js';
@@ -96,7 +100,7 @@ afterEach(() => {
 
 describe('sendWithTts — image tag dispatch (fix for IPC/scheduler silent-drop)', () => {
   it('with groupFolder + [[image:]] → generateImage fires, sendPhoto called, sendMessage NOT called', async () => {
-    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true,
       previewPath: tmpPreview,
       originalPath: tmpOriginal,
     });
@@ -138,7 +142,7 @@ describe('sendWithTts — image tag dispatch (fix for IPC/scheduler silent-drop)
   });
 
   it('with groupFolder: presets parsed and forwarded to generateImage', async () => {
-    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true,
       previewPath: tmpPreview,
       originalPath: tmpOriginal,
     });
@@ -161,7 +165,7 @@ describe('sendWithTts — image tag dispatch (fix for IPC/scheduler silent-drop)
   });
 
   it('with groupFolder + [[image-edit:...]] → editImage fires, sendPhoto called', async () => {
-    (editImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (editImage as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true,
       previewPath: tmpPreview,
       originalPath: tmpOriginal,
     });
@@ -185,7 +189,7 @@ describe('sendWithTts — image tag dispatch (fix for IPC/scheduler silent-drop)
   it('IPC-path wrapper contract: when folder is resolved and passed, tag is handled; when omitted, literal leaks', async () => {
     // Simulate the two sides of the pre-fix vs post-fix IPC sendMessage:
     // The wrapper is essentially `sendWithTts(ch, jid, text, undefined, folder?)`.
-    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true,
       previewPath: tmpPreview,
       originalPath: tmpOriginal,
     });
@@ -227,5 +231,198 @@ describe('sendWithTts — image tag dispatch (fix for IPC/scheduler silent-drop)
       'hello there',
       undefined,
     );
+  });
+});
+
+describe('sendWithTts — image-gen failure signalling', () => {
+  it('moderation_block → [host] signal sent, no photo, original prompt NOT leaked', async () => {
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      reason: 'moderation',
+      code: 'moderation_block',
+      message: 'Your request was rejected by the safety system.',
+    });
+    const channel = makeMockChannel();
+
+    await sendWithTts(
+      channel,
+      'tg:123',
+      '[[image: a sensitive prompt]]',
+      undefined,
+      'main',
+    );
+
+    await vi.waitFor(() => {
+      expect(channel.__calls.sendMessage).toHaveBeenCalled();
+    });
+    const [jid, text] = channel.__calls.sendMessage.mock.calls[0];
+    expect(jid).toBe('tg:123');
+    expect(text).toMatch(/^\[host\]/);
+    expect(text).toContain('moderation');
+    expect(text).toContain('Rephrase');
+    // Crucially: the rejected prompt text must NOT be echoed to chat/DB.
+    expect(text).not.toContain('a sensitive prompt');
+    expect(channel.__calls.sendPhoto).not.toHaveBeenCalled();
+  });
+
+  it('generic 400 user_error → [host] signal with "Adjust" + code hint', async () => {
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      reason: 'generic',
+      code: 'invalid_value',
+      message: 'Transparent background is not supported for this model.',
+    });
+    const channel = makeMockChannel();
+
+    await sendWithTts(channel, 'tg:123', '[[image: a cat]]', undefined, 'main');
+
+    await vi.waitFor(() => {
+      expect(channel.__calls.sendMessage).toHaveBeenCalled();
+    });
+    const text = channel.__calls.sendMessage.mock.calls[0][1];
+    expect(text).toMatch(/^\[host\]/);
+    expect(text).toContain('Adjust');
+    expect(text).toContain('invalid_value');
+  });
+
+  it('transient (5xx, network) → NO [host] signal (noise for the agent)', async () => {
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      reason: 'transient',
+    });
+    const channel = makeMockChannel();
+
+    await sendWithTts(channel, 'tg:123', '[[image: a cat]]', undefined, 'main');
+
+    // Give the fire-and-forget a tick to settle.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(channel.__calls.sendMessage).not.toHaveBeenCalled();
+    expect(channel.__calls.sendPhoto).not.toHaveBeenCalled();
+  });
+
+  it('threshold: 3rd consecutive moderation_block appends "Stop retrying"', async () => {
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      reason: 'moderation',
+      code: 'moderation_block',
+    });
+    const channel = makeMockChannel();
+
+    // 1st + 2nd: plain signal
+    for (let i = 0; i < 2; i++) {
+      await sendWithTts(
+        channel,
+        'tg:123',
+        '[[image: attempt]]',
+        undefined,
+        'threshold-group',
+      );
+    }
+    await vi.waitFor(() => {
+      expect(channel.__calls.sendMessage).toHaveBeenCalledTimes(2);
+    });
+    for (const call of channel.__calls.sendMessage.mock.calls) {
+      expect(call[1]).not.toContain('Stop retrying');
+    }
+
+    // 3rd call: suffix kicks in
+    await sendWithTts(
+      channel,
+      'tg:123',
+      '[[image: attempt]]',
+      undefined,
+      'threshold-group',
+    );
+    await vi.waitFor(() => {
+      expect(channel.__calls.sendMessage).toHaveBeenCalledTimes(3);
+    });
+    const third = channel.__calls.sendMessage.mock.calls[2][1];
+    expect(third).toContain('Stop retrying');
+  });
+
+  it('successful generation clears the moderation counter', async () => {
+    // Seed counter via two moderation rejects
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      reason: 'moderation',
+      code: 'moderation_block',
+    });
+    const channel = makeMockChannel();
+    for (let i = 0; i < 2; i++) {
+      await sendWithTts(
+        channel,
+        'tg:123',
+        '[[image: attempt]]',
+        undefined,
+        'reset-group',
+      );
+    }
+    await vi.waitFor(() => {
+      expect(channel.__calls.sendMessage).toHaveBeenCalledTimes(2);
+    });
+
+    // Success resets the counter
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      previewPath: tmpPreview,
+      originalPath: tmpOriginal,
+    });
+    await sendWithTts(
+      channel,
+      'tg:123',
+      '[[image: good one]]',
+      undefined,
+      'reset-group',
+    );
+    await vi.waitFor(() => {
+      expect(channel.__calls.sendPhoto).toHaveBeenCalled();
+    });
+
+    // Now two more moderation rejects — counter should start from zero again,
+    // so neither gets the "Stop retrying" suffix.
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      reason: 'moderation',
+      code: 'moderation_block',
+    });
+    channel.__calls.sendMessage.mockClear();
+    for (let i = 0; i < 2; i++) {
+      await sendWithTts(
+        channel,
+        'tg:123',
+        '[[image: attempt]]',
+        undefined,
+        'reset-group',
+      );
+    }
+    await vi.waitFor(() => {
+      expect(channel.__calls.sendMessage).toHaveBeenCalledTimes(2);
+    });
+    for (const call of channel.__calls.sendMessage.mock.calls) {
+      expect(call[1]).not.toContain('Stop retrying');
+    }
+  });
+
+  it('host signal is stored with sender=host, is_from_me=1, is_bot_message=0 (agent context, not user-fallback)', async () => {
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      reason: 'moderation',
+      code: 'moderation_block',
+    });
+    const channel = makeMockChannel();
+
+    await sendWithTts(channel, 'tg:123', '[[image: x]]', undefined, 'main');
+    await vi.waitFor(() => {
+      expect(channel.__calls.sendMessage).toHaveBeenCalled();
+    });
+
+    // channel.sendMessage mock returns 'm-100' (per makeMockChannel).
+    const rec = getMessageById('m-100', 'tg:123');
+    expect(rec).not.toBeNull();
+    expect(rec!.sender).toBe('host');
+    // direction 'out' means is_from_me=1 OR is_bot_message=1 — for our
+    // host-signal flag combo (is_from_me=1, is_bot_message=0) this is 'out'.
+    expect(rec!.direction).toBe('out');
+    expect(rec!.text).toMatch(/^\[host\]/);
   });
 });
