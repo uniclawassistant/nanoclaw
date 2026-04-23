@@ -74,6 +74,7 @@ export const KNOWN_PRESETS = new Set([
   'auto',
   'hd',
   'med',
+  'png',
 ]);
 const SIZE_PRESETS = new Set(['portrait', 'landscape', 'auto']);
 // Custom WxH override, e.g. "1920x1080". Bounds are validated in
@@ -141,6 +142,11 @@ export interface ResolvedPresets {
   // dimensions; custom WxH tokens pass through verbatim after validation.
   size: string;
   quality: 'low' | 'medium' | 'high';
+  // Output format. Undefined → default JPEG 85% (smaller, ships as photo
+  // directly without sips conversion, recoverable to higher quality via
+  // [[image-edit:...]] upscale). Set to 'png' only when the `png` preset is
+  // used, for lossless output (graphics, text, explicit user request).
+  output_format?: 'png';
 }
 
 /**
@@ -165,6 +171,8 @@ export function resolvePresets(presets: string[] | undefined): ResolvedPresets {
       else if (p === 'auto') resolvedSizes.push('auto');
     } else if (p === 'hd' || p === 'med') {
       qualityTokens.push(p);
+    } else if (p === 'png') {
+      out.output_format = 'png';
     } else if (CUSTOM_SIZE_RE.test(p)) {
       const [w, h] = p.split('x').map((n) => parseInt(n, 10));
       const reason = validateCustomSize(w, h);
@@ -279,6 +287,7 @@ export async function generateImage(
   }
 
   const resolved = resolvePresets(presets);
+  const wantsPng = resolved.output_format === 'png';
 
   let resp: Response;
   try {
@@ -289,6 +298,14 @@ export async function generateImage(
       size: resolved.size,
       quality: resolved.quality,
     };
+    // Default: ask OpenAI for JPEG at 85% directly — smaller wire, smaller
+    // disk, and ships as photo without a local sips step. The `png` preset
+    // (explicit opt-in) keeps the legacy PNG-plus-sips path for lossless
+    // cases (graphics, text, explicit user ask).
+    if (!wantsPng) {
+      body.output_format = 'jpeg';
+      body.output_compression = 85;
+    }
 
     resp = await fetch('https://api.openai.com/v1/images/generations', {
       method: 'POST',
@@ -329,28 +346,41 @@ export async function generateImage(
   }
 
   fs.mkdirSync(attachmentsDir, { recursive: true });
-  const filename = `image_${Date.now()}.png`;
-  const pngPath = path.join(attachmentsDir, filename);
+  const ext = wantsPng ? 'png' : 'jpg';
+  const filename = `image_${Date.now()}.${ext}`;
+  const imagePath = path.join(attachmentsDir, filename);
   const buf = Buffer.from(b64, 'base64');
-  fs.writeFileSync(pngPath, buf);
+  fs.writeFileSync(imagePath, buf);
 
-  const jpegPath = await convertToJpegPreview(pngPath);
-  const previewPath = jpegPath ?? pngPath;
+  // For PNG mode: convert to a JPEG preview so the photo upload stays small,
+  // keep the PNG as "original" for [[image-file:...]] re-sends.
+  // For JPEG default: preview and original are the same file — OpenAI's
+  // JPEG ships as photo directly, and [[image-file:...]] sends it as doc.
+  let previewPath: string;
+  let originalPath: string;
+  if (wantsPng) {
+    const jpegPath = await convertToJpegPreview(imagePath);
+    previewPath = jpegPath ?? imagePath;
+    originalPath = imagePath;
+  } else {
+    previewPath = imagePath;
+    originalPath = imagePath;
+  }
   const previewBytes = fs.statSync(previewPath).size;
 
   logger.info(
     {
-      pngPath,
-      pngBytes: buf.length,
+      imagePath,
+      imageBytes: buf.length,
       previewPath,
       previewBytes,
-      jpegConverted: jpegPath !== null,
+      wantsPng,
       promptLen: prompt.length,
       resolved,
     },
     'Image generated',
   );
-  return { ok: true, previewPath, originalPath: pngPath };
+  return { ok: true, previewPath, originalPath };
 }
 
 export async function editImage(
@@ -371,10 +401,15 @@ export async function editImage(
   }
 
   const resolved = resolvePresets(presets);
+  const wantsPng = resolved.output_format === 'png';
 
+  // Tag the input MIME by actual extension so OpenAI parses it correctly —
+  // the source may be a JPEG (default output format) or a legacy PNG.
+  const sourceExt = path.extname(sourcePath).toLowerCase();
+  const sourceMime = sourceExt === '.png' ? 'image/png' : 'image/jpeg';
   const imageBuffer = fs.readFileSync(sourcePath);
   const imageFile = new File([imageBuffer], path.basename(sourcePath), {
-    type: 'image/png',
+    type: sourceMime,
   });
 
   const form = new FormData();
@@ -383,6 +418,10 @@ export async function editImage(
   form.append('prompt', prompt);
   form.append('size', resolved.size);
   form.append('quality', resolved.quality);
+  if (!wantsPng) {
+    form.append('output_format', 'jpeg');
+    form.append('output_compression', '85');
+  }
 
   let resp: Response;
   try {
@@ -418,27 +457,37 @@ export async function editImage(
   }
 
   fs.mkdirSync(attachmentsDir, { recursive: true });
-  const filename = `image_${Date.now()}.png`;
-  const pngPath = path.join(attachmentsDir, filename);
+  const ext = wantsPng ? 'png' : 'jpg';
+  const filename = `image_${Date.now()}.${ext}`;
+  const imagePath = path.join(attachmentsDir, filename);
   const buf = Buffer.from(b64, 'base64');
-  fs.writeFileSync(pngPath, buf);
+  fs.writeFileSync(imagePath, buf);
 
-  const jpegPath = await convertToJpegPreview(pngPath);
-  const previewPath = jpegPath ?? pngPath;
+  let previewPath: string;
+  let originalPath: string;
+  if (wantsPng) {
+    const jpegPath = await convertToJpegPreview(imagePath);
+    previewPath = jpegPath ?? imagePath;
+    originalPath = imagePath;
+  } else {
+    previewPath = imagePath;
+    originalPath = imagePath;
+  }
   const previewBytes = fs.statSync(previewPath).size;
 
   logger.info(
     {
-      pngPath,
-      pngBytes: buf.length,
+      imagePath,
+      imageBytes: buf.length,
       previewPath,
       previewBytes,
-      jpegConverted: jpegPath !== null,
+      wantsPng,
       sourcePath,
+      sourceMime,
       promptLen: prompt.length,
       resolved,
     },
     'Image edited',
   );
-  return { ok: true, previewPath, originalPath: pngPath };
+  return { ok: true, previewPath, originalPath };
 }

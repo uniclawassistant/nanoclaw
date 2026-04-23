@@ -36,6 +36,12 @@ describe('extractImageDirective — presets parsing', () => {
     expect(d?.prompt).toBe('a poster');
   });
 
+  it('png preset parses alongside other tokens', () => {
+    const d = extractImageDirective('[[image:portrait,hd,png: a diagram]]');
+    expect(d?.presets).toEqual(['portrait', 'hd', 'png']);
+    expect(d?.prompt).toBe('a diagram');
+  });
+
   it('preset-like prefix with uppercase is treated as prompt', () => {
     // "Plot: a graph" — uppercase P → not a preset list
     const d = extractImageDirective('[[image: Plot: a graph]]');
@@ -232,6 +238,31 @@ describe('resolvePresets', () => {
     expect(resolvePresets(['auto', 'hd'])).toEqual({
       size: 'auto',
       quality: 'high',
+    });
+  });
+
+  it('default has no output_format (host asks API for JPEG 85%)', () => {
+    // Default ResolvedPresets has no output_format — the generate path
+    // interprets that as "request jpeg/85 directly from OpenAI". Only the
+    // `png` preset flips it.
+    expect(resolvePresets([]).output_format).toBeUndefined();
+    expect(resolvePresets(['hd']).output_format).toBeUndefined();
+    expect(resolvePresets(['landscape', 'hd']).output_format).toBeUndefined();
+  });
+
+  it('png preset → output_format=png (legacy PNG+sips path)', () => {
+    expect(resolvePresets(['png'])).toEqual({
+      size: '1024x1024',
+      quality: 'low',
+      output_format: 'png',
+    });
+  });
+
+  it('png combined with other presets', () => {
+    expect(resolvePresets(['portrait', 'hd', 'png'])).toEqual({
+      size: '1024x1536',
+      quality: 'high',
+      output_format: 'png',
     });
   });
 });
