@@ -182,12 +182,17 @@ async function sendWithTts(
         // add up to several minutes in the worst case). Text ships immediately
         // through the TTS branch below; the photo lands when it lands.
         const genPrompt = imgDirective.prompt;
+        const presets = imgDirective.presets;
         void (async () => {
           try {
             let result: { previewPath: string; originalPath: string } | null =
               null;
             if (imgDirective.type === 'generate') {
-              result = await generateImage(imgDirective.prompt, attachmentsDir);
+              result = await generateImage(
+                imgDirective.prompt,
+                attachmentsDir,
+                presets,
+              );
             } else if (
               imgDirective.type === 'edit' &&
               imgDirective.sourcePath
@@ -201,6 +206,7 @@ async function sendWithTts(
                 sourceFull,
                 imgDirective.prompt,
                 attachmentsDir,
+                presets,
               );
             }
             if (result) {
@@ -212,7 +218,33 @@ async function sendWithTts(
                 groupRootAbs,
                 result.previewPath,
               );
-              if (channel.sendPhoto) {
+              // Telegram's bot-API photo endpoint rejects files >10MB with
+              // PHOTO_INVALID_DIMENSIONS. For oversized previews (large
+              // transparent PNGs, hd renders) fall back to sending the
+              // original PNG as a document — full fidelity, no size cap.
+              const previewSize = fs.statSync(result.previewPath).size;
+              const PHOTO_SIZE_CAP = 9 * 1024 * 1024;
+              if (previewSize > PHOTO_SIZE_CAP && channel.sendDocument) {
+                logger.info(
+                  { jid, previewSize, relOriginal },
+                  'Preview exceeds photo size cap, falling back to document',
+                );
+                const msgId = await channel.sendDocument(
+                  jid,
+                  result.originalPath,
+                  undefined,
+                  threadId,
+                );
+                recordOutgoing(jid, msgId, {
+                  content: `[Document] (${relOriginal})`,
+                  messageType: 'document',
+                  filePath: relOriginal,
+                  generation: {
+                    prompt: genPrompt,
+                    original_png_path: relOriginal,
+                  },
+                });
+              } else if (channel.sendPhoto) {
                 const msgId = await channel.sendPhoto(
                   jid,
                   result.previewPath,

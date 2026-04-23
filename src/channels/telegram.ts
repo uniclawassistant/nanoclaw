@@ -745,6 +745,9 @@ export class TelegramChannel implements Channel {
     if (caption) options.caption = caption;
     if (threadId) options.message_thread_id = parseInt(threadId, 10);
 
+    // 180s — photo previews are ~200KB but documents ship full-resolution
+    // PNGs (1-5MB on hd renders), so the upload tail needs headroom over the
+    // photo timeout (120s).
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const sent = await this.bot.api.sendDocument(
@@ -752,7 +755,7 @@ export class TelegramChannel implements Channel {
           new InputFile(fs.readFileSync(filePath), path.basename(filePath)),
           options,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          AbortSignal.timeout(120_000) as any,
+          AbortSignal.timeout(180_000) as any,
         );
         logger.info({ jid }, 'Telegram document sent');
         return sent?.message_id?.toString();
