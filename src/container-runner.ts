@@ -204,14 +204,27 @@ function buildVolumeMounts(
     'agent-runner-src',
   );
   if (fs.existsSync(agentRunnerSrc)) {
-    const srcIndex = path.join(agentRunnerSrc, 'index.ts');
-    const cachedIndex = path.join(groupAgentRunnerDir, 'index.ts');
+    // Compare the latest mtime across the entire source tree so that edits to
+    // any file (not just index.ts) trigger a recopy. The previous version
+    // gated on index.ts alone, which meant PRs that touched only
+    // ipc-mcp-stdio.ts or the allowed-reactions JSON silently shipped with a
+    // stale /app/src mount after merge + rebuild.
+    const newestMtime = (dir: string): number => {
+      let max = 0;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        const m = entry.isDirectory()
+          ? newestMtime(full)
+          : fs.statSync(full).mtimeMs;
+        if (m > max) max = m;
+      }
+      return max;
+    };
     const needsCopy =
       !fs.existsSync(groupAgentRunnerDir) ||
-      !fs.existsSync(cachedIndex) ||
-      (fs.existsSync(srcIndex) &&
-        fs.statSync(srcIndex).mtimeMs > fs.statSync(cachedIndex).mtimeMs);
+      newestMtime(agentRunnerSrc) > newestMtime(groupAgentRunnerDir);
     if (needsCopy) {
+      fs.rmSync(groupAgentRunnerDir, { recursive: true, force: true });
       fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
     }
   }
