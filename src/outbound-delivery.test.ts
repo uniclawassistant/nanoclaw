@@ -149,7 +149,7 @@ describe('sendWithTts — image tag dispatch (fix for IPC/scheduler silent-drop)
     await sendWithTts(
       channel,
       'tg:123',
-      '[[image:portrait,hd: a cat]]',
+      '[[image:portrait,quality=high: a cat]]',
       undefined,
       'main',
     );
@@ -157,7 +157,7 @@ describe('sendWithTts — image tag dispatch (fix for IPC/scheduler silent-drop)
     await vi.waitFor(() => {
       expect(generateImage).toHaveBeenCalledWith('a cat', expect.any(String), [
         'portrait',
-        'hd',
+        'quality=high',
       ]);
     });
   });

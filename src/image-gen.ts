@@ -64,25 +64,35 @@ const IMAGE_EDIT_RE = /\[\[image-edit:\s*([\s\S]*?)\]\]/i;
 // [[image-file: path/to/file.png]] — no presets, works on existing files
 const IMAGE_FILE_RE = /\[\[image-file:\s*([\s\S]*?)\]\]/i;
 
-// Known preset vocabulary. Kept as the single source of truth — resolvePresets
-// validates against this set and logs+ignores unknown tokens. Custom WxH
-// size tokens (e.g. "1920x1080") are accepted via CUSTOM_SIZE_RE in
-// addition to this set.
+// Named size vocabulary. All other parameters (quality, format, compression)
+// are expressed via explicit key=value tokens (see KNOWN_KEYWORDS below) —
+// we deliberately avoid quality/format shortcut presets so the agent has to
+// think about what it actually needs per task instead of picking from a menu.
 export const KNOWN_PRESETS = new Set([
   'portrait',
   'landscape',
+  'square',
   'auto',
-  'hd',
-  'med',
-  'png',
 ]);
-const SIZE_PRESETS = new Set(['portrait', 'landscape', 'auto']);
-// Custom WxH override, e.g. "1920x1080". Bounds are validated in
+const SIZE_PRESETS = KNOWN_PRESETS;
+
+// Custom WxH override, e.g. "1920x1088". Bounds are validated in
 // resolvePresets against gpt-image-2 constraints (see validateCustomSize).
 const CUSTOM_SIZE_RE = /^\d+x\d+$/;
 
+// Explicit key=value parameter syntax. Each known key has a validator for
+// the value that can warn-and-ignore without killing the whole directive.
+const KNOWN_KEYWORDS = new Set(['format', 'quality', 'compression', 'size']);
+const KEYWORD_RE = /^([a-z]+)=([a-z0-9x]+)$/;
+
 function isPresetToken(p: string): boolean {
-  return KNOWN_PRESETS.has(p) || CUSTOM_SIZE_RE.test(p);
+  if (KNOWN_PRESETS.has(p)) return true;
+  if (CUSTOM_SIZE_RE.test(p)) return true;
+  const kw = p.match(KEYWORD_RE);
+  // Only accept a key=value token if the key is one we know — keeps natural
+  // prompts like "[[image: author=Fedor: biography]]" intact (author isn't
+  // a known keyword so the whole inner falls through as prompt).
+  return kw !== null && KNOWN_KEYWORDS.has(kw[1]);
 }
 
 // gpt-image-2 size constraints (per OpenAI docs):
@@ -102,35 +112,36 @@ function validateCustomSize(w: number, h: number): string | null {
 
 /**
  * If the inner body starts with a comma-separated list of lowercase ASCII
- * tokens followed by a colon, strip it off and return as presets. Otherwise
- * the entire inner is prompt/body and presets are empty.
+ * tokens (named size, custom WxH, or key=value pair with a known key) followed
+ * by a colon, strip it off and return as presets. Otherwise the entire inner
+ * is prompt/body and presets are empty.
  *
  * Examples:
- *   "a cat"                     → { presets: [],                body: "a cat" }
- *   "portrait: a cat"           → { presets: ["portrait"],      body: "a cat" }
- *   "portrait,hd: a cat"        → { presets: ["portrait","hd"], body: "a cat" }
- *   "Plot: a graph"             → { presets: [],                body: "Plot: a graph" }  (uppercase → not preset syntax)
- *   "foo bar: text"             → { presets: [],                body: "foo bar: text" } (space → not preset syntax)
+ *   "a cat"                              → { presets: [],                       body: "a cat" }
+ *   "portrait: a cat"                    → { presets: ["portrait"],             body: "a cat" }
+ *   "portrait,quality=high: a cat"       → { presets: ["portrait","quality=high"], body: "a cat" }
+ *   "format=png,size=1536x1024: prompt"  → { presets: ["format=png","size=1536x1024"], body: "prompt" }
+ *   "Plot: a graph"                      → { presets: [],                       body: "Plot: a graph" } (uppercase → not preset syntax)
+ *   "author=Fedor: bio"                  → { presets: [],                       body: "author=Fedor: bio" } (unknown key → not preset syntax)
+ *   "foo bar: text"                      → { presets: [],                       body: "foo bar: text" } (space → not preset syntax)
  */
 function splitPresetsAndBody(inner: string): {
   presets: string[];
   body: string;
 } {
-  // Match even an empty body after the preset colon, so callers can
-  // distinguish "presets present, prompt missing" (→ null directive) from
-  // "no preset section at all" (→ body is whole inner).
-  const m = inner.match(/^([a-z0-9_,-]+)\s*:\s*([\s\S]*)$/);
+  // Character class covers named presets (letters), custom WxH (digits + x),
+  // underscores/hyphens (none used today but safe), and "=" for keyword form.
+  const m = inner.match(/^([a-z0-9_,=-]+)\s*:\s*([\s\S]*)$/);
   if (!m) return { presets: [], body: inner.trim() };
   const candidates = m[1]
     .split(',')
     .map((p) => p.trim())
     .filter(Boolean);
-  // Require EVERY token to be a known preset. Otherwise assume the leading
-  // "word:" (e.g. "sunset:", "plan:", "cat:") is actually part of the
-  // prompt — safer than silently dropping it under an "unknown preset"
-  // warning. Covers the lowercase-word-colon-phrase false positive the
-  // uppercase guard doesn't catch. Programmatic callers of resolvePresets
-  // still get their warning if they pass unknown tokens directly.
+  // Strict: every token must be shape-valid (known preset / custom WxH /
+  // key=value with known key). If any is off, treat the whole inner as a
+  // prompt — protects natural text like "sunset: golden hour" or
+  // "author=Fedor: biography" from silent loss. resolvePresets still warns
+  // on SEMANTIC problems (bad size bounds, bad format value, png+compression).
   if (candidates.length === 0 || !candidates.every(isPresetToken)) {
     return { presets: [], body: inner.trim() };
   }
@@ -142,38 +153,55 @@ export interface ResolvedPresets {
   // dimensions; custom WxH tokens pass through verbatim after validation.
   size: string;
   quality: 'low' | 'medium' | 'high';
-  // Output format. Undefined → default JPEG 85% (smaller, ships as photo
-  // directly without sips conversion, recoverable to higher quality via
-  // [[image-edit:...]] upscale). Set to 'png' only when the `png` preset is
-  // used, for lossless output (graphics, text, explicit user request).
-  output_format?: 'png';
+  // Output format sent to the API. Default 'jpeg' lets OpenAI return a
+  // JPEG directly at output_compression quality, skipping local sips.
+  // 'png' opts into the legacy PNG-plus-sips-preview path for lossless
+  // cases. 'webp' also supported.
+  output_format: 'jpeg' | 'png' | 'webp';
+  // Only applies to jpeg/webp (PNG ignores it). 1..100, defaults to 85.
+  output_compression?: number;
 }
 
+const NAMED_SIZE_MAP: Record<string, string> = {
+  portrait: '1024x1536',
+  landscape: '1536x1024',
+  square: '1024x1024',
+  auto: 'auto',
+};
+
 /**
- * Resolve raw preset tokens to OpenAI API params. Unknown tokens log a
- * warning and are ignored. Conflicting size presets fall back to default
- * with a warning. Quality "last wins" among hd/med.
+ * Resolve raw preset tokens to OpenAI API params.
+ *
+ * Strict at the parser level (splitPresetsAndBody), lenient here: invalid
+ * keyword VALUES (e.g. format=tiff, compression=0) warn and are ignored
+ * but don't kill the whole directive — other tokens still apply. Last
+ * write wins for same-key keyword tokens (e.g. quality=low,quality=high).
+ * Conflicting size tokens (multiple sizes specified) fall back to default
+ * size with a warning.
  */
 export function resolvePresets(presets: string[] | undefined): ResolvedPresets {
-  const out: ResolvedPresets = { size: '1024x1024', quality: 'low' };
+  const out: ResolvedPresets = {
+    size: '1024x1024',
+    quality: 'medium',
+    output_format: 'jpeg',
+    output_compression: 85,
+  };
   if (!presets || presets.length === 0) return out;
 
   // Each entry is the final resolved size string (e.g. "1024x1536",
   // "1920x1080", "auto"). Used to detect conflicts across both named and
-  // custom size tokens.
+  // custom size tokens plus size=WxH keyword.
   const resolvedSizes: string[] = [];
-  const qualityTokens: string[] = [];
+  // Track whether user explicitly set compression to distinguish default
+  // from explicit in the png+compression conflict warning.
+  let compressionSetExplicitly = false;
 
   for (const p of presets) {
     if (SIZE_PRESETS.has(p)) {
-      if (p === 'portrait') resolvedSizes.push('1024x1536');
-      else if (p === 'landscape') resolvedSizes.push('1536x1024');
-      else if (p === 'auto') resolvedSizes.push('auto');
-    } else if (p === 'hd' || p === 'med') {
-      qualityTokens.push(p);
-    } else if (p === 'png') {
-      out.output_format = 'png';
-    } else if (CUSTOM_SIZE_RE.test(p)) {
+      resolvedSizes.push(NAMED_SIZE_MAP[p]);
+      continue;
+    }
+    if (CUSTOM_SIZE_RE.test(p)) {
       const [w, h] = p.split('x').map((n) => parseInt(n, 10));
       const reason = validateCustomSize(w, h);
       if (reason) {
@@ -184,11 +212,66 @@ export function resolvePresets(presets: string[] | undefined): ResolvedPresets {
         continue;
       }
       resolvedSizes.push(p);
-    } else {
-      // Parser already enforces that tokens are known; reaching here means a
-      // programmatic caller passed something unexpected.
-      logger.warn({ preset: p }, 'image-gen: unknown preset, ignoring');
+      continue;
     }
+    const kw = p.match(KEYWORD_RE);
+    if (kw && KNOWN_KEYWORDS.has(kw[1])) {
+      const [, key, value] = kw;
+      if (key === 'format') {
+        if (value === 'jpeg' || value === 'png' || value === 'webp') {
+          out.output_format = value;
+        } else {
+          logger.warn(
+            { key, value },
+            'image-gen: unknown format value, ignoring',
+          );
+        }
+      } else if (key === 'quality') {
+        if (value === 'low' || value === 'medium' || value === 'high') {
+          out.quality = value;
+        } else {
+          logger.warn(
+            { key, value },
+            'image-gen: unknown quality value, ignoring',
+          );
+        }
+      } else if (key === 'compression') {
+        const n = parseInt(value, 10);
+        if (Number.isFinite(n) && n >= 1 && n <= 100) {
+          out.output_compression = n;
+          compressionSetExplicitly = true;
+        } else {
+          logger.warn(
+            { key, value },
+            'image-gen: compression must be an integer in 1..100, ignoring',
+          );
+        }
+      } else if (key === 'size') {
+        if (CUSTOM_SIZE_RE.test(value)) {
+          const [w, h] = value.split('x').map((n) => parseInt(n, 10));
+          const reason = validateCustomSize(w, h);
+          if (reason) {
+            logger.warn(
+              { key, value, reason },
+              'image-gen: size= out of bounds, ignoring',
+            );
+          } else {
+            resolvedSizes.push(value);
+          }
+        } else if (NAMED_SIZE_MAP[value]) {
+          resolvedSizes.push(NAMED_SIZE_MAP[value]);
+        } else {
+          logger.warn(
+            { key, value },
+            'image-gen: unknown size value, ignoring',
+          );
+        }
+      }
+      continue;
+    }
+    // Shape-valid token that didn't match any category — shouldn't happen
+    // once the parser gate is in place, but log it defensively.
+    logger.warn({ preset: p }, 'image-gen: unhandled preset token, ignoring');
   }
 
   if (resolvedSizes.length > 1) {
@@ -200,10 +283,16 @@ export function resolvePresets(presets: string[] | undefined): ResolvedPresets {
     out.size = resolvedSizes[0];
   }
 
-  // Last quality token wins (explicit per spec)
-  for (const q of qualityTokens) {
-    if (q === 'hd') out.quality = 'high';
-    else if (q === 'med') out.quality = 'medium';
+  // PNG doesn't use output_compression. If the user set it explicitly,
+  // warn that it's being dropped; otherwise just strip the default silently.
+  if (out.output_format === 'png') {
+    if (compressionSetExplicitly) {
+      logger.warn(
+        { compression: out.output_compression },
+        'image-gen: compression has no effect with format=png, ignoring',
+      );
+    }
+    delete out.output_compression;
   }
 
   return out;
@@ -297,14 +386,12 @@ export async function generateImage(
       n: 1,
       size: resolved.size,
       quality: resolved.quality,
+      output_format: resolved.output_format,
     };
-    // Default: ask OpenAI for JPEG at 85% directly — smaller wire, smaller
-    // disk, and ships as photo without a local sips step. The `png` preset
-    // (explicit opt-in) keeps the legacy PNG-plus-sips path for lossless
-    // cases (graphics, text, explicit user ask).
-    if (!wantsPng) {
-      body.output_format = 'jpeg';
-      body.output_compression = 85;
+    // output_compression only applies to jpeg/webp; resolvePresets guarantees
+    // it's already stripped for png.
+    if (resolved.output_compression !== undefined) {
+      body.output_compression = resolved.output_compression;
     }
 
     resp = await fetch('https://api.openai.com/v1/images/generations', {
@@ -346,7 +433,7 @@ export async function generateImage(
   }
 
   fs.mkdirSync(attachmentsDir, { recursive: true });
-  const ext = wantsPng ? 'png' : 'jpg';
+  const ext = extensionForFormat(resolved.output_format);
   const filename = `image_${Date.now()}.${ext}`;
   const imagePath = path.join(attachmentsDir, filename);
   const buf = Buffer.from(b64, 'base64');
@@ -354,8 +441,8 @@ export async function generateImage(
 
   // For PNG mode: convert to a JPEG preview so the photo upload stays small,
   // keep the PNG as "original" for [[image-file:...]] re-sends.
-  // For JPEG default: preview and original are the same file — OpenAI's
-  // JPEG ships as photo directly, and [[image-file:...]] sends it as doc.
+  // For JPEG/WebP: the API-returned file is compact enough to ship directly —
+  // preview and "original" are the same path.
   let previewPath: string;
   let originalPath: string;
   if (wantsPng) {
@@ -374,13 +461,18 @@ export async function generateImage(
       imageBytes: buf.length,
       previewPath,
       previewBytes,
-      wantsPng,
       promptLen: prompt.length,
       resolved,
     },
     'Image generated',
   );
   return { ok: true, previewPath, originalPath };
+}
+
+function extensionForFormat(fmt: ResolvedPresets['output_format']): string {
+  if (fmt === 'png') return 'png';
+  if (fmt === 'webp') return 'webp';
+  return 'jpg';
 }
 
 export async function editImage(
@@ -418,9 +510,9 @@ export async function editImage(
   form.append('prompt', prompt);
   form.append('size', resolved.size);
   form.append('quality', resolved.quality);
-  if (!wantsPng) {
-    form.append('output_format', 'jpeg');
-    form.append('output_compression', '85');
+  form.append('output_format', resolved.output_format);
+  if (resolved.output_compression !== undefined) {
+    form.append('output_compression', String(resolved.output_compression));
   }
 
   let resp: Response;
@@ -457,7 +549,7 @@ export async function editImage(
   }
 
   fs.mkdirSync(attachmentsDir, { recursive: true });
-  const ext = wantsPng ? 'png' : 'jpg';
+  const ext = extensionForFormat(resolved.output_format);
   const filename = `image_${Date.now()}.${ext}`;
   const imagePath = path.join(attachmentsDir, filename);
   const buf = Buffer.from(b64, 'base64');

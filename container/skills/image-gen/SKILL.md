@@ -13,60 +13,68 @@ You can generate, edit, and re-send images by including special tags in your res
 [[image: your prompt here]]
 ```
 
-The host asks OpenAI for a JPEG at 85% quality and saves it under `attachments/image_<timestamp>.jpg`. The same file ships as the Telegram photo and is the "original" for `[[image-file: ...]]` re-sends — there is no separate PNG on disk by default.
+**Default with no parameters** — `1024x1024`, quality `medium`, output JPEG at 85% compression. Fast, small on disk/wire, indistinguishable from PNG for photo-realistic content. The file is saved under `attachments/image_<timestamp>.jpg`; the same file ships to chat AND serves as the "original" for `[[image-file: ...]]` re-sends. No separate PNG on disk by default.
 
-**Default** is `1024x1024` at `quality=low`, output JPEG 85% — fast, small on disk/wire, and indistinguishable from PNG for most photo-realistic content. When the user explicitly wants sharp / detailed / print-quality output, use the `hd` preset. For graphics, UI mockups, text-heavy content, or any case where you need lossless pixels, add the `png` preset (see Presets below).
+The host records the send in the message store with generation metadata attached. If the user later replies to the preview and asks for the original, the prompt, or an edit, call `get_message({message_id: <reply_to_id>})` — the response includes `file_path`, `generation.prompt`, and `generation.original_png_path` (field name is historical — it points to JPEG by default, PNG/WebP when you requested those).
 
-If the user asks for a higher-fidelity version later, use `[[image-edit: <path> | upscale to 2048x2048 quality high, keep composition]]` — OpenAI's edit endpoint recovers detail well from the JPEG source, validated in production. You don't need to render at `hd` up front if cost/speed matter.
+**High-fidelity later:** if the user asks for a sharper version after you've already generated something at the default, don't re-generate from scratch — use `[[image-edit: <path> | upscale to 2048x2048 quality high, keep composition]]`. The edit endpoint recovers detail well from a JPEG source, validated in production.
 
-The host records the send in the message store with generation metadata attached. If the user later replies to the preview and asks for the original, the prompt, or an edit, call `get_message({message_id: <reply_to_id>})` — the response includes `file_path` (the delivered JPEG), `generation.prompt`, and `generation.original_png_path` (the full-quality source; name is historical — it points to JPEG by default, PNG when the `png` preset was used).
+## Tuning generation: think about what you need
 
-## Presets
+There are no "HD" / "lossless" shortcut presets — for anything beyond the default, you express the parameters explicitly. Ask yourself:
 
-Adjust size and quality with comma-separated presets between the colons:
+- **Aspect ratio** — square default, or portrait / landscape for non-square prompts
+- **Resolution** — 1024 default; bigger only when the user or use-case requires (posters, print, fine detail)
+- **Quality** — `medium` default; go `high` only when detail matters (editorial, product shots) and accept the cost/latency; drop to `low` for quick drafts
+- **Format** — JPEG default for photos; **PNG only for graphics / UI / text-rendering** or when the user asked for lossless; WebP if the user is shipping to the web and wants smaller files
+- **Compression** — 85 default for JPEG/WebP; raise if the user complained about JPEG artifacts; ignored for PNG
 
-```
-[[image:portrait: prompt]]
-[[image:landscape,hd: prompt]]
-[[image:auto,hd: prompt]]
-```
+The syntax is a comma-separated list between the colons. Three token shapes are accepted:
 
-| Preset | Effect |
-|---|---|
-| *(none)* | square, fast/cheap (default: 1024x1024, quality=low, output JPEG 85%) |
-| `portrait` | 1024x1536 |
-| `landscape` | 1536x1024 |
-| `auto` | OpenAI picks aspect ratio from the prompt |
-| `hd` | quality=high (slower, more expensive) |
-| `med` | quality=medium |
-| `png` | lossless PNG output (use for graphics, UI, text, or when the user explicitly asks for PNG) |
+| Shape | Example | Meaning |
+|---|---|---|
+| Named size | `portrait`, `landscape`, `square`, `auto` | Canonical aspect ratios |
+| Custom WxH | `1920x1088`, `2048x2048` | Any dimensions within gpt-image-2 bounds |
+| Keyword | `format=png`, `quality=high`, `compression=92`, `size=1536x1024` | Explicit per-parameter override |
 
-Combine freely (`portrait,hd`). Unknown presets are ignored with a warning. Conflicting size presets (e.g. `portrait,landscape`) fall back to the default square size. Same syntax works for `[[image-edit:portrait,hd: path | prompt]]`.
+You can freely mix shapes in the same tag.
 
-Note: the preset list must be lowercase ASCII words separated by commas with no spaces. If the host sees `[[image:Word: ...]]` with uppercase or a space before the second colon, it treats the whole inner text as the prompt instead — so Cyrillic prompts like `[[image: котик]]` work as expected.
-
-## Custom sizes
-
-Pass an explicit `WxH` instead of a named size preset when you need a non-standard aspect ratio or resolution:
+### Worked examples
 
 ```
-[[image:2048x1024: prompt]]
-[[image:2048x2048,hd: prompt]]
-[[image:1920x1088,hd: cinematic still]]
+# Editorial landscape, need detail, acceptable cost+latency
+[[image:landscape,quality=high: golden hour portrait of a violinist, moody]]
+
+# Logo / UI mockup — lossless needed, small size OK
+[[image:format=png,quality=high: minimal badge with word "OPUS" centered]]
+
+# Web hero at 3:2 with sharper-than-default JPEG
+[[image:1536x1024,compression=92: slate-blue lake at pre-dawn]]
+
+# Big poster — expensive; use sparingly
+[[image:2048x2048,quality=high: poster for a jazz festival in deep teal and brass]]
+
+# WebP for a web asset
+[[image:format=webp,1024x1024,compression=90: rounded hexagonal icon for a bookmark tool]]
 ```
 
-Valid dimensions: each edge ≤3840, **each edge a multiple of 16**, aspect ratio ≤3:1, total pixels between 655360 and 8388608. Anything out of bounds falls back to the default 1024x1024 with a warning in the host log.
+**Rules and failure modes**
 
-Pitfall: `1920x1080` is **not** valid — 1080 is not a multiple of 16. Use `1920x1088` (or drop to `1536x864` if budget matters).
+- Keyword value with bad input (e.g. `format=tiff`, `quality=ultra`, `compression=0`) → warned in host log, that single keyword is dropped, rest of the tag still applies.
+- Conflicting size tokens (e.g. `portrait,landscape` or `portrait,size=1536x1024`) → fallback to default `1024x1024`, warned.
+- `format=png` + `compression=X` → compression is silently dropped (PNG is lossless; the param is meaningless), warned in log.
+- Same-key keyword repeated (`quality=low,quality=high`) → last write wins.
+- Custom WxH must satisfy gpt-image-2 constraints: each edge ≤3840, **each edge a multiple of 16**, aspect ratio ≤3:1, total pixels 655360–8388608. `1920x1080` is a common mistake (1080 is not /16) — use `1920x1088`.
+- Token list must be lowercase ASCII with no spaces before the second colon. `[[image: Plot: a graph]]` (uppercase) or `[[image: author=Fedor: biography]]` (unknown keyword key) are treated as a plain prompt, not a tag list — Cyrillic prompts like `[[image: котик]]` work as expected.
 
 ## Edit an existing image
 
 ```
 [[image-edit: attachments/photo_12345.jpg | describe the changes you want]]
-[[image-edit:portrait,hd: attachments/photo_12345.jpg | describe the changes]]
+[[image-edit:format=png,quality=high: attachments/photo_12345.jpg | describe the changes]]
 ```
 
-The path is relative to your group directory (`/workspace/group/`). Use paths from photos the user sent you or from previously generated images. Same default JPEG behavior as `[[image:]]` — including `png` preset if you need lossless output from the edit. The same presets apply.
+The path is relative to your group directory (`/workspace/group/`). Use paths from photos the user sent you or from previously generated images. Same default JPEG behavior as `[[image:]]`; the same token vocabulary (named sizes, custom WxH, keywords) applies.
 
 ## Send the original file (as document)
 
@@ -112,8 +120,8 @@ The same rule applies to `[[tts:]]` and any other host-side strip-tag: **tag-onl
 
 - One image tag per message (host only matches the first).
 - Tags can be combined with `[[tts]]` across messages — image is processed in its message, TTS in its message, both run independently.
-- Generated images are saved as `attachments/image_<timestamp>.jpg` by default (same file ships to chat and is the source for `[[image-file:...]]`). With the `png` preset, output is `attachments/image_<timestamp>.png` plus a `.jpg` preview for the photo send — the PNG is the lossless source for re-sends.
+- Generated images are saved as `attachments/image_<timestamp>.<ext>` — `.jpg` by default, `.png` with `format=png`, `.webp` with `format=webp`. The same file ships to chat and is the source for `[[image-file:...]]` re-sends. When `format=png` is used, a `.jpg` preview is also created for the Telegram photo send; the PNG remains the lossless source.
 - If generation fails (API error, missing source file, network), the tag is silently dropped and only the text part is sent.
 - If OpenAI rejects the request for content reasons, you'll see a short `[host] ...` message in the chat on the next turn. `[host]` messages are **not** from the user or from you — they're system notices from the nanoclaw host. `[host] OpenAI declined image generation (moderation). Rephrase the prompt and try again.` means safety rejected the prompt; rewrite and retry. If the signal includes `Stop retrying with rewrites — switch topic or ask the user.`, you've hit 3 consecutive rejections on this group — don't loop on variations, ask the user what they want instead. Generic signals of the form `[host] OpenAI declined image generation (reason: <code>). Adjust the request and try again.` mean a parameter error (unsupported size, etc.); fix the tag and retry.
-- If JPEG conversion fails (sips not available or errors), the host falls back to sending the PNG directly as photo — you don't need to handle this.
-- If the preview file is larger than Telegram's ~10MB photo cap (rare, but possible for large-resolution `hd` renders), the host automatically switches to sending the original PNG as a document so you still get full-fidelity delivery.
+- If JPEG preview conversion fails (sips not available or errors — only applies when `format=png` is used), the host falls back to sending the PNG directly as photo — you don't need to handle this.
+- If the preview file is larger than Telegram's ~10MB photo cap (rare, but possible for large-resolution `quality=high` renders at high custom sizes), the host automatically switches to sending the original file as a document so you still get full-fidelity delivery.
