@@ -96,6 +96,44 @@ function isPresetToken(p: string): boolean {
   return kw !== null && KNOWN_KEYWORDS.has(kw[1]);
 }
 
+// Dynamic API timeout tuning. Current 180s blanket was too aggressive for
+// hd + large + png edits (observed 3072x2304 high-png edit timing out) and
+// too generous for low-quality small jobs. Formula scales base seconds by
+// pixel count × quality × format × edit factors, then clamps to a sane
+// range. Constants live here so the operator can tune from logs.
+const TIMEOUT_BASE_S = 60;
+const TIMEOUT_PER_MP_S = 40;
+const TIMEOUT_FLOOR_S = 120;
+const TIMEOUT_CAP_S = 600; // 10 min hard ceiling
+const QUALITY_MULT = { low: 1, medium: 2, high: 3.5 } as const;
+const PNG_MULT = 1.5;
+const EDIT_MULT = 1.2;
+
+function sizeToMegapixels(size: string): number {
+  if (size === 'auto') return 1.05; // 1024x1024 baseline
+  const m = size.match(/^(\d+)x(\d+)$/);
+  if (!m) return 1.05;
+  return (parseInt(m[1], 10) * parseInt(m[2], 10)) / 1_000_000;
+}
+
+/**
+ * Timeout for /v1/images/{generations,edits} scaled by the resolved
+ * presets. Returns ms. Exported for tests and for log inspection.
+ */
+export function computeApiTimeoutMs(
+  resolved: ResolvedPresets,
+  isEdit: boolean,
+): number {
+  const mp = sizeToMegapixels(resolved.size);
+  const qMult = QUALITY_MULT[resolved.quality];
+  const fMult = resolved.output_format === 'png' ? PNG_MULT : 1;
+  const eMult = isEdit ? EDIT_MULT : 1;
+  const seconds =
+    TIMEOUT_BASE_S + TIMEOUT_PER_MP_S * mp * qMult * fMult * eMult;
+  const clamped = Math.max(TIMEOUT_FLOOR_S, Math.min(TIMEOUT_CAP_S, seconds));
+  return Math.round(clamped) * 1000;
+}
+
 // gpt-image-2 size constraints (per OpenAI docs):
 // - each edge ≤ 3840
 // - each edge a multiple of 16
@@ -378,6 +416,19 @@ export async function generateImage(
 
   const resolved = resolvePresets(presets);
   const wantsPng = resolved.output_format === 'png';
+  const timeoutMs = computeApiTimeoutMs(resolved, /*isEdit=*/ false);
+
+  logger.info(
+    {
+      size: resolved.size,
+      quality: resolved.quality,
+      format: resolved.output_format,
+      compression: resolved.output_compression,
+      isEdit: false,
+      timeoutMs,
+    },
+    'Image gen request starting',
+  );
 
   let resp: Response;
   try {
@@ -402,20 +453,22 @@ export async function generateImage(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(180_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     logger.error(
-      { err, promptLen: prompt.length, resolved },
+      { err, promptLen: prompt.length, resolved, timeoutMs },
       'Image gen: fetch failed',
     );
     return { ok: false, reason: 'transient' };
   }
 
+  const requestId = resp.headers.get('x-request-id') ?? undefined;
+
   if (!resp.ok) {
     const body = await resp.text();
     logger.error(
-      { status: resp.status, body: body.slice(0, 300) },
+      { status: resp.status, body: body.slice(0, 300), requestId, timeoutMs },
       'Image gen failed',
     );
     // 5xx and 429 are transient — don't bother the agent with a signal.
@@ -464,6 +517,8 @@ export async function generateImage(
       previewBytes,
       promptLen: prompt.length,
       resolved,
+      requestId,
+      timeoutMs,
     },
     'Image generated',
   );
@@ -545,23 +600,45 @@ export async function editImage(
     form.append('output_compression', String(resolved.output_compression));
   }
 
+  const timeoutMs = computeApiTimeoutMs(resolved, /*isEdit=*/ true);
+
+  logger.info(
+    {
+      sourcePath,
+      sourceMime,
+      sourceBytes: imageBuffer.length,
+      size: resolved.size,
+      quality: resolved.quality,
+      format: resolved.output_format,
+      compression: resolved.output_compression,
+      isEdit: true,
+      timeoutMs,
+    },
+    'Image edit request starting',
+  );
+
   let resp: Response;
   try {
     resp = await fetch('https://api.openai.com/v1/images/edits', {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}` },
       body: form,
-      signal: AbortSignal.timeout(180_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
-    logger.error({ err, sourcePath, resolved }, 'Image edit: fetch failed');
+    logger.error(
+      { err, sourcePath, resolved, timeoutMs },
+      'Image edit: fetch failed',
+    );
     return { ok: false, reason: 'transient' };
   }
+
+  const requestId = resp.headers.get('x-request-id') ?? undefined;
 
   if (!resp.ok) {
     const body = await resp.text();
     logger.error(
-      { status: resp.status, body: body.slice(0, 300) },
+      { status: resp.status, body: body.slice(0, 300), requestId, timeoutMs },
       'Image edit failed',
     );
     if (resp.status >= 500 || resp.status === 429) {
@@ -608,6 +685,8 @@ export async function editImage(
       sourceMime,
       promptLen: prompt.length,
       resolved,
+      requestId,
+      timeoutMs,
     },
     'Image edited',
   );

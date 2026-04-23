@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-import { extractImageDirective, resolvePresets } from './image-gen.js';
+import {
+  computeApiTimeoutMs,
+  extractImageDirective,
+  resolvePresets,
+} from './image-gen.js';
 import { logger } from './logger.js';
 
 beforeEach(() => {
@@ -372,5 +376,72 @@ describe('transparent-as-prompt regression', () => {
     const d = extractImageDirective('[[image:transparent: a unicorn]]');
     expect(d?.presets).toEqual([]);
     expect(d?.prompt).toBe('transparent: a unicorn');
+  });
+});
+
+describe('computeApiTimeoutMs', () => {
+  const DEFAULT = resolvePresets([]); // 1024x1024 medium jpeg 85%
+
+  it('default (1024x1024 medium jpeg) generate → under floor, gets 120000ms', () => {
+    // 60 + 40 * 1.05 * 2 * 1 * 1 = 144 → >120, under 600, so 144 * 1000
+    expect(computeApiTimeoutMs(DEFAULT, false)).toBe(144_000);
+  });
+
+  it('tiny low-quality falls to floor 120000ms', () => {
+    const r = resolvePresets(['quality=low']);
+    // 60 + 40 * 1.05 * 1 = 102 → clamped to 120
+    expect(computeApiTimeoutMs(r, false)).toBe(120_000);
+  });
+
+  it('isEdit adds 1.2× multiplier', () => {
+    const gen = computeApiTimeoutMs(DEFAULT, false);
+    const edit = computeApiTimeoutMs(DEFAULT, true);
+    // 60 + 40 * 1.05 * 2 * 1.2 = 160.8 → 161000, vs 144000 for gen
+    expect(edit).toBeGreaterThan(gen);
+  });
+
+  it('png adds 1.5× multiplier over jpeg of same size+quality', () => {
+    const jpeg = computeApiTimeoutMs(
+      resolvePresets(['portrait', 'quality=high']),
+      false,
+    );
+    const png = computeApiTimeoutMs(
+      resolvePresets(['portrait', 'quality=high', 'format=png']),
+      false,
+    );
+    expect(png).toBeGreaterThan(jpeg);
+  });
+
+  it('caps at 600000ms for 3072x2304 high png edit (our prod timeout case)', () => {
+    const r = resolvePresets(['3072x2304', 'quality=high', 'format=png']);
+    expect(r).toEqual({
+      size: '3072x2304',
+      quality: 'high',
+      output_format: 'png',
+    });
+    // Formula would yield 60 + 40 * 7.07 * 3.5 * 1.5 * 1.2 = ~1840s → cap 600
+    expect(computeApiTimeoutMs(r, true)).toBe(600_000);
+  });
+
+  it('2048x2048 high jpeg generate is within the cap but comfortably above 180s', () => {
+    const r = resolvePresets(['2048x2048', 'quality=high']);
+    // 60 + 40 * 4.19 * 3.5 * 1 * 1 = ~647 → capped at 600
+    const t = computeApiTimeoutMs(r, false);
+    expect(t).toBeLessThanOrEqual(600_000);
+    expect(t).toBeGreaterThan(180_000); // more budget than the old static 180s
+  });
+
+  it('size=auto uses 1.05 MP baseline', () => {
+    const r = resolvePresets(['auto', 'quality=high']);
+    // 60 + 40 * 1.05 * 3.5 * 1 = 207 → 207000
+    expect(computeApiTimeoutMs(r, false)).toBe(207_000);
+  });
+
+  it('edit with modest params gets ~5x more than default generate (compound multipliers)', () => {
+    // portrait high png edit: 60 + 40 * 1.57 * 3.5 * 1.5 * 1.2 = ~456s
+    const r = resolvePresets(['portrait', 'quality=high', 'format=png']);
+    const t = computeApiTimeoutMs(r, true);
+    expect(t).toBeGreaterThan(400_000);
+    expect(t).toBeLessThan(500_000);
   });
 });
