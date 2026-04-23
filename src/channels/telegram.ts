@@ -512,10 +512,7 @@ export class TelegramChannel implements Channel {
               // downloadFile returns a container-absolute path like
               // /workspace/group/attachments/photo_123.jpg; strip the mount
               // prefix so the stored file_path is group-relative.
-              const groupRel = filePath.replace(
-                /^\/workspace\/group\//,
-                '',
-              );
+              const groupRel = filePath.replace(/^\/workspace\/group\//, '');
               deliver(`${placeholder} (${filePath})${caption}`, groupRel);
             } else {
               deliver(`${placeholder}${caption}`);
@@ -853,10 +850,7 @@ export class TelegramChannel implements Channel {
         if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
       }
     }
-    logger.error(
-      { jid },
-      'Failed to send Telegram document after 3 attempts',
-    );
+    logger.error({ jid }, 'Failed to send Telegram document after 3 attempts');
     return undefined;
   }
 

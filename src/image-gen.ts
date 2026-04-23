@@ -85,7 +85,10 @@ async function convertToJpegPreview(pngPath: string): Promise<string | null> {
     fs.statSync(jpegPath); // assert the file exists, throw otherwise
     return jpegPath;
   } catch (err) {
-    logger.warn({ err, pngPath }, 'sips conversion failed, falling back to PNG');
+    logger.warn(
+      { err, pngPath },
+      'sips conversion failed, falling back to PNG',
+    );
     return null;
   }
 }

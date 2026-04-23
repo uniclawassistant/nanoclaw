@@ -94,9 +94,7 @@ const queue = new GroupQueue();
 function isPathWithinGroup(absPath: string, groupFolder: string): boolean {
   const groupRoot = path.resolve(GROUPS_DIR, groupFolder);
   const resolved = path.resolve(absPath);
-  return (
-    resolved === groupRoot || resolved.startsWith(groupRoot + path.sep)
-  );
+  return resolved === groupRoot || resolved.startsWith(groupRoot + path.sep);
 }
 
 function recordOutgoing(
@@ -189,10 +187,7 @@ async function sendWithTts(
             let result: { previewPath: string; originalPath: string } | null =
               null;
             if (imgDirective.type === 'generate') {
-              result = await generateImage(
-                imgDirective.prompt,
-                attachmentsDir,
-              );
+              result = await generateImage(imgDirective.prompt, attachmentsDir);
             } else if (
               imgDirective.type === 'edit' &&
               imgDirective.sourcePath

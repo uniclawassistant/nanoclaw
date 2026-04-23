@@ -364,7 +364,14 @@ export interface MessageRecord {
   timestamp: string;
   sender: string;
   direction: 'in' | 'out';
-  type: 'text' | 'photo' | 'document' | 'voice' | 'video' | 'sticker' | 'system';
+  type:
+    | 'text'
+    | 'photo'
+    | 'document'
+    | 'voice'
+    | 'video'
+    | 'sticker'
+    | 'system';
   text?: string;
   reply_to_message_id?: string;
   file_path?: string;
