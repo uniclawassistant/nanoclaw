@@ -21,12 +21,12 @@ The host records the send in the message store with generation metadata attached
 
 ## Presets
 
-Adjust size, quality, and format with comma-separated presets between the colons:
+Adjust size and quality with comma-separated presets between the colons:
 
 ```
 [[image:portrait: prompt]]
 [[image:landscape,hd: prompt]]
-[[image:auto,hd,transparent: prompt]]
+[[image:auto,hd: prompt]]
 ```
 
 | Preset | Effect |
@@ -37,11 +37,24 @@ Adjust size, quality, and format with comma-separated presets between the colons
 | `auto` | OpenAI picks aspect ratio from the prompt |
 | `hd` | quality=high (slower, more expensive) |
 | `med` | quality=medium |
-| `transparent` | transparent background, PNG output |
 
 Combine freely (`portrait,hd`). Unknown presets are ignored with a warning. Conflicting size presets (e.g. `portrait,landscape`) fall back to the default square size. Same syntax works for `[[image-edit:portrait,hd: path | prompt]]`.
 
 Note: the preset list must be lowercase ASCII words separated by commas with no spaces. If the host sees `[[image:Word: ...]]` with uppercase or a space before the second colon, it treats the whole inner text as the prompt instead — so Cyrillic prompts like `[[image: котик]]` work as expected.
+
+## Custom sizes
+
+Pass an explicit `WxH` instead of a named size preset when you need a non-standard aspect ratio or resolution:
+
+```
+[[image:2048x1024: prompt]]
+[[image:2048x2048,hd: prompt]]
+[[image:1920x1088,hd: cinematic still]]
+```
+
+Valid dimensions: each edge ≤3840, **each edge a multiple of 16**, aspect ratio ≤3:1, total pixels between 655360 and 8388608. Anything out of bounds falls back to the default 1024x1024 with a warning in the host log.
+
+Pitfall: `1920x1080` is **not** valid — 1080 is not a multiple of 16. Use `1920x1088` (or drop to `1536x864` if budget matters).
 
 ## Edit an existing image
 
@@ -99,4 +112,4 @@ The same rule applies to `[[tts:]]` and any other host-side strip-tag: **tag-onl
 - Generated images are saved as `attachments/image_<timestamp>.png` (original) and `attachments/image_<timestamp>.jpg` (preview that ships to chat).
 - If generation fails (API error, missing source file, network), the tag is silently dropped and only the text part is sent.
 - If JPEG conversion fails (sips not available or errors), the host falls back to sending the PNG directly as photo — you don't need to handle this.
-- If the preview file is larger than Telegram's ~10MB photo cap (rare, but possible for large `transparent`/`hd` renders), the host automatically switches to sending the original PNG as a document so you still get full-fidelity delivery.
+- If the preview file is larger than Telegram's ~10MB photo cap (rare, but possible for large-resolution `hd` renders), the host automatically switches to sending the original PNG as a document so you still get full-fidelity delivery.

@@ -219,9 +219,9 @@ export async function sendWithTts(
                 result.previewPath,
               );
               // Telegram's bot-API photo endpoint rejects files >10MB with
-              // PHOTO_INVALID_DIMENSIONS. For oversized previews (large
-              // transparent PNGs, hd renders) fall back to sending the
-              // original PNG as a document — full fidelity, no size cap.
+              // PHOTO_INVALID_DIMENSIONS. For oversized previews (large hd
+              // renders, high-resolution custom sizes) fall back to sending
+              // the original PNG as a document — full fidelity, no size cap.
               const previewSize = fs.statSync(result.previewPath).size;
               const PHOTO_SIZE_CAP = 9 * 1024 * 1024;
               if (previewSize > PHOTO_SIZE_CAP && channel.sendDocument) {

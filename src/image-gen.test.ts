@@ -30,10 +30,10 @@ describe('extractImageDirective — presets parsing', () => {
     expect(d?.prompt).toBe('a quiet lake');
   });
 
-  it('three presets: [[image:auto,hd,transparent: prompt]]', () => {
-    const d = extractImageDirective('[[image:auto,hd,transparent: a logo]]');
-    expect(d?.presets).toEqual(['auto', 'hd', 'transparent']);
-    expect(d?.prompt).toBe('a logo');
+  it('parser accepts custom WxH alongside named tokens', () => {
+    const d = extractImageDirective('[[image:2048x1536,hd: a poster]]');
+    expect(d?.presets).toEqual(['2048x1536', 'hd']);
+    expect(d?.prompt).toBe('a poster');
   });
 
   it('preset-like prefix with uppercase is treated as prompt', () => {
@@ -138,13 +138,63 @@ describe('resolvePresets', () => {
     });
   });
 
-  it('transparent → background + png', () => {
-    expect(resolvePresets(['transparent'])).toEqual({
-      size: '1024x1024',
+  it('custom size: 2048x1024 passes through', () => {
+    expect(resolvePresets(['2048x1024'])).toEqual({
+      size: '2048x1024',
       quality: 'low',
-      background: 'transparent',
-      output_format: 'png',
     });
+  });
+
+  it('custom size + hd: 2048x2048,hd', () => {
+    expect(resolvePresets(['2048x2048', 'hd'])).toEqual({
+      size: '2048x2048',
+      quality: 'high',
+    });
+  });
+
+  it('custom size: 1920x1088 (16-aligned HD) passes through', () => {
+    // 1920/16=120, 1088/16=68, aspect 1.76, total 2088960 — all in bounds.
+    // 1920x1080 is a common request but 1080 is NOT /16, so use 1088.
+    expect(resolvePresets(['1920x1088']).size).toBe('1920x1088');
+  });
+
+  it('custom size out of bounds (>3840 edge) → warn + default', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const r = resolvePresets(['4000x4000']);
+    expect(r.size).toBe('1024x1024');
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ wxh: '4000x4000' }),
+      expect.stringContaining('out of bounds'),
+    );
+  });
+
+  it('custom size not a multiple of 16 (1920x1080) → warn + default', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const r = resolvePresets(['1920x1080']);
+    expect(r.size).toBe('1024x1024');
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ wxh: '1920x1080' }),
+      expect.stringContaining('out of bounds'),
+    );
+  });
+
+  it('custom size violates aspect ratio >3:1 → warn + default', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const r = resolvePresets(['3200x800']);
+    expect(r.size).toBe('1024x1024');
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('two size tokens (named + custom) → conflict, default + warn', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const r = resolvePresets(['portrait', '2048x1024']);
+    expect(r.size).toBe('1024x1024');
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sizeTokens: expect.arrayContaining(['1024x1536', '2048x1024']),
+      }),
+      expect.stringContaining('conflicting size presets'),
+    );
   });
 
   it('conflicting size presets fall back to default + warn', () => {
@@ -152,7 +202,9 @@ describe('resolvePresets', () => {
     const r = resolvePresets(['portrait', 'landscape']);
     expect(r.size).toBe('1024x1024');
     expect(warn).toHaveBeenCalledWith(
-      expect.objectContaining({ sizeTokens: ['portrait', 'landscape'] }),
+      expect.objectContaining({
+        sizeTokens: ['1024x1536', '1536x1024'],
+      }),
       expect.stringContaining('conflicting size presets'),
     );
   });
@@ -176,12 +228,22 @@ describe('resolvePresets', () => {
     expect(resolvePresets(['hd', 'med']).quality).toBe('medium');
   });
 
-  it('full kitchen sink: auto,hd,transparent', () => {
-    expect(resolvePresets(['auto', 'hd', 'transparent'])).toEqual({
+  it('full kitchen sink: auto,hd → auto size + high quality', () => {
+    expect(resolvePresets(['auto', 'hd'])).toEqual({
       size: 'auto',
       quality: 'high',
-      background: 'transparent',
-      output_format: 'png',
     });
+  });
+});
+
+describe('transparent-as-prompt regression', () => {
+  // The `transparent` token is no longer a preset — gpt-image-2 rejects
+  // background=transparent outright. Make sure the parser doesn't accidentally
+  // special-case it: it's now an unknown token, so the whole inner becomes
+  // the prompt (same fallback that protects "sunset: golden hour" etc.).
+  it('[[image:transparent: x]] is parsed as a prompt, not a preset', () => {
+    const d = extractImageDirective('[[image:transparent: a unicorn]]');
+    expect(d?.presets).toEqual([]);
+    expect(d?.prompt).toBe('transparent: a unicorn');
   });
 });
