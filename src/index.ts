@@ -120,10 +120,7 @@ async function sendImageGenFailureSignal(
   jid: string,
   threadId: string | undefined,
   groupFolder: string | undefined,
-  outcome: Extract<
-    Awaited<ReturnType<typeof generateImage>>,
-    { ok: false }
-  >,
+  outcome: Extract<Awaited<ReturnType<typeof generateImage>>, { ok: false }>,
 ): Promise<void> {
   // 'transient' (network, 5xx, 429, missing b64) is pure noise for the agent.
   if (outcome.reason === 'transient') return;
@@ -142,8 +139,7 @@ async function sendImageGenFailureSignal(
     const next = prev + 1;
     moderationBlocksByGroup.set(groupFolder, next);
     if (next >= MODERATION_LOOP_THRESHOLD) {
-      body +=
-        ' Stop retrying with rewrites — switch topic or ask the user.';
+      body += ' Stop retrying with rewrites — switch topic or ask the user.';
     }
   }
 

@@ -26,11 +26,7 @@ vi.mock('./tts.js', async () => {
   };
 });
 
-import {
-  _initTestDatabase,
-  getMessageById,
-  storeChatMetadata,
-} from './db.js';
+import { _initTestDatabase, getMessageById, storeChatMetadata } from './db.js';
 import { sendWithTts } from './index.js';
 import { editImage, generateImage } from './image-gen.js';
 import type { Channel } from './types.js';
@@ -100,7 +96,8 @@ afterEach(() => {
 
 describe('sendWithTts — image tag dispatch (fix for IPC/scheduler silent-drop)', () => {
   it('with groupFolder + [[image:]] → generateImage fires, sendPhoto called, sendMessage NOT called', async () => {
-    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true,
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
       previewPath: tmpPreview,
       originalPath: tmpOriginal,
     });
@@ -142,7 +139,8 @@ describe('sendWithTts — image tag dispatch (fix for IPC/scheduler silent-drop)
   });
 
   it('with groupFolder: presets parsed and forwarded to generateImage', async () => {
-    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true,
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
       previewPath: tmpPreview,
       originalPath: tmpOriginal,
     });
@@ -165,7 +163,8 @@ describe('sendWithTts — image tag dispatch (fix for IPC/scheduler silent-drop)
   });
 
   it('with groupFolder + [[image-edit:...]] → editImage fires, sendPhoto called', async () => {
-    (editImage as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true,
+    (editImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
       previewPath: tmpPreview,
       originalPath: tmpOriginal,
     });
@@ -189,7 +188,8 @@ describe('sendWithTts — image tag dispatch (fix for IPC/scheduler silent-drop)
   it('IPC-path wrapper contract: when folder is resolved and passed, tag is handled; when omitted, literal leaks', async () => {
     // Simulate the two sides of the pre-fix vs post-fix IPC sendMessage:
     // The wrapper is essentially `sendWithTts(ch, jid, text, undefined, folder?)`.
-    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true,
+    (generateImage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
       previewPath: tmpPreview,
       originalPath: tmpOriginal,
     });

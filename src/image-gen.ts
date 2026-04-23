@@ -48,7 +48,8 @@ function classifyApiError(
     };
     const code = parsed.error?.code;
     const message = parsed.error?.message;
-    if (code === 'moderation_block') return { reason: 'moderation', code, message };
+    if (code === 'moderation_block')
+      return { reason: 'moderation', code, message };
     if (status === 400) return { reason: 'generic', code, message };
   } catch {
     // Fallthrough
