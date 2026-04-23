@@ -43,6 +43,24 @@ describe('extractImageDirective — presets parsing', () => {
     expect(d?.prompt).toBe('Plot: a graph');
   });
 
+  it('lowercase non-preset prefix is treated as prompt (no false positive)', () => {
+    const a = extractImageDirective('[[image: sunset: golden hour]]');
+    expect(a?.presets).toEqual([]);
+    expect(a?.prompt).toBe('sunset: golden hour');
+
+    const b = extractImageDirective('[[image: plan: a city map]]');
+    expect(b?.presets).toEqual([]);
+    expect(b?.prompt).toBe('plan: a city map');
+  });
+
+  it('mixed known+unknown tokens → not parsed as presets', () => {
+    // If user actually wanted presets but typo'd one, we'd rather
+    // skip presets entirely than apply a partial set silently.
+    const d = extractImageDirective('[[image:portrait,foobar: a cat]]');
+    expect(d?.presets).toEqual([]);
+    expect(d?.prompt).toBe('portrait,foobar: a cat');
+  });
+
   it('non-latin prompt parses with no presets', () => {
     const d = extractImageDirective('[[image: котик в лесу]]');
     expect(d?.presets).toEqual([]);

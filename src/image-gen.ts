@@ -61,11 +61,23 @@ function splitPresetsAndBody(inner: string): {
   // "no preset section at all" (→ body is whole inner).
   const m = inner.match(/^([a-z0-9_,-]+)\s*:\s*([\s\S]*)$/);
   if (!m) return { presets: [], body: inner.trim() };
-  const presets = m[1]
+  const candidates = m[1]
     .split(',')
     .map((p) => p.trim())
     .filter(Boolean);
-  return { presets, body: m[2].trim() };
+  // Require EVERY token to be a known preset. Otherwise assume the leading
+  // "word:" (e.g. "sunset:", "plan:", "cat:") is actually part of the
+  // prompt — safer than silently dropping it under an "unknown preset"
+  // warning. Covers the lowercase-word-colon-phrase false positive the
+  // uppercase guard doesn't catch. Programmatic callers of resolvePresets
+  // still get their warning if they pass unknown tokens directly.
+  if (
+    candidates.length === 0 ||
+    !candidates.every((p) => KNOWN_PRESETS.has(p))
+  ) {
+    return { presets: [], body: inner.trim() };
+  }
+  return { presets: candidates, body: m[2].trim() };
 }
 
 export interface ResolvedPresets {
