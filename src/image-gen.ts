@@ -128,7 +128,8 @@ export function computeApiTimeoutMs(
   const qMult = QUALITY_MULT[resolved.quality];
   const fMult = resolved.output_format === 'png' ? PNG_MULT : 1;
   const eMult = isEdit ? EDIT_MULT : 1;
-  const seconds = TIMEOUT_BASE_S + TIMEOUT_PER_MP_S * mp * qMult * fMult * eMult;
+  const seconds =
+    TIMEOUT_BASE_S + TIMEOUT_PER_MP_S * mp * qMult * fMult * eMult;
   const clamped = Math.max(TIMEOUT_FLOOR_S, Math.min(TIMEOUT_CAP_S, seconds));
   return Math.round(clamped) * 1000;
 }
