@@ -29,16 +29,39 @@ const IMAGE_EDIT_RE = /\[\[image-edit:\s*([\s\S]*?)\]\]/i;
 const IMAGE_FILE_RE = /\[\[image-file:\s*([\s\S]*?)\]\]/i;
 
 // Known preset vocabulary. Kept as the single source of truth — resolvePresets
-// validates against this set and logs+ignores unknown tokens.
+// validates against this set and logs+ignores unknown tokens. Custom WxH
+// size tokens (e.g. "1920x1080") are accepted via CUSTOM_SIZE_RE in
+// addition to this set.
 export const KNOWN_PRESETS = new Set([
   'portrait',
   'landscape',
   'auto',
   'hd',
   'med',
-  'transparent',
 ]);
 const SIZE_PRESETS = new Set(['portrait', 'landscape', 'auto']);
+// Custom WxH override, e.g. "1920x1080". Bounds are validated in
+// resolvePresets against gpt-image-2 constraints (see validateCustomSize).
+const CUSTOM_SIZE_RE = /^\d+x\d+$/;
+
+function isPresetToken(p: string): boolean {
+  return KNOWN_PRESETS.has(p) || CUSTOM_SIZE_RE.test(p);
+}
+
+// gpt-image-2 size constraints (per OpenAI docs):
+// - each edge ≤ 3840
+// - each edge a multiple of 16
+// - aspect ratio max/min ≤ 3
+// - total pixels in [655_360, 8_388_608]
+function validateCustomSize(w: number, h: number): string | null {
+  if (w > 3840 || h > 3840) return 'edge exceeds 3840px';
+  if (w % 16 !== 0 || h % 16 !== 0) return 'edge not a multiple of 16';
+  if (Math.max(w, h) / Math.min(w, h) > 3) return 'aspect ratio exceeds 3:1';
+  const total = w * h;
+  if (total < 655_360) return 'total pixels below 655360';
+  if (total > 8_388_608) return 'total pixels above 8388608';
+  return null;
+}
 
 /**
  * If the inner body starts with a comma-separated list of lowercase ASCII
@@ -71,20 +94,17 @@ function splitPresetsAndBody(inner: string): {
   // warning. Covers the lowercase-word-colon-phrase false positive the
   // uppercase guard doesn't catch. Programmatic callers of resolvePresets
   // still get their warning if they pass unknown tokens directly.
-  if (
-    candidates.length === 0 ||
-    !candidates.every((p) => KNOWN_PRESETS.has(p))
-  ) {
+  if (candidates.length === 0 || !candidates.every(isPresetToken)) {
     return { presets: [], body: inner.trim() };
   }
   return { presets: candidates, body: m[2].trim() };
 }
 
 export interface ResolvedPresets {
-  size: '1024x1024' | '1024x1536' | '1536x1024' | 'auto';
+  // Resolved size string ready to send to OpenAI. Named presets map to fixed
+  // dimensions; custom WxH tokens pass through verbatim after validation.
+  size: string;
   quality: 'low' | 'medium' | 'high';
-  background?: 'transparent';
-  output_format?: 'png';
 }
 
 /**
@@ -96,41 +116,50 @@ export function resolvePresets(presets: string[] | undefined): ResolvedPresets {
   const out: ResolvedPresets = { size: '1024x1024', quality: 'low' };
   if (!presets || presets.length === 0) return out;
 
-  const sizeTokens: string[] = [];
+  // Each entry is the final resolved size string (e.g. "1024x1536",
+  // "1920x1080", "auto"). Used to detect conflicts across both named and
+  // custom size tokens.
+  const resolvedSizes: string[] = [];
   const qualityTokens: string[] = [];
-  let transparent = false;
 
   for (const p of presets) {
-    if (!KNOWN_PRESETS.has(p)) {
+    if (SIZE_PRESETS.has(p)) {
+      if (p === 'portrait') resolvedSizes.push('1024x1536');
+      else if (p === 'landscape') resolvedSizes.push('1536x1024');
+      else if (p === 'auto') resolvedSizes.push('auto');
+    } else if (p === 'hd' || p === 'med') {
+      qualityTokens.push(p);
+    } else if (CUSTOM_SIZE_RE.test(p)) {
+      const [w, h] = p.split('x').map((n) => parseInt(n, 10));
+      const reason = validateCustomSize(w, h);
+      if (reason) {
+        logger.warn(
+          { wxh: p, reason },
+          'image-gen: custom size out of bounds, ignoring',
+        );
+        continue;
+      }
+      resolvedSizes.push(p);
+    } else {
+      // Parser already enforces that tokens are known; reaching here means a
+      // programmatic caller passed something unexpected.
       logger.warn({ preset: p }, 'image-gen: unknown preset, ignoring');
-      continue;
     }
-    if (SIZE_PRESETS.has(p)) sizeTokens.push(p);
-    else if (p === 'hd' || p === 'med') qualityTokens.push(p);
-    else if (p === 'transparent') transparent = true;
   }
 
-  if (sizeTokens.length > 1) {
+  if (resolvedSizes.length > 1) {
     logger.warn(
-      { sizeTokens },
+      { sizeTokens: resolvedSizes },
       'image-gen: conflicting size presets, falling back to default size',
     );
-  } else if (sizeTokens.length === 1) {
-    const s = sizeTokens[0];
-    if (s === 'portrait') out.size = '1024x1536';
-    else if (s === 'landscape') out.size = '1536x1024';
-    else if (s === 'auto') out.size = 'auto';
+  } else if (resolvedSizes.length === 1) {
+    out.size = resolvedSizes[0];
   }
 
   // Last quality token wins (explicit per spec)
   for (const q of qualityTokens) {
     if (q === 'hd') out.quality = 'high';
     else if (q === 'med') out.quality = 'medium';
-  }
-
-  if (transparent) {
-    out.background = 'transparent';
-    out.output_format = 'png';
   }
 
   return out;
@@ -224,8 +253,6 @@ export async function generateImage(
       size: resolved.size,
       quality: resolved.quality,
     };
-    if (resolved.background) body.background = resolved.background;
-    if (resolved.output_format) body.output_format = resolved.output_format;
 
     resp = await fetch('https://api.openai.com/v1/images/generations', {
       method: 'POST',
@@ -316,9 +343,6 @@ export async function editImage(
   form.append('prompt', prompt);
   form.append('size', resolved.size);
   form.append('quality', resolved.quality);
-  if (resolved.background) form.append('background', resolved.background);
-  if (resolved.output_format)
-    form.append('output_format', resolved.output_format);
 
   let resp: Response;
   try {
