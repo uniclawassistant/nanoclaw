@@ -97,6 +97,78 @@ function isPathWithinGroup(absPath: string, groupFolder: string): boolean {
   return resolved === groupRoot || resolved.startsWith(groupRoot + path.sep);
 }
 
+// Per-group consecutive moderation-block counter. Reset on any successful
+// image generation, incremented on each moderation_block reject. Used to
+// nudge the agent off a bad rewrite loop after 3+ in a row. In-memory only —
+// resets on restart, which is fine: the whole point is in-session back-off.
+const moderationBlocksByGroup = new Map<string, number>();
+const MODERATION_LOOP_THRESHOLD = 3;
+
+/**
+ * Push a host-authored message into a chat when the image pipeline fails in
+ * a way the agent should react to (moderation / bad user params). Written
+ * with sender='host', is_from_me=1, is_bot_message=0 so that:
+ *   - getMessagesSince INCLUDES it in the next prompt to the agent (agent sees it)
+ *   - getLastUserMessageId EXCLUDES it (react tool won't land on it by accident)
+ *   - recordOutgoing's message store is NOT touched (this isn't an agent message)
+ * The stored content is ALWAYS the short signal — never the original prompt
+ * that got rejected, so we don't forward potentially-unsafe content to chat
+ * or DB.
+ */
+async function sendImageGenFailureSignal(
+  channel: Channel,
+  jid: string,
+  threadId: string | undefined,
+  groupFolder: string | undefined,
+  outcome: Extract<Awaited<ReturnType<typeof generateImage>>, { ok: false }>,
+): Promise<void> {
+  // 'transient' (network, 5xx, 429, missing b64) is pure noise for the agent.
+  if (outcome.reason === 'transient') return;
+
+  let body: string;
+  if (outcome.reason === 'moderation') {
+    body =
+      '[host] OpenAI declined image generation (moderation). Rephrase the prompt and try again.';
+  } else {
+    const codeHint = outcome.code ? ` reason: ${outcome.code}` : '';
+    body = `[host] OpenAI declined image generation (${codeHint.trim() || 'user error'}). Adjust the request and try again.`;
+  }
+
+  if (groupFolder && outcome.reason === 'moderation') {
+    const prev = moderationBlocksByGroup.get(groupFolder) ?? 0;
+    const next = prev + 1;
+    moderationBlocksByGroup.set(groupFolder, next);
+    if (next >= MODERATION_LOOP_THRESHOLD) {
+      body += ' Stop retrying with rewrites — switch topic or ask the user.';
+    }
+  }
+
+  try {
+    const msgId = await channel.sendMessage(jid, body, threadId);
+    if (msgId) {
+      // Store with sender='host', is_from_me=1 (not a user input) so
+      // getLastUserMessageId skips it, is_bot_message=0 so getMessagesSince
+      // feeds it into the agent's next prompt. See the doc comment above
+      // for why this flag combination.
+      storeMessage({
+        id: msgId,
+        chat_jid: jid,
+        sender: 'host',
+        sender_name: 'host',
+        content: body,
+        timestamp: new Date().toISOString(),
+        is_from_me: true,
+        is_bot_message: false,
+      });
+    }
+  } catch (err) {
+    logger.warn(
+      { err, jid, reason: outcome.reason, code: outcome.code },
+      'Failed to deliver image-gen failure signal',
+    );
+  }
+}
+
 function recordOutgoing(
   jid: string,
   messageId: string | undefined,
@@ -185,10 +257,9 @@ export async function sendWithTts(
         const presets = imgDirective.presets;
         void (async () => {
           try {
-            let result: { previewPath: string; originalPath: string } | null =
-              null;
+            let outcome: Awaited<ReturnType<typeof generateImage>> = null;
             if (imgDirective.type === 'generate') {
-              result = await generateImage(
+              outcome = await generateImage(
                 imgDirective.prompt,
                 attachmentsDir,
                 presets,
@@ -202,14 +273,27 @@ export async function sendWithTts(
                 groupFolder,
                 imgDirective.sourcePath,
               );
-              result = await editImage(
+              outcome = await editImage(
                 sourceFull,
                 imgDirective.prompt,
                 attachmentsDir,
                 presets,
               );
             }
-            if (result) {
+            if (outcome && outcome.ok === false) {
+              await sendImageGenFailureSignal(
+                channel,
+                jid,
+                threadId,
+                groupFolder,
+                outcome,
+              );
+              return;
+            }
+            if (outcome && outcome.ok === true) {
+              // Any successful generation clears the moderation-loop counter.
+              moderationBlocksByGroup.delete(groupFolder);
+              const result = outcome;
               const relOriginal = path.relative(
                 groupRootAbs,
                 result.originalPath,
