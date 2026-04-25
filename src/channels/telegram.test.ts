@@ -138,7 +138,7 @@ function createTextCtx(overrides: {
       entities: overrides.entities ?? [],
       reply_to_message: overrides.reply_to_message,
     },
-    me: { username: 'andy_ai_bot' },
+    me: { id: 12345, username: 'andy_ai_bot' },
     reply: vi.fn(),
   };
 }
@@ -171,7 +171,12 @@ function createMediaCtx(overrides: {
       caption: overrides.caption,
       ...(overrides.extra || {}),
     },
-    me: { username: 'andy_ai_bot' },
+    // id matches the value passed to start()'s onStart callback in the
+    // grammy mock above. Without an explicit id, `replyTo?.from?.id ===
+    // ctx.me.id` resolves to `undefined === undefined` → true, which makes
+    // every media message look like a reply to the bot and silently
+    // prepends the trigger prefix to the stored content.
+    me: { id: 12345, username: 'andy_ai_bot' },
   };
 }
 
@@ -194,8 +199,14 @@ async function triggerMediaMessage(
 
 // --- Tests ---
 
-// Helper: flush pending microtasks (for async downloadFile().then() chains)
-const flushPromises = () => new Promise((resolve) => setTimeout(resolve, 0));
+// Helper: flush pending microtasks. The voice/audio path now chains an
+// extra `await transcribe(...)` after `downloadFile(...).then(async ...)`,
+// so a single setTimeout(0) tick isn't always enough — drain a few.
+const flushPromises = async () => {
+  for (let i = 0; i < 5; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+};
 
 describe('TelegramChannel', () => {
   beforeEach(() => {
@@ -797,7 +808,9 @@ describe('TelegramChannel', () => {
       );
     });
 
-    it('downloads voice message', async () => {
+    it('downloads voice message (no STT key — bare placeholder)', async () => {
+      // No OPENAI_*_API_KEY set, so transcribe() short-circuits to null
+      // and the placeholder stays as `[Voice message]`.
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -819,6 +832,61 @@ describe('TelegramChannel', () => {
           content: '[Voice message] (/workspace/group/attachments/voice_1.oga)',
         }),
       );
+    });
+
+    it('inlines STT transcript into voice placeholder when key present', async () => {
+      const origKey = process.env.OPENAI_TTS_API_KEY;
+      process.env.OPENAI_TTS_API_KEY = 'stt-key';
+
+      // STT reads the downloaded file from disk; mock fs to skip the I/O.
+      vi.spyOn(fs, 'statSync').mockReturnValue({ size: 1000 } as fs.Stats);
+      vi.spyOn(fs, 'readFileSync').mockReturnValue(Buffer.from('audio'));
+
+      // The Telegram-file fetch and the OpenAI-STT fetch share one global
+      // mock — discriminate by URL so the right body comes back to each.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((url: string) => {
+          if (url.includes('audio/transcriptions')) {
+            return Promise.resolve({
+              ok: true,
+              text: vi.fn().mockResolvedValue('Привет, как дела?'),
+            });
+          }
+          return Promise.resolve({
+            ok: true,
+            arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(8)),
+          });
+        }),
+      );
+
+      try {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        currentBot().api.getFile.mockResolvedValueOnce({
+          file_path: 'voice/file_0.oga',
+        });
+
+        const ctx = createMediaCtx({
+          extra: { voice: { file_id: 'voice_id' } },
+        });
+        await triggerMediaMessage('message:voice', ctx);
+        await flushPromises();
+
+        expect(opts.onMessage).toHaveBeenCalledWith(
+          'tg:100200300',
+          expect.objectContaining({
+            content:
+              '[Voice message: Привет, как дела?] (/workspace/group/attachments/voice_1.oga)',
+            message_type: 'voice',
+          }),
+        );
+      } finally {
+        if (origKey === undefined) delete process.env.OPENAI_TTS_API_KEY;
+        else process.env.OPENAI_TTS_API_KEY = origKey;
+      }
     });
 
     it('downloads audio with original filename', async () => {
