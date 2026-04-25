@@ -58,6 +58,7 @@ import { autoClearEyeIfSet } from './auto-clear-eye.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
+  detectOrphanImageTag,
   editImage,
   extractImageDirective,
   generateImage,
@@ -228,6 +229,39 @@ export async function sendWithTts(
 ): Promise<void> {
   if (groupFolder) {
     const imgDirective = extractImageDirective(text);
+    if (!imgDirective) {
+      // No valid directive matched. If the text still contains an opener
+      // (`[[image:`, `[[image-edit:`, `[[image-file:`) without a matching
+      // `]]`, the agent dropped the second closing bracket — silent failure
+      // mode where the literal tag ships to chat as text. Emit a [host]
+      // signal so the agent gets corrective feedback on the next turn.
+      const orphan = detectOrphanImageTag(text);
+      if (orphan) {
+        const body = `[host] Image tag opener "${orphan}" detected with no matching "]]" closer. Tag was sent as literal text, image NOT generated. Use exactly two closing brackets ("]]" not "]") — single bracket is a silent failure: parser ignores it, agent does not learn unless someone notices.`;
+        void (async () => {
+          try {
+            const msgId = await channel.sendMessage(jid, body, threadId);
+            if (msgId) {
+              storeMessage({
+                id: msgId,
+                chat_jid: jid,
+                sender: 'host',
+                sender_name: 'host',
+                content: body,
+                timestamp: new Date().toISOString(),
+                is_from_me: true,
+                is_bot_message: false,
+              });
+            }
+          } catch (err) {
+            logger.warn(
+              { err, jid, orphan },
+              'Failed to deliver orphan-tag warning',
+            );
+          }
+        })();
+      }
+    }
     if (imgDirective) {
       const attachmentsDir = path.join(GROUPS_DIR, groupFolder, 'attachments');
       const groupRootAbs = path.resolve(GROUPS_DIR, groupFolder);
