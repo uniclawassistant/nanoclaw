@@ -91,15 +91,12 @@ export async function transcribe(localPath: string): Promise<string | null> {
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
 
   try {
-    const resp = await fetch(
-      'https://api.openai.com/v1/audio/transcriptions',
-      {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${apiKey}` },
-        body: form,
-        signal: ctrl.signal,
-      },
-    );
+    const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+      signal: ctrl.signal,
+    });
 
     if (!resp.ok) {
       const body = await resp.text();
