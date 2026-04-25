@@ -74,9 +74,16 @@ export async function transcribe(localPath: string): Promise<string | null> {
     return null;
   }
 
-  const filename = path.basename(localPath);
+  // OpenAI's transcription whitelist accepts `.ogg` but NOT `.oga`, even
+  // though Telegram voice messages use the latter and the bytes are
+  // identical OGG-Opus. Rename at upload time so the API doesn't 400 with
+  // "Unsupported file format oga". On-disk file keeps its original name.
+  let uploadName = path.basename(localPath);
+  if (uploadName.toLowerCase().endsWith('.oga')) {
+    uploadName = uploadName.slice(0, -4) + '.ogg';
+  }
   const form = new FormData();
-  form.append('file', new Blob([buf]), filename);
+  form.append('file', new Blob([buf]), uploadName);
   form.append('model', STT_MODEL);
   form.append('response_format', 'text');
 

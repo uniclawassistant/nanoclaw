@@ -152,6 +152,51 @@ describe('transcribe', () => {
     expect(out).toBeNull();
   });
 
+  it('renames .oga uploads to .ogg (OpenAI whitelist quirk)', async () => {
+    process.env.OPENAI_TTS_API_KEY = 'k';
+    vi.spyOn(fs, 'statSync').mockReturnValue({ size: 100 } as fs.Stats);
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(Buffer.from('x'));
+
+    let capturedName: string | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const form = init.body as FormData;
+        const file = form.get('file') as File;
+        capturedName = file?.name;
+        return {
+          ok: true,
+          text: vi.fn().mockResolvedValue('hi'),
+        };
+      }),
+    );
+
+    await transcribe('/tmp/voice_42.oga');
+
+    expect(capturedName).toBe('voice_42.ogg');
+  });
+
+  it('preserves non-.oga extensions verbatim', async () => {
+    process.env.OPENAI_TTS_API_KEY = 'k';
+    vi.spyOn(fs, 'statSync').mockReturnValue({ size: 100 } as fs.Stats);
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(Buffer.from('x'));
+
+    let capturedName: string | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const form = init.body as FormData;
+        const file = form.get('file') as File;
+        capturedName = file?.name;
+        return { ok: true, text: vi.fn().mockResolvedValue('hi') };
+      }),
+    );
+
+    await transcribe('/tmp/song.mp3');
+
+    expect(capturedName).toBe('song.mp3');
+  });
+
   it('prefers OPENAI_STT_API_KEY over OPENAI_TTS_API_KEY', async () => {
     process.env.OPENAI_STT_API_KEY = 'stt-key';
     process.env.OPENAI_TTS_API_KEY = 'tts-key';
