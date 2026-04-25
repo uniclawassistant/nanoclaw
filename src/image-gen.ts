@@ -369,6 +369,32 @@ export function extractImageDirective(text: string): ImageDirective | null {
   return null;
 }
 
+/**
+ * Detect a likely-typo'd image tag: opener present (`[[image:`,
+ * `[[image-edit:`, `[[image-file:`) but no matching closing `]]` anywhere
+ * after it. This is the silent-failure mode where the agent dropped the
+ * second `]` — the regexes above fail to match, the tag falls through to
+ * literal text in chat, and the agent has no signal that anything went
+ * wrong. Returns the orphan opener (e.g. `[[image:`) for the warning text,
+ * or null if either no opener exists or the tag is well-formed.
+ *
+ * Order matters: longer openers (`[[image-edit:`, `[[image-file:`) checked
+ * first so a `[[image-edit:` with no closer doesn't get reported as
+ * `[[image:` (substring match would find both, but the dashed variants are
+ * lexically longer and more specific).
+ */
+export function detectOrphanImageTag(text: string): string | null {
+  const openers = [
+    { token: '[[image-file:', re: IMAGE_FILE_RE },
+    { token: '[[image-edit:', re: IMAGE_EDIT_RE },
+    { token: '[[image:', re: IMAGE_GEN_RE },
+  ];
+  for (const { token, re } of openers) {
+    if (text.includes(token) && !re.test(text)) return token;
+  }
+  return null;
+}
+
 function getApiKey(): string | undefined {
   const env = readEnvFile(['OPENAI_TTS_API_KEY']);
   return process.env.OPENAI_TTS_API_KEY || env.OPENAI_TTS_API_KEY;
