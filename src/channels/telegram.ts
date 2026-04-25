@@ -12,6 +12,7 @@ import { deleteSession } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
+import { transcribe } from '../stt.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import allowedReactions from './telegram-allowed-reactions.json' with { type: 'json' };
 import {
@@ -72,14 +73,15 @@ export class TelegramChannel implements Channel {
 
   /**
    * Download a Telegram file to the group's attachments directory.
-   * Returns the container-relative path (e.g. /workspace/group/attachments/photo_123.jpg)
-   * or null if the download fails.
+   * Returns both the container-relative path (used by the agent — e.g.
+   * /workspace/group/attachments/photo_123.jpg) and the host-side absolute
+   * path (used by host-side post-processing like STT). Null on failure.
    */
   private async downloadFile(
     fileId: string,
     groupFolder: string,
     filename: string,
-  ): Promise<string | null> {
+  ): Promise<{ containerPath: string; localPath: string } | null> {
     if (!this.bot) return null;
 
     try {
@@ -114,7 +116,10 @@ export class TelegramChannel implements Channel {
       fs.writeFileSync(destPath, buffer);
 
       logger.info({ fileId, dest: destPath }, 'Telegram file downloaded');
-      return `/workspace/group/attachments/${finalName}`;
+      return {
+        containerPath: `/workspace/group/attachments/${finalName}`,
+        localPath: destPath,
+      };
     } catch (err) {
       logger.error({ fileId, err }, 'Failed to download Telegram file');
       return null;
@@ -507,16 +512,33 @@ export class TelegramChannel implements Channel {
           opts.filename ||
           `${placeholder.replace(/[\[\] ]/g, '').toLowerCase()}_${msgId}`;
         this.downloadFile(opts.fileId, group.folder, filename).then(
-          (filePath) => {
-            if (filePath) {
-              // downloadFile returns a container-absolute path like
-              // /workspace/group/attachments/photo_123.jpg; strip the mount
-              // prefix so the stored file_path is group-relative.
-              const groupRel = filePath.replace(/^\/workspace\/group\//, '');
-              deliver(`${placeholder} (${filePath})${caption}`, groupRel);
-            } else {
+          async (downloaded) => {
+            if (!downloaded) {
               deliver(`${placeholder}${caption}`);
+              return;
             }
+            // containerPath is what the agent sees inside the workspace
+            // mount; strip the mount prefix to get the group-relative
+            // file_path stored alongside the message row.
+            const groupRel = downloaded.containerPath.replace(
+              /^\/workspace\/group\//,
+              '',
+            );
+            // Voice/audio: try host-side STT so the agent reads the
+            // transcript inline instead of seeing a bare placeholder.
+            // Failure is non-fatal — we just fall back to the placeholder.
+            let label = placeholder;
+            if (opts.messageType === 'voice') {
+              const transcript = await transcribe(downloaded.localPath);
+              if (transcript) {
+                const inner = placeholder.slice(1, -1);
+                label = `[${inner}: ${transcript}]`;
+              }
+            }
+            deliver(
+              `${label} (${downloaded.containerPath})${caption}`,
+              groupRel,
+            );
           },
         );
         return;
