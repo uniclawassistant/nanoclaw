@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 import {
   computeApiTimeoutMs,
+  detectOrphanImageTag,
   extractImageDirective,
   resolvePresets,
 } from './image-gen.js';
@@ -443,5 +444,86 @@ describe('computeApiTimeoutMs', () => {
     const t = computeApiTimeoutMs(r, true);
     expect(t).toBeGreaterThan(400_000);
     expect(t).toBeLessThan(500_000);
+  });
+});
+
+describe('detectOrphanImageTag — silent-failure typo guard', () => {
+  it('returns null when no opener present', () => {
+    expect(detectOrphanImageTag('hello world')).toBeNull();
+    expect(detectOrphanImageTag('')).toBeNull();
+  });
+
+  it('returns null for well-formed [[image: ... ]]', () => {
+    expect(detectOrphanImageTag('[[image: a cat]]')).toBeNull();
+    expect(
+      detectOrphanImageTag('[[image:portrait,quality=high: a cat]]'),
+    ).toBeNull();
+  });
+
+  it('returns null for well-formed [[image-edit: ... ]]', () => {
+    expect(
+      detectOrphanImageTag('[[image-edit: attachments/x.jpg | rotate]]'),
+    ).toBeNull();
+  });
+
+  it('returns null for well-formed [[image-file: ... ]]', () => {
+    expect(
+      detectOrphanImageTag('[[image-file: attachments/x.jpg]]'),
+    ).toBeNull();
+  });
+
+  it('flags [[image: opener with single closing ]', () => {
+    // The exact failure mode from 2026-04-25 — agent dropped the second ].
+    expect(
+      detectOrphanImageTag('[[image:landscape,quality=high: storybook scene]'),
+    ).toBe('[[image:');
+  });
+
+  it('flags [[image-edit: opener with single closing ]', () => {
+    expect(
+      detectOrphanImageTag(
+        '[[image-edit: attachments/x.jpg | sharper, more contrast]',
+      ),
+    ).toBe('[[image-edit:');
+  });
+
+  it('flags [[image-file: opener with single closing ]', () => {
+    expect(
+      detectOrphanImageTag('[[image-file: attachments/image_123.jpg]'),
+    ).toBe('[[image-file:');
+  });
+
+  it('flags opener with no closing at all', () => {
+    expect(detectOrphanImageTag('Here is the prompt: [[image: a cat')).toBe(
+      '[[image:',
+    );
+  });
+
+  it('reports the longest-matching opener for dashed variants', () => {
+    // [[image-edit:foo] contains the substring [[image: at no point
+    // (dash, not colon, after "image"), so we must not misreport.
+    expect(detectOrphanImageTag('[[image-edit: foo]')).toBe('[[image-edit:');
+    expect(detectOrphanImageTag('[[image-file: bar]')).toBe('[[image-file:');
+  });
+
+  it('passes through prompt content with internal single ] (LaTeX/JSON/array)', () => {
+    // Prompt contains array-notation y[i] — the strict regex still matches
+    // because the trailing ]] is intact, so this is well-formed.
+    expect(
+      detectOrphanImageTag('[[image: array notation y[i] illustration]]'),
+    ).toBeNull();
+  });
+
+  it('does not flag mention of opener inside backticks if message is otherwise plain text', () => {
+    // Edge case: agent writes about the syntax in a brief without a real tag.
+    // We intentionally still flag this — false positive is preferable to
+    // false negative, since the warning is just a [host] notice.
+    expect(
+      detectOrphanImageTag('Use `[[image: prompt]]` to generate.'),
+    ).toBeNull();
+    // Same brief but with a typo'd example — flagged.
+    expect(
+      detectOrphanImageTag('Common typo: `[[image: prompt]` (single ]).'),
+    ).toBe('[[image:');
   });
 });

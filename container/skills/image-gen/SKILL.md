@@ -5,6 +5,8 @@ description: Generate or edit images using GPT Image. Use special tags in your r
 
 # Image Generation
 
+> **Bracket discipline.** All three tags — `[[image:]]`, `[[image-edit:]]`, `[[image-file:]]` — must close with **exactly two `]]`**. A single `]` at the end is a silent failure: the host parser does not match it, the tag ships to chat as literal text, no image is generated, no error is raised. You only find out if someone notices. The host now emits a `[host]` warning when it sees an opener without a matching `]]`, but treat that as a backstop — eyeball the tail of any message that contains a tag before sending.
+
 You can generate, edit, and re-send images by including special tags in your response. The host intercepts these tags, calls the API or reads the file, saves results to your group's `attachments/` directory, and sends them to the chat.
 
 ## Generate an image
