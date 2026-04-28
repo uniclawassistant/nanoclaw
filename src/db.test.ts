@@ -7,6 +7,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getLastBotMessageTimestamp,
+  getLastIncomingThreadId,
   getLastUserMessageId,
   getMessageById,
   getMessagesSince,
@@ -849,5 +850,119 @@ describe('getMessageById', () => {
     expect(rec!.direction).toBe('out');
     expect(rec!.type).toBe('text');
     expect(rec!.text).toBe('greetings');
+  });
+});
+
+describe('thread_id persistence and getLastIncomingThreadId', () => {
+  it('round-trips thread_id through storeMessage + getMessageById', () => {
+    storeChatMetadata('tg:-100123', '2026-04-28T10:00:00.000Z');
+    storeMessage({
+      id: '42',
+      chat_jid: 'tg:-100123',
+      sender: 'user',
+      sender_name: 'Alice',
+      content: 'in the dev topic',
+      timestamp: '2026-04-28T10:00:00.000Z',
+      is_from_me: false,
+      thread_id: '7',
+    });
+    const rec = getMessageById('42', 'tg:-100123');
+    expect(rec!.thread_id).toBe('7');
+  });
+
+  it('exposes thread_id in getMessagesSince so reply paths see it', () => {
+    storeChatMetadata('tg:-100456', '2026-04-28T10:00:00.000Z');
+    storeMessage({
+      id: '50',
+      chat_jid: 'tg:-100456',
+      sender: 'user',
+      sender_name: 'Bob',
+      content: 'topic msg',
+      timestamp: '2026-04-28T10:00:01.000Z',
+      is_from_me: false,
+      thread_id: '99',
+    });
+    const msgs = getMessagesSince(
+      'tg:-100456',
+      '2026-04-28T09:00:00.000Z',
+      'Unic',
+    );
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].thread_id).toBe('99');
+  });
+
+  it('returns the most recent incoming thread_id', () => {
+    storeChatMetadata('tg:-100789', '2026-04-28T10:00:00.000Z');
+    storeMessage({
+      id: 'a',
+      chat_jid: 'tg:-100789',
+      sender: 'user',
+      sender_name: 'A',
+      content: 'older topic',
+      timestamp: '2026-04-28T10:00:00.000Z',
+      is_from_me: false,
+      thread_id: '1',
+    });
+    storeMessage({
+      id: 'b',
+      chat_jid: 'tg:-100789',
+      sender: 'user',
+      sender_name: 'A',
+      content: 'newer topic',
+      timestamp: '2026-04-28T10:01:00.000Z',
+      is_from_me: false,
+      thread_id: '2',
+    });
+    expect(getLastIncomingThreadId('tg:-100789')).toBe('2');
+  });
+
+  it('ignores outgoing/bot messages and null thread_id', () => {
+    storeChatMetadata('tg:-100999', '2026-04-28T10:00:00.000Z');
+    // Incoming with thread_id (target).
+    storeMessage({
+      id: 'in1',
+      chat_jid: 'tg:-100999',
+      sender: 'user',
+      sender_name: 'A',
+      content: 'topic 5',
+      timestamp: '2026-04-28T10:00:00.000Z',
+      is_from_me: false,
+      thread_id: '5',
+    });
+    // Newer outgoing (must not shadow the incoming topic).
+    storeOutgoingMessage({
+      id: 'out1',
+      chat_jid: 'tg:-100999',
+      sender: 'Unic',
+      sender_name: 'Unic',
+      content: 'reply',
+      timestamp: '2026-04-28T10:00:30.000Z',
+      message_type: 'text',
+    });
+    // Newer incoming WITHOUT thread_id (general chat).
+    storeMessage({
+      id: 'in2',
+      chat_jid: 'tg:-100999',
+      sender: 'user',
+      sender_name: 'A',
+      content: 'no topic',
+      timestamp: '2026-04-28T10:01:00.000Z',
+      is_from_me: false,
+    });
+    expect(getLastIncomingThreadId('tg:-100999')).toBe('5');
+  });
+
+  it('returns undefined when no incoming has a thread_id', () => {
+    storeChatMetadata('tg:111', '2026-04-28T10:00:00.000Z');
+    storeMessage({
+      id: 'plain',
+      chat_jid: 'tg:111',
+      sender: 'user',
+      sender_name: 'Z',
+      content: 'plain dm',
+      timestamp: '2026-04-28T10:00:00.000Z',
+      is_from_me: false,
+    });
+    expect(getLastIncomingThreadId('tg:111')).toBeUndefined();
   });
 });
