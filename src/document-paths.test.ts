@@ -98,7 +98,7 @@ describe('resolveContainerPathToHost', () => {
       expect(result.hostPath).toBe(
         fs.realpathSync(path.join(groupDir, 'note.md')),
       );
-      expect(result.groupRelative).toBe('note.md');
+      expect(result.tracePath).toBe('note.md');
     }
   });
 
@@ -112,7 +112,7 @@ describe('resolveContainerPathToHost', () => {
     );
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.groupRelative).toBe(path.join('attachments', 'photo.jpg'));
+      expect(result.tracePath).toBe(path.join('attachments', 'photo.jpg'));
     }
   });
 
@@ -184,8 +184,11 @@ describe('resolveContainerPathToHost', () => {
           path.join(extraHostDir, 'briefs', 'task-send-file-tool.md'),
         ),
       );
-      // groupRelative is intentionally not set for /workspace/extra/.
-      expect(result.groupRelative).toBeUndefined();
+      // Container-notation tracePath gives the agent traceback to the
+      // original (re-send via send_file, open via Read) without leaking host paths.
+      expect(result.tracePath).toBe(
+        '/workspace/extra/unic-memory/briefs/task-send-file-tool.md',
+      );
     }
   });
 

@@ -37,6 +37,10 @@ export interface IpcDeps {
   ) => void;
   onTasksChanged: () => void;
   getMessage: (messageId: string, jid: string) => MessageRecord | null;
+  // Resolves the topic the user most recently wrote in for this chat so
+  // outbound IPC paths can reply into the same topic instead of General.
+  // Returns undefined for plain chats and DMs.
+  getLastIncomingThreadId?: (jid: string) => string | undefined;
   // Sends a local file as a channel-native document. Resolves to the
   // channel-native message_id on success, or an error string on failure.
   sendDocument?: (
@@ -44,14 +48,17 @@ export interface IpcDeps {
     hostPath: string,
     caption: string | undefined,
     filename: string | undefined,
+    threadId: string | undefined,
   ) => Promise<{ ok: true; message_id: string } | { ok: false; error: string }>;
   // Persists an outgoing document into the message store so get_message
-  // can recall it. groupRelative is a group-folder-relative path or null
-  // when the file lives outside the group (e.g. /workspace/extra/...).
+  // can recall it. tracePath is a portable container-notation path
+  // ("note.md" for group files, "/workspace/extra/<mount>/<sub>" for
+  // extra-mount sources) — stored as file_path so the agent can re-send
+  // or reference the original via get_message.
   recordOutgoingDocument?: (
     jid: string,
     messageId: string,
-    args: { caption?: string; groupRelative: string | null; filename: string },
+    args: { caption?: string; tracePath: string; filename: string },
   ) => void;
 }
 
@@ -166,7 +173,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 ) {
                   await deps.sendMessage(data.chatJid, data.text);
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    {
+                      chatJid: data.chatJid,
+                      sourceGroup,
+                      thread: deps.getLastIncomingThreadId?.(data.chatJid),
+                    },
                     'IPC message sent',
                   );
                 } else {
@@ -381,12 +392,16 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       typeof data.filename === 'string' && data.filename
                         ? data.filename
                         : path.basename(resolved.hostPath);
+                    const threadId = deps.getLastIncomingThreadId?.(
+                      data.chatJid,
+                    );
                     try {
                       const result = await deps.sendDocument(
                         data.chatJid,
                         resolved.hostPath,
                         caption,
                         filename,
+                        threadId,
                       );
                       if (result.ok) {
                         if (deps.recordOutgoingDocument) {
@@ -395,7 +410,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                             result.message_id,
                             {
                               caption,
-                              groupRelative: resolved.groupRelative ?? null,
+                              tracePath: resolved.tracePath,
                               filename,
                             },
                           );
@@ -406,6 +421,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                             sourceGroup,
                             filename,
                             messageId: result.message_id,
+                            thread: threadId,
                           },
                           'IPC document sent',
                         );

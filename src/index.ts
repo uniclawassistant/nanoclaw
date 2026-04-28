@@ -39,6 +39,7 @@ import {
   deleteSession,
   getAllTasks,
   getLastBotMessageTimestamp,
+  getLastIncomingThreadId,
   getLastUserMessageId,
   getMessageById,
   getMessagesSince,
@@ -1084,7 +1085,8 @@ async function main(): Promise<void> {
       // tags emitted by scheduled tasks hit the image-gen pipeline instead of
       // being sent as literal text. Mirror the IPC path below.
       const folder = registeredGroups[jid]?.folder;
-      if (text) await sendWithTts(channel, jid, text, undefined, folder);
+      const threadId = getLastIncomingThreadId(jid);
+      if (text) await sendWithTts(channel, jid, text, threadId, folder);
     },
   });
   startIpcWatcher({
@@ -1095,7 +1097,8 @@ async function main(): Promise<void> {
       // mcp__nanoclaw__send_message (and from any intermediate, non-final
       // assistant block) are processed instead of leaking as literal text.
       const folder = registeredGroups[jid]?.folder;
-      return sendWithTts(channel, jid, text, undefined, folder);
+      const threadId = getLastIncomingThreadId(jid);
+      return sendWithTts(channel, jid, text, threadId, folder);
     },
     setReaction: async (jid, messageId, emoji) => {
       const channel = findChannel(channels, jid);
@@ -1153,21 +1156,21 @@ async function main(): Promise<void> {
       }
     },
     getMessage: (messageId, jid) => getMessageById(messageId, jid),
-    sendDocument: async (jid, hostPath, caption, filename) => {
+    getLastIncomingThreadId: (jid) => getLastIncomingThreadId(jid),
+    sendDocument: async (jid, hostPath, caption, filename, threadId) => {
       const channel = findChannel(channels, jid);
       if (!channel || !channel.sendDocument) {
         return { ok: false, error: 'send_file not supported on this channel' };
       }
-      return channel.sendDocument(jid, hostPath, caption, undefined, filename);
+      return channel.sendDocument(jid, hostPath, caption, threadId, filename);
     },
     recordOutgoingDocument: (jid, messageId, args) => {
-      const display = args.groupRelative ?? args.filename;
       recordOutgoing(jid, messageId, {
         content: args.caption
-          ? `[Document] ${args.caption} (${display})`
-          : `[Document] (${display})`,
+          ? `[Document] ${args.caption} (${args.tracePath})`
+          : `[Document] (${args.tracePath})`,
         messageType: 'document',
-        filePath: args.groupRelative ?? undefined,
+        filePath: args.tracePath,
       });
     },
   });
