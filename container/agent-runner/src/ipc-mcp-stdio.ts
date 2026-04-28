@@ -74,6 +74,99 @@ server.tool(
   },
 );
 
+const SEND_FILE_TIMEOUT_MS = 240_000;
+const SEND_FILE_POLL_INTERVAL_MS = 250;
+
+server.tool(
+  'send_file',
+  `Send a local file to the current chat as a channel-native document (Telegram sendDocument: no compression, original bytes preserved).
+
+USE FOR: arbitrary attachments — markdown, pdf, json, csv, logs, zip, code dumps. NOT for images you generated (use [[image:]] / [[image-file:]]) or voice (use [[tts]]).
+
+PATH:
+• Relative paths resolve from /workspace/group/ (your CWD).
+• Absolute paths must be under /workspace/group/ or /workspace/extra/<mount>/. Anything else (including .. or symlink escapes) is rejected.
+• File must exist and be readable.
+
+CAPTION: optional plain-text caption shown under the document in the chat.
+FILENAME: optional override for how the recipient sees the file. Defaults to the source basename.
+
+LIMITS: Telegram Bot API rejects files >50MB with a clear error — surfaced back to you so you can split, compress, or skip. Other channels are not yet supported.
+
+RETURN (JSON in tool output): { ok: true, message_id } on success — message_id is usable with get_message and react. { ok: false, error } on failure — error is the underlying API or path-validation reason (e.g. "path escapes its allowed root", "Bad Request: file is too big").`,
+  {
+    path: z
+      .string()
+      .describe(
+        'File path. Relative is resolved from /workspace/group/; absolute must be under /workspace/group/ or /workspace/extra/<mount>/.',
+      ),
+    caption: z
+      .string()
+      .optional()
+      .describe('Optional plain-text caption shown under the document.'),
+    filename: z
+      .string()
+      .optional()
+      .describe(
+        'Optional override for the filename the recipient sees. Defaults to the source basename.',
+      ),
+  },
+  async (args) => {
+    const requestId = crypto.randomUUID();
+    const data: Record<string, string | undefined> = {
+      type: 'document',
+      chatJid,
+      sourcePath: args.path,
+      caption: args.caption,
+      filename: args.filename,
+      requestId,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    const responsePath = path.join(RESPONSES_DIR, `${requestId}.json`);
+    const deadline = Date.now() + SEND_FILE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(responsePath)) {
+        try {
+          const resp = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+          fs.unlinkSync(responsePath);
+          const payload = resp.success
+            ? { ok: true, message_id: resp.message_id }
+            : { ok: false, error: resp.error ?? 'unknown error' };
+          return {
+            content: [
+              { type: 'text' as const, text: JSON.stringify(payload) },
+            ],
+            ...(resp.success ? {} : { isError: true as const }),
+          };
+        } catch (err) {
+          return toolError(
+            `Failed to read send_file response: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      await sleep(SEND_FILE_POLL_INTERVAL_MS);
+    }
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify({
+            ok: false,
+            error:
+              'send_file request timed out after 240s — the upload may still be in flight on the host.',
+          }),
+        },
+      ],
+      isError: true as const,
+    };
+  },
+);
+
 function toolError(text: string): {
   content: Array<{ type: 'text'; text: string }>;
   isError: true;
