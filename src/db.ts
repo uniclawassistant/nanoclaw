@@ -177,6 +177,14 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+  // Persist Telegram forum-supergroup thread id so that outbound replies from
+  // IPC paths (send_message, send_file, scheduled tasks) land in the same
+  // topic as the originating incoming message instead of General.
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN thread_id TEXT`);
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -305,7 +313,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name, message_type, file_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name, message_type, file_path, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -320,6 +328,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.reply_to_sender_name ?? null,
     msg.message_type ?? 'text',
     msg.file_path ?? null,
+    msg.thread_id ?? null,
   );
 }
 
@@ -375,6 +384,9 @@ export interface MessageRecord {
   text?: string;
   reply_to_message_id?: string;
   file_path?: string;
+  // Telegram forum-supergroup topic id (string-form numeric). Present when
+  // the source message was sent inside a topic; undefined for plain chats.
+  thread_id?: string;
   generation?: {
     prompt: string;
     preset?: string;
@@ -395,7 +407,7 @@ export function getMessageById(
     .prepare(
       `SELECT id, chat_jid, sender, sender_name, content, timestamp,
               is_from_me, is_bot_message, reply_to_message_id,
-              message_type, file_path, generation_json
+              message_type, file_path, generation_json, thread_id
          FROM messages WHERE id = ? AND chat_jid = ?`,
     )
     .get(messageId, chatJid) as
@@ -412,6 +424,7 @@ export function getMessageById(
         message_type: string | null;
         file_path: string | null;
         generation_json: string | null;
+        thread_id: string | null;
       }
     | undefined;
   if (!row) return null;
@@ -464,6 +477,7 @@ export function getMessageById(
     text,
     reply_to_message_id: row.reply_to_message_id ?? undefined,
     file_path: row.file_path ?? undefined,
+    thread_id: row.thread_id ?? undefined,
     generation,
     reactions: [],
   };
@@ -511,7 +525,8 @@ export function getNewMessages(
   const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
-             reply_to_message_id, reply_to_message_content, reply_to_sender_name
+             reply_to_message_id, reply_to_message_content, reply_to_sender_name,
+             thread_id
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -545,7 +560,8 @@ export function getMessagesSince(
   const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
-             reply_to_message_id, reply_to_message_content, reply_to_sender_name
+             reply_to_message_id, reply_to_message_content, reply_to_sender_name,
+             thread_id
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -581,6 +597,37 @@ export function getLastUserMessageId(chatJid: string): string | null {
     )
     .get(chatJid) as { id: string } | undefined;
   return row?.id ?? null;
+}
+
+/**
+ * Most recent topic the user wrote in for this chat. Used by out-of-band
+ * outbound IPC paths (send_message from cron, send_file, scheduler) so that
+ * replies land in the same topic instead of always going to General.
+ *
+ * SEMANTICS — "last incoming with non-null thread_id". This deliberately
+ * IGNORES General-channel messages (thread_id IS NULL) and bot/outgoing
+ * messages, so a user sequence "topic A → General → topic A → General"
+ * still routes the next out-of-band reply to topic A. If you need
+ * "wherever the user spoke last including General", read thread_id from
+ * the last NewMessage directly.
+ *
+ * For direct turn-replies (processGroupMessages), thread_id is taken from
+ * the originating message itself, not from this lookup, so there's no
+ * routing surprise on the in-line response path.
+ *
+ * Returns undefined for plain chats, DMs (no topics), and groups where
+ * the user has never written in any topic.
+ */
+export function getLastIncomingThreadId(chatJid: string): string | undefined {
+  const row = db
+    .prepare(
+      `SELECT thread_id FROM messages
+       WHERE chat_jid = ? AND is_from_me = 0 AND is_bot_message = 0
+         AND thread_id IS NOT NULL
+       ORDER BY timestamp DESC LIMIT 1`,
+    )
+    .get(chatJid) as { thread_id: string | null } | undefined;
+  return row?.thread_id ?? undefined;
 }
 
 export function createTask(

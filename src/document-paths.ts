@@ -17,10 +17,12 @@ export type ResolveResult =
   | {
       ok: true;
       hostPath: string;
-      // Path relative to the group folder when the source lives there.
-      // Used for persistence so get_message can return a portable file_path.
-      // Undefined when the source is under /workspace/extra/.
-      groupRelative?: string;
+      // Portable container-notation path for persistence and traceback:
+      //   group source     → "<rel-from-group>"          e.g. "briefs/x.md"
+      //   extra source     → "/workspace/extra/<m>/<sub>"  e.g. "/workspace/extra/unic-memory/briefs/x.md"
+      // Stored as file_path so get_message can return it; the agent can
+      // re-send or open the original via Read.
+      tracePath: string;
     }
   | { ok: false; error: string };
 
@@ -62,7 +64,7 @@ export function resolveContainerPathToHost(
     return {
       ok: true,
       hostPath: resolved.hostPath,
-      groupRelative: resolved.relative,
+      tracePath: resolved.relative,
     };
   }
 
@@ -83,7 +85,14 @@ export function resolveContainerPathToHost(
       if (validated.resolvedContainerPath !== mountName) continue;
       const resolved = resolveUnderRoot(validated.realHostPath, subPath);
       if (!resolved.ok) return resolved;
-      return { ok: true, hostPath: resolved.hostPath };
+      const trace = resolved.relative
+        ? `${EXTRA_PREFIX}${mountName}/${resolved.relative}`
+        : `${EXTRA_PREFIX}${mountName}`;
+      return {
+        ok: true,
+        hostPath: resolved.hostPath,
+        tracePath: trace,
+      };
     }
     return {
       ok: false,
