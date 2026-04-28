@@ -600,10 +600,23 @@ export function getLastUserMessageId(chatJid: string): string | null {
 }
 
 /**
- * Most recent topic the user wrote in for this chat. Used by outbound IPC
- * paths (send_message, send_file, scheduler) so that bot replies land in the
- * same topic instead of always going to General. Returns undefined for plain
- * chats and DMs (no topics) and for groups where the user has never written.
+ * Most recent topic the user wrote in for this chat. Used by out-of-band
+ * outbound IPC paths (send_message from cron, send_file, scheduler) so that
+ * replies land in the same topic instead of always going to General.
+ *
+ * SEMANTICS — "last incoming with non-null thread_id". This deliberately
+ * IGNORES General-channel messages (thread_id IS NULL) and bot/outgoing
+ * messages, so a user sequence "topic A → General → topic A → General"
+ * still routes the next out-of-band reply to topic A. If you need
+ * "wherever the user spoke last including General", read thread_id from
+ * the last NewMessage directly.
+ *
+ * For direct turn-replies (processGroupMessages), thread_id is taken from
+ * the originating message itself, not from this lookup, so there's no
+ * routing surprise on the in-line response path.
+ *
+ * Returns undefined for plain chats, DMs (no topics), and groups where
+ * the user has never written in any topic.
  */
 export function getLastIncomingThreadId(chatJid: string): string | undefined {
   const row = db
