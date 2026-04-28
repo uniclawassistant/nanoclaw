@@ -3,7 +3,7 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { DATA_DIR, GROUPS_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import {
   createTask,
@@ -12,6 +12,7 @@ import {
   MessageRecord,
   updateTask,
 } from './db.js';
+import { resolveContainerPathToHost } from './document-paths.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -36,6 +37,22 @@ export interface IpcDeps {
   ) => void;
   onTasksChanged: () => void;
   getMessage: (messageId: string, jid: string) => MessageRecord | null;
+  // Sends a local file as a channel-native document. Resolves to the
+  // channel-native message_id on success, or an error string on failure.
+  sendDocument?: (
+    jid: string,
+    hostPath: string,
+    caption: string | undefined,
+    filename: string | undefined,
+  ) => Promise<{ ok: true; message_id: string } | { ok: false; error: string }>;
+  // Persists an outgoing document into the message store so get_message
+  // can recall it. groupRelative is a group-folder-relative path or null
+  // when the file lives outside the group (e.g. /workspace/extra/...).
+  recordOutgoingDocument?: (
+    jid: string,
+    messageId: string,
+    args: { caption?: string; groupRelative: string | null; filename: string },
+  ) => void;
 }
 
 const RESPONSE_TTL_MS = 60_000;
@@ -303,6 +320,126 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       success: false,
                       error: errMsg,
                     });
+                  }
+                }
+              } else if (
+                data.type === 'document' &&
+                typeof data.chatJid === 'string' &&
+                typeof data.sourcePath === 'string' &&
+                typeof data.requestId === 'string'
+              ) {
+                const targetGroup = registeredGroups[data.chatJid];
+                const authorized =
+                  isMain || (targetGroup && targetGroup.folder === sourceGroup);
+                const responsesDir = path.join(
+                  ipcBaseDir,
+                  sourceGroup,
+                  'responses',
+                );
+                if (!authorized) {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC document attempt blocked',
+                  );
+                  writeIpcResponse(responsesDir, data.requestId, {
+                    success: false,
+                    error: 'unauthorized',
+                  });
+                } else if (!deps.sendDocument) {
+                  writeIpcResponse(responsesDir, data.requestId, {
+                    success: false,
+                    error: 'send_file not supported on this channel',
+                  });
+                } else {
+                  const resolved = resolveContainerPathToHost(
+                    data.sourcePath,
+                    sourceGroup,
+                    GROUPS_DIR,
+                    targetGroup,
+                    isMain,
+                  );
+                  if (!resolved.ok) {
+                    logger.warn(
+                      {
+                        chatJid: data.chatJid,
+                        sourceGroup,
+                        sourcePath: data.sourcePath,
+                        error: resolved.error,
+                      },
+                      'IPC document path rejected',
+                    );
+                    writeIpcResponse(responsesDir, data.requestId, {
+                      success: false,
+                      error: resolved.error,
+                    });
+                  } else {
+                    const caption =
+                      typeof data.caption === 'string'
+                        ? data.caption
+                        : undefined;
+                    const filename =
+                      typeof data.filename === 'string' && data.filename
+                        ? data.filename
+                        : path.basename(resolved.hostPath);
+                    try {
+                      const result = await deps.sendDocument(
+                        data.chatJid,
+                        resolved.hostPath,
+                        caption,
+                        filename,
+                      );
+                      if (result.ok) {
+                        if (deps.recordOutgoingDocument) {
+                          deps.recordOutgoingDocument(
+                            data.chatJid,
+                            result.message_id,
+                            {
+                              caption,
+                              groupRelative: resolved.groupRelative ?? null,
+                              filename,
+                            },
+                          );
+                        }
+                        logger.info(
+                          {
+                            chatJid: data.chatJid,
+                            sourceGroup,
+                            filename,
+                            messageId: result.message_id,
+                          },
+                          'IPC document sent',
+                        );
+                        writeIpcResponse(responsesDir, data.requestId, {
+                          success: true,
+                          message_id: result.message_id,
+                        });
+                      } else {
+                        logger.warn(
+                          {
+                            chatJid: data.chatJid,
+                            sourceGroup,
+                            filename,
+                            error: result.error,
+                          },
+                          'IPC document send failed',
+                        );
+                        writeIpcResponse(responsesDir, data.requestId, {
+                          success: false,
+                          error: result.error,
+                        });
+                      }
+                    } catch (err) {
+                      const errMsg =
+                        err instanceof Error ? err.message : String(err);
+                      logger.warn(
+                        { chatJid: data.chatJid, sourceGroup, err: errMsg },
+                        'IPC document delivery threw',
+                      );
+                      writeIpcResponse(responsesDir, data.requestId, {
+                        success: false,
+                        error: errMsg,
+                      });
+                    }
                   }
                 }
               }

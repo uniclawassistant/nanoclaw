@@ -43,7 +43,9 @@ interface MockedChannel extends Channel {
 function makeMockChannel(): MockedChannel {
   const sendMessage = vi.fn().mockResolvedValue('m-100');
   const sendPhoto = vi.fn().mockResolvedValue('m-101');
-  const sendDocument = vi.fn().mockResolvedValue('m-102');
+  const sendDocument = vi
+    .fn()
+    .mockResolvedValue({ ok: true, message_id: 'm-102' });
   const sendVoice = vi.fn().mockResolvedValue('m-103');
   const channel: MockedChannel = {
     name: 'test',
