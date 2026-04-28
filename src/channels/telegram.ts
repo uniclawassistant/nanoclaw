@@ -849,34 +849,45 @@ export class TelegramChannel implements Channel {
     filePath: string,
     caption?: string,
     threadId?: string,
-  ): Promise<string | undefined> {
-    if (!this.bot) return undefined;
+    filename?: string,
+  ): Promise<{ ok: true; message_id: string } | { ok: false; error: string }> {
+    if (!this.bot) return { ok: false, error: 'Telegram bot not initialized' };
     const numericId = jid.replace(/^tg:/, '');
     const options: Record<string, unknown> = {};
     if (caption) options.caption = caption;
     if (threadId) options.message_thread_id = parseInt(threadId, 10);
+    const sentName = filename ?? path.basename(filePath);
 
     // 180s — photo previews are ~200KB but documents ship full-resolution
     // PNGs (1-5MB on hd renders), so the upload tail needs headroom over the
     // photo timeout (120s).
+    let lastError: string | undefined;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const sent = await this.bot.api.sendDocument(
           numericId,
-          new InputFile(fs.readFileSync(filePath), path.basename(filePath)),
+          new InputFile(fs.readFileSync(filePath), sentName),
           options,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           AbortSignal.timeout(180_000) as any,
         );
-        logger.info({ jid }, 'Telegram document sent');
-        return sent?.message_id?.toString();
+        const id = sent?.message_id?.toString();
+        if (id) {
+          logger.info({ jid }, 'Telegram document sent');
+          return { ok: true, message_id: id };
+        }
+        lastError = 'Telegram returned no message_id';
       } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
         logger.warn({ jid, attempt, err }, 'sendDocument attempt failed');
         if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
       }
     }
-    logger.error({ jid }, 'Failed to send Telegram document after 3 attempts');
-    return undefined;
+    logger.error(
+      { jid, lastError },
+      'Failed to send Telegram document after 3 attempts',
+    );
+    return { ok: false, error: lastError ?? 'unknown error' };
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {

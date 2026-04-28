@@ -280,17 +280,19 @@ export async function sendWithTts(
           void (async () => {
             try {
               if (channel.sendDocument) {
-                const msgId = await channel.sendDocument(
+                const result = await channel.sendDocument(
                   jid,
                   sourceFull,
                   undefined,
                   threadId,
                 );
-                recordOutgoing(jid, msgId, {
-                  content: `[Document] (${relSource})`,
-                  messageType: 'document',
-                  filePath: relSource,
-                });
+                if (result.ok) {
+                  recordOutgoing(jid, result.message_id, {
+                    content: `[Document] (${relSource})`,
+                    messageType: 'document',
+                    filePath: relSource,
+                  });
+                }
               }
             } catch (err) {
               logger.error(
@@ -366,21 +368,23 @@ export async function sendWithTts(
                   { jid, previewSize, relOriginal },
                   'Preview exceeds photo size cap, falling back to document',
                 );
-                const msgId = await channel.sendDocument(
+                const docResult = await channel.sendDocument(
                   jid,
                   result.originalPath,
                   undefined,
                   threadId,
                 );
-                recordOutgoing(jid, msgId, {
-                  content: `[Document] (${relOriginal})`,
-                  messageType: 'document',
-                  filePath: relOriginal,
-                  generation: {
-                    prompt: genPrompt,
-                    original_png_path: relOriginal,
-                  },
-                });
+                if (docResult.ok) {
+                  recordOutgoing(jid, docResult.message_id, {
+                    content: `[Document] (${relOriginal})`,
+                    messageType: 'document',
+                    filePath: relOriginal,
+                    generation: {
+                      prompt: genPrompt,
+                      original_png_path: relOriginal,
+                    },
+                  });
+                }
               } else if (channel.sendPhoto) {
                 const msgId = await channel.sendPhoto(
                   jid,
@@ -1149,6 +1153,23 @@ async function main(): Promise<void> {
       }
     },
     getMessage: (messageId, jid) => getMessageById(messageId, jid),
+    sendDocument: async (jid, hostPath, caption, filename) => {
+      const channel = findChannel(channels, jid);
+      if (!channel || !channel.sendDocument) {
+        return { ok: false, error: 'send_file not supported on this channel' };
+      }
+      return channel.sendDocument(jid, hostPath, caption, undefined, filename);
+    },
+    recordOutgoingDocument: (jid, messageId, args) => {
+      const display = args.groupRelative ?? args.filename;
+      recordOutgoing(jid, messageId, {
+        content: args.caption
+          ? `[Document] ${args.caption} (${display})`
+          : `[Document] (${display})`,
+        messageType: 'document',
+        filePath: args.groupRelative ?? undefined,
+      });
+    },
   });
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);
