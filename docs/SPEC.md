@@ -631,6 +631,8 @@ The `nanoclaw` MCP server is created dynamically per agent call with the current
 | `resume_task` | Resume a paused task |
 | `cancel_task` | Delete a task |
 | `send_message` | Send a message to the group via its channel |
+| `send_file` | Send a local file as a channel-native document (Telegram only). Path must be under `/workspace/group/` or `/workspace/extra/<mount>/`. Returns JSON `{ok, message_id?, error?}` in tool output. |
+| `get_message` | Look up a stored message by id (text, attachments, generation metadata) |
 | `react` | Set or clear an emoji reaction on a Telegram message (signal "received, working") |
 
 ---
