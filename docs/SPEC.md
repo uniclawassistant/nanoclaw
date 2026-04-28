@@ -341,7 +341,9 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
-// Container configuration
+// Container configuration. Override CONTAINER_IMAGE in the launchd plist
+// (or systemd unit) to give each bot its own image tag — see "Per-bot
+// image tags" below.
 export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
 export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800000', 10); // 30min default
 export const IPC_POLL_INTERVAL = 1000;
@@ -352,6 +354,29 @@ export const TRIGGER_PATTERN = new RegExp(`^@${ASSISTANT_NAME}\\b`, 'i');
 ```
 
 **Note:** Paths must be absolute for container volume mounts to work correctly.
+
+### Per-bot image tags
+
+When you run multiple NanoClaw instances on the same host (e.g. one bot per
+fork branch with different Dockerfiles), each instance must build and run
+its own image — otherwise the shared `nanoclaw-agent:latest` tag flip-flops
+between definitions and whichever rebuild ran last wins.
+
+Set `CONTAINER_IMAGE` per bot in the launchd plist (`EnvironmentVariables`)
+or systemd unit (`Environment=`):
+
+```xml
+<!-- ~/Library/LaunchAgents/com.nanoclaw-unic.plist -->
+<key>EnvironmentVariables</key>
+<dict>
+  <key>CONTAINER_IMAGE</key>
+  <string>nanoclaw-agent-unic:latest</string>
+</dict>
+```
+
+`container/build.sh` reads the same env var, so `CONTAINER_IMAGE=… ./container/build.sh`
+builds the right tag automatically. Single-bot installs keep working unchanged
+on the legacy `nanoclaw-agent:latest` default.
 
 ### Container Configuration
 
