@@ -15,6 +15,17 @@ const envConfig = readEnvFile(['CREDENTIAL_PROXY_HOST']);
 export const CONTAINER_RUNTIME_BIN = 'container';
 
 /**
+ * Long-lived keepalive container that pins the Apple Container bridge interface up.
+ * Apple Container only attaches `bridge100` (with the host gateway IP, e.g. 192.168.64.1)
+ * to the macOS host while at least one container is running. When the last container
+ * exits, the interface disappears and any process bound to that IP starts failing.
+ * The credential proxy must bind to that IP and outlive any single agent container,
+ * so we keep this idle alpine container running. Excluded from `cleanupOrphans`.
+ */
+export const NETWORK_KEEPALIVE_NAME = 'nanoclaw-network-keepalive';
+const NETWORK_KEEPALIVE_IMAGE = 'alpine:latest';
+
+/**
  * IP address containers use to reach the host machine.
  * Apple Container VMs use a bridge network (192.168.64.x); the host is at the gateway.
  * Detected from the bridge0 interface, falling back to 192.168.64.1.
@@ -132,7 +143,9 @@ export function cleanupOrphans(): void {
     const orphans = containers
       .filter(
         (c) =>
-          c.status === 'running' && c.configuration.id.startsWith('nanoclaw-'),
+          c.status === 'running' &&
+          c.configuration.id.startsWith('nanoclaw-') &&
+          c.configuration.id !== NETWORK_KEEPALIVE_NAME,
       )
       .map((c) => c.configuration.id);
     for (const name of orphans) {
@@ -151,4 +164,79 @@ export function cleanupOrphans(): void {
   } catch (err) {
     logger.warn({ err }, 'Failed to clean up orphaned containers');
   }
+}
+
+/**
+ * Ensure the network keepalive container is running so `bridge100` (and the
+ * host gateway IP the credential proxy binds to) stays attached to the host.
+ * Idempotent: starts a stopped one, leaves a running one alone, creates a new
+ * one if neither exists.
+ */
+export function ensureNetworkKeepalive(): void {
+  try {
+    const output = execSync(`${CONTAINER_RUNTIME_BIN} ls -a --format json`, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    });
+    const containers: { status: string; configuration: { id: string } }[] =
+      JSON.parse(output || '[]');
+    const existing = containers.find(
+      (c) => c.configuration.id === NETWORK_KEEPALIVE_NAME,
+    );
+    if (existing?.status === 'running') {
+      logger.debug('Network keepalive already running');
+      return;
+    }
+    if (existing) {
+      logger.info(
+        { status: existing.status },
+        'Starting existing network keepalive container',
+      );
+      execSync(`${CONTAINER_RUNTIME_BIN} start ${NETWORK_KEEPALIVE_NAME}`, {
+        stdio: 'pipe',
+        timeout: 30000,
+      });
+      return;
+    }
+    logger.info('Creating network keepalive container');
+    execSync(
+      `${CONTAINER_RUNTIME_BIN} run -d --name ${NETWORK_KEEPALIVE_NAME} ${NETWORK_KEEPALIVE_IMAGE} sleep infinity`,
+      { stdio: 'pipe', timeout: 60000 },
+    );
+  } catch (err) {
+    logger.error({ err }, 'Failed to ensure network keepalive container');
+    throw new Error(
+      'Network keepalive container is required to keep the host bridge interface up',
+    );
+  }
+}
+
+/**
+ * Block until `addr` appears on a host interface, polling network interface
+ * state. Apple Container attaches `bridge100` asynchronously after a container
+ * is started, so callers that need to bind to the host gateway IP must wait.
+ */
+export function waitForHostAddress(
+  addr: string,
+  timeoutMs = 30000,
+  pollMs = 250,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const check = () => {
+      const ifaces = os.networkInterfaces();
+      for (const list of Object.values(ifaces)) {
+        if (list?.some((a) => a.address === addr)) return resolve();
+      }
+      if (Date.now() >= deadline) {
+        return reject(
+          new Error(
+            `Host address ${addr} did not appear within ${timeoutMs}ms`,
+          ),
+        );
+      }
+      setTimeout(check, pollMs);
+    };
+    check();
+  });
 }
