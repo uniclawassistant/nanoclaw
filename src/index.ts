@@ -30,7 +30,9 @@ import { startCredentialProxy } from './credential-proxy.js';
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
+  ensureNetworkKeepalive,
   PROXY_BIND_HOST,
+  waitForHostAddress,
 } from './container-runtime.js';
 import {
   getAllChats,
@@ -940,6 +942,11 @@ function ensureContainerSystemRunning(): void {
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
   if (PROXY_BIND_HOST) {
+    // Apple Container only attaches the host bridge (with PROXY_BIND_HOST)
+    // while a container is running. Pin a long-lived keepalive container
+    // first, then wait for the address to be bindable.
+    ensureNetworkKeepalive();
+    await waitForHostAddress(PROXY_BIND_HOST);
     await startCredentialProxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST);
   }
   initDatabase();
