@@ -14,6 +14,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  SCHEDULED_TASK_IDLE_TIMEOUT_MS,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -40,9 +41,12 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  taskId?: string;
   assistantName?: string;
   script?: string;
 }
+
+export const IDLE_TIMEOUT_ERROR = 'idle_timeout';
 
 export interface ContainerOutput {
   status: 'success' | 'error';
@@ -445,16 +449,38 @@ export async function runContainerAgent(
     let timedOut = false;
     let hadStreamingOutput = false;
     const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
-    // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
-    // graceful _close sentinel has time to trigger before the hard kill fires.
-    const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
+    // Idle window: scheduled tasks are single-turn and shouldn't sit silent for
+    // long. User-message containers keep the longer IDLE_TIMEOUT for legit
+    // sub-agent / research runs. The +30s grace lets the agent's `_close`
+    // sentinel fire before the hard kill.
+    const idleTimeoutMs = input.isScheduledTask
+      ? SCHEDULED_TASK_IDLE_TIMEOUT_MS
+      : IDLE_TIMEOUT;
+    const timeoutMs = input.isScheduledTask
+      ? idleTimeoutMs + 30_000
+      : Math.max(configTimeout, idleTimeoutMs + 30_000);
+
+    let lastResetAt = Date.now();
 
     const killOnTimeout = () => {
       timedOut = true;
-      logger.error(
-        { group: group.name, containerName },
-        'Container timeout, stopping gracefully',
-      );
+      const idleMs = Date.now() - lastResetAt;
+      if (input.isScheduledTask) {
+        logger.warn(
+          {
+            containerName,
+            taskId: input.taskId,
+            idleMs,
+            hadStreamingOutput,
+          },
+          'Killed scheduled-task container after idle timeout',
+        );
+      } else {
+        logger.error(
+          { group: group.name, containerName, idleMs },
+          'Container timeout, stopping gracefully',
+        );
+      }
       try {
         stopContainer(containerName);
       } catch (err) {
@@ -471,6 +497,7 @@ export async function runContainerAgent(
     // Reset the timeout whenever there's activity (streaming output)
     const resetTimeout = () => {
       clearTimeout(timeout);
+      lastResetAt = Date.now();
       timeout = setTimeout(killOnTimeout, timeoutMs);
     };
 
@@ -520,7 +547,9 @@ export async function runContainerAgent(
         resolve({
           status: 'error',
           result: null,
-          error: `Container timed out after ${configTimeout}ms`,
+          error: input.isScheduledTask
+            ? IDLE_TIMEOUT_ERROR
+            : `Container timed out after ${configTimeout}ms`,
         });
         return;
       }
