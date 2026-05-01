@@ -60,13 +60,8 @@ import { resolveGroupFolderPath } from './group-folder.js';
 import { autoClearEyeIfSet } from './auto-clear-eye.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
-import {
-  detectOrphanImageTag,
-  editImage,
-  extractImageDirective,
-  generateImage,
-} from './image-gen.js';
-import { extractTtsDirective, synthesize } from './tts.js';
+import { editImage, generateImage } from './image-gen.js';
+import { buildVoiceDirective, synthesize } from './tts.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -94,102 +89,6 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
-
-function isPathWithinGroup(absPath: string, groupFolder: string): boolean {
-  const groupRoot = path.resolve(GROUPS_DIR, groupFolder);
-  const resolved = path.resolve(absPath);
-  return resolved === groupRoot || resolved.startsWith(groupRoot + path.sep);
-}
-
-// Per-group consecutive moderation-block counter. Reset on any successful
-// image generation, incremented on each moderation_block reject. Used to
-// nudge the agent off a bad rewrite loop after 3+ in a row. In-memory only —
-// resets on restart, which is fine: the whole point is in-session back-off.
-const moderationBlocksByGroup = new Map<string, number>();
-const MODERATION_LOOP_THRESHOLD = 3;
-
-/**
- * Push a host-authored message into a chat when the image pipeline fails in
- * a way the agent should react to (moderation / bad user params). Written
- * with sender='host', is_from_me=1, is_bot_message=0 so that:
- *   - getMessagesSince INCLUDES it in the next prompt to the agent (agent sees it)
- *   - getLastUserMessageId EXCLUDES it (react tool won't land on it by accident)
- *   - recordOutgoing's message store is NOT touched (this isn't an agent message)
- * The stored content is ALWAYS the short signal — never the original prompt
- * that got rejected, so we don't forward potentially-unsafe content to chat
- * or DB.
- */
-async function sendImageGenFailureSignal(
-  channel: Channel,
-  jid: string,
-  threadId: string | undefined,
-  groupFolder: string | undefined,
-  outcome: Extract<Awaited<ReturnType<typeof generateImage>>, { ok: false }>,
-  isEdit: boolean,
-): Promise<void> {
-  // For generate, transient (5xx/429/network) is pure noise — the user
-  // hasn't seen an artifact yet, agent can retry silently. For edit, the
-  // user ALREADY has a preview and expects a new one — silent drop leaves
-  // them staring at nothing. Signal on edit-transient only.
-  if (outcome.reason === 'transient' && !isEdit) return;
-
-  let body: string;
-  if (outcome.reason === 'moderation') {
-    body =
-      '[host] OpenAI declined image generation (moderation). Rephrase the prompt and try again.';
-  } else if (outcome.reason === 'source_missing') {
-    // Agent-side pre-flight failure for image-edit: path is wrong / file
-    // got rotated / tag parsed weirdly and the path landed malformed.
-    // Nudge the agent toward get_message, which returns the canonical
-    // generation.original_png_path for any preview it has sent.
-    const detail = outcome.message ?? 'Source file not found';
-    body = `[host] Image edit failed: ${detail}. Call get_message on the preview you want to edit to get the correct generation.original_png_path, or verify the file exists under attachments/.`;
-  } else if (outcome.reason === 'transient') {
-    // Only reachable for isEdit === true (gated above). Network blip or
-    // timeout on the edit call — source file is fine, agent should retry.
-    // If it fails again, smaller size/quality/format will cut compute
-    // time and fall under our clamp.
-    body =
-      '[host] Image edit timed out or network blipped. The source file is intact — retry the same tag. If it fails again, drop size/quality (high + large + png is slow and can exceed our 10-min ceiling).';
-  } else {
-    const codeHint = outcome.code ? ` reason: ${outcome.code}` : '';
-    body = `[host] OpenAI declined image generation (${codeHint.trim() || 'user error'}). Adjust the request and try again.`;
-  }
-
-  if (groupFolder && outcome.reason === 'moderation') {
-    const prev = moderationBlocksByGroup.get(groupFolder) ?? 0;
-    const next = prev + 1;
-    moderationBlocksByGroup.set(groupFolder, next);
-    if (next >= MODERATION_LOOP_THRESHOLD) {
-      body += ' Stop retrying with rewrites — switch topic or ask the user.';
-    }
-  }
-
-  try {
-    const msgId = await channel.sendMessage(jid, body, threadId);
-    if (msgId) {
-      // Store with sender='host', is_from_me=1 (not a user input) so
-      // getLastUserMessageId skips it, is_bot_message=0 so getMessagesSince
-      // feeds it into the agent's next prompt. See the doc comment above
-      // for why this flag combination.
-      storeMessage({
-        id: msgId,
-        chat_jid: jid,
-        sender: 'host',
-        sender_name: 'host',
-        content: body,
-        timestamp: new Date().toISOString(),
-        is_from_me: true,
-        is_bot_message: false,
-      });
-    }
-  } catch (err) {
-    logger.warn(
-      { err, jid, reason: outcome.reason, code: outcome.code },
-      'Failed to deliver image-gen failure signal',
-    );
-  }
-}
 
 function recordOutgoing(
   jid: string,
@@ -223,228 +122,230 @@ function recordOutgoing(
   }
 }
 
-export async function sendWithTts(
+export async function sendText(
   channel: Channel,
   jid: string,
   text: string,
   threadId?: string,
-  groupFolder?: string,
 ): Promise<void> {
-  if (groupFolder) {
-    const imgDirective = extractImageDirective(text);
-    if (!imgDirective) {
-      // No valid directive matched. If the text still contains an opener
-      // (`[[image:`, `[[image-edit:`, `[[image-file:`) without a matching
-      // `]]`, the agent dropped the second closing bracket — silent failure
-      // mode where the literal tag ships to chat as text. Emit a [host]
-      // signal so the agent gets corrective feedback on the next turn.
-      const orphan = detectOrphanImageTag(text);
-      if (orphan) {
-        const body = `[host] Image tag opener "${orphan}" detected with no matching "]]" closer. Tag was sent as literal text, image NOT generated. Use exactly two closing brackets ("]]" not "]") — single bracket is a silent failure: parser ignores it, agent does not learn unless someone notices.`;
-        void (async () => {
-          try {
-            const msgId = await channel.sendMessage(jid, body, threadId);
-            if (msgId) {
-              storeMessage({
-                id: msgId,
-                chat_jid: jid,
-                sender: 'host',
-                sender_name: 'host',
-                content: body,
-                timestamp: new Date().toISOString(),
-                is_from_me: true,
-                is_bot_message: false,
-              });
-            }
-          } catch (err) {
-            logger.warn(
-              { err, jid, orphan },
-              'Failed to deliver orphan-tag warning',
-            );
-          }
-        })();
-      }
-    }
-    if (imgDirective) {
-      const attachmentsDir = path.join(GROUPS_DIR, groupFolder, 'attachments');
-      const groupRootAbs = path.resolve(GROUPS_DIR, groupFolder);
+  const msgId = await channel.sendMessage(jid, text, threadId);
+  recordOutgoing(jid, msgId, { content: text, messageType: 'text' });
+}
 
-      if (imgDirective.type === 'file' && imgDirective.sourcePath) {
-        const sourceFull = path.resolve(groupRootAbs, imgDirective.sourcePath);
-        if (!isPathWithinGroup(sourceFull, groupFolder)) {
-          logger.warn(
-            { jid, sourcePath: imgDirective.sourcePath },
-            'image-file path escapes group folder, refusing',
-          );
-        } else {
-          const relSource = imgDirective.sourcePath;
-          // Fire-and-forget document delivery — same backpressure rationale as
-          // the photo branch below.
-          void (async () => {
-            try {
-              if (channel.sendDocument) {
-                const result = await channel.sendDocument(
-                  jid,
-                  sourceFull,
-                  undefined,
-                  threadId,
-                );
-                if (result.ok) {
-                  recordOutgoing(jid, result.message_id, {
-                    content: `[Document] (${relSource})`,
-                    messageType: 'document',
-                    filePath: relSource,
-                  });
-                }
-              }
-            } catch (err) {
-              logger.error(
-                { err, jid, sourceFull },
-                'Async image-file delivery failed',
-              );
-            }
-          })();
-        }
-      } else {
-        // Fire-and-forget: generation + delivery run in the background so the
-        // agent loop is not blocked by OpenAI latency or Telegram retries (can
-        // add up to several minutes in the worst case). Text ships immediately
-        // through the TTS branch below; the photo lands when it lands.
-        const genPrompt = imgDirective.prompt;
-        const presets = imgDirective.presets;
-        void (async () => {
-          try {
-            let outcome: Awaited<ReturnType<typeof generateImage>> = null;
-            if (imgDirective.type === 'generate') {
-              outcome = await generateImage(
-                imgDirective.prompt,
-                attachmentsDir,
-                presets,
-              );
-            } else if (
-              imgDirective.type === 'edit' &&
-              imgDirective.sourcePath
-            ) {
-              const sourceFull = path.join(
-                GROUPS_DIR,
-                groupFolder,
-                imgDirective.sourcePath,
-              );
-              outcome = await editImage(
-                sourceFull,
-                imgDirective.prompt,
-                attachmentsDir,
-                presets,
-              );
-            }
-            if (outcome && outcome.ok === false) {
-              await sendImageGenFailureSignal(
-                channel,
-                jid,
-                threadId,
-                groupFolder,
-                outcome,
-                imgDirective.type === 'edit',
-              );
-              return;
-            }
-            if (outcome && outcome.ok === true) {
-              // Any successful generation clears the moderation-loop counter.
-              moderationBlocksByGroup.delete(groupFolder);
-              const result = outcome;
-              const relOriginal = path.relative(
-                groupRootAbs,
-                result.originalPath,
-              );
-              const relPreview = path.relative(
-                groupRootAbs,
-                result.previewPath,
-              );
-              // Telegram's bot-API photo endpoint rejects files >10MB with
-              // PHOTO_INVALID_DIMENSIONS. For oversized previews (large hd
-              // renders, high-resolution custom sizes) fall back to sending
-              // the original PNG as a document — full fidelity, no size cap.
-              const previewSize = fs.statSync(result.previewPath).size;
-              const PHOTO_SIZE_CAP = 9 * 1024 * 1024;
-              if (previewSize > PHOTO_SIZE_CAP && channel.sendDocument) {
-                logger.info(
-                  { jid, previewSize, relOriginal },
-                  'Preview exceeds photo size cap, falling back to document',
-                );
-                const docResult = await channel.sendDocument(
-                  jid,
-                  result.originalPath,
-                  undefined,
-                  threadId,
-                );
-                if (docResult.ok) {
-                  recordOutgoing(jid, docResult.message_id, {
-                    content: `[Document] (${relOriginal})`,
-                    messageType: 'document',
-                    filePath: relOriginal,
-                    generation: {
-                      prompt: genPrompt,
-                      original_png_path: relOriginal,
-                    },
-                  });
-                }
-              } else if (channel.sendPhoto) {
-                const msgId = await channel.sendPhoto(
-                  jid,
-                  result.previewPath,
-                  undefined,
-                  threadId,
-                );
-                recordOutgoing(jid, msgId, {
-                  content: `[Photo] (${relPreview})`,
-                  messageType: 'photo',
-                  filePath: relPreview,
-                  generation: {
-                    prompt: genPrompt,
-                    original_png_path: relOriginal,
-                  },
-                });
-              }
-            }
-          } catch (err) {
-            logger.error(
-              { err, jid, type: imgDirective.type },
-              'Async image delivery failed',
-            );
-          }
-        })();
-      }
+export interface ImageGenDelivery {
+  ok: true;
+  message_id: string;
+  file_path: string;
+  message_type: 'photo' | 'document';
+}
 
-      text = imgDirective.cleanText;
-      if (!text) return;
-    }
+/**
+ * Generate or edit an image and ship it to chat. Returns `{ ok, message_id }`
+ * for the MCP tool, or `{ ok: false, error }` on any terminal failure
+ * (moderation / bad params / source missing / Telegram reject). Transient
+ * fetch errors are also surfaced so the agent can retry explicitly.
+ */
+async function generateAndDeliverImage(
+  channel: Channel,
+  jid: string,
+  groupFolder: string,
+  prompt: string,
+  presets: string[] | undefined,
+  caption: string | undefined,
+  threadId: string | undefined,
+): Promise<ImageGenDelivery | { ok: false; error: string }> {
+  const attachmentsDir = path.join(GROUPS_DIR, groupFolder, 'attachments');
+  const outcome = await generateImage(prompt, attachmentsDir, presets);
+  return deliverImageOutcome(
+    channel,
+    jid,
+    groupFolder,
+    prompt,
+    outcome,
+    caption,
+    threadId,
+  );
+}
+
+async function editAndDeliverImage(
+  channel: Channel,
+  jid: string,
+  groupFolder: string,
+  sourceAbsPath: string,
+  prompt: string,
+  presets: string[] | undefined,
+  caption: string | undefined,
+  threadId: string | undefined,
+): Promise<ImageGenDelivery | { ok: false; error: string }> {
+  const attachmentsDir = path.join(GROUPS_DIR, groupFolder, 'attachments');
+  const outcome = await editImage(
+    sourceAbsPath,
+    prompt,
+    attachmentsDir,
+    presets,
+  );
+  return deliverImageOutcome(
+    channel,
+    jid,
+    groupFolder,
+    prompt,
+    outcome,
+    caption,
+    threadId,
+  );
+}
+
+async function deliverImageOutcome(
+  channel: Channel,
+  jid: string,
+  groupFolder: string,
+  prompt: string,
+  outcome: Awaited<ReturnType<typeof generateImage>>,
+  caption: string | undefined,
+  threadId: string | undefined,
+): Promise<ImageGenDelivery | { ok: false; error: string }> {
+  if (!outcome) {
+    return { ok: false, error: 'image generation not configured (no API key)' };
+  }
+  if (outcome.ok === false) {
+    const detail = outcome.message ? `: ${outcome.message}` : '';
+    return { ok: false, error: `${outcome.reason}${detail}` };
+  }
+  const groupRootAbs = path.resolve(GROUPS_DIR, groupFolder);
+  const relOriginal = path.relative(groupRootAbs, outcome.originalPath);
+  const relPreview = path.relative(groupRootAbs, outcome.previewPath);
+
+  // Telegram's bot-API photo endpoint rejects files >10MB. Fall back to
+  // sending the full-fidelity original as a document for oversized previews.
+  const previewSize = fs.statSync(outcome.previewPath).size;
+  const PHOTO_SIZE_CAP = 9 * 1024 * 1024;
+
+  if (previewSize > PHOTO_SIZE_CAP && channel.sendDocument) {
+    logger.info(
+      { jid, previewSize, relOriginal },
+      'Preview exceeds photo size cap, falling back to document',
+    );
+    const docResult = await channel.sendDocument(
+      jid,
+      outcome.originalPath,
+      caption,
+      threadId,
+    );
+    if (!docResult.ok) return { ok: false, error: docResult.error };
+    recordOutgoing(jid, docResult.message_id, {
+      content: `[Document] (${relOriginal})${caption ? ' ' + caption : ''}`,
+      messageType: 'document',
+      filePath: relOriginal,
+      generation: { prompt, original_png_path: relOriginal },
+    });
+    return {
+      ok: true,
+      message_id: docResult.message_id,
+      file_path: relOriginal,
+      message_type: 'document',
+    };
   }
 
-  const directive = extractTtsDirective(text);
-  if (directive && channel.sendVoice) {
-    const audio = await synthesize(directive.ttsText, directive.directive);
-    if (audio) {
-      const msgId = await channel.sendVoice(jid, audio, threadId);
-      recordOutgoing(jid, msgId, {
-        content: `[Voice] ${directive.ttsText}`,
-        messageType: 'voice',
-      });
-    }
-    if (directive.cleanText) {
-      const msgId = await channel.sendMessage(
-        jid,
-        directive.cleanText,
-        threadId,
-      );
-      recordOutgoing(jid, msgId, {
-        content: directive.cleanText,
-        messageType: 'text',
-      });
-    }
-  } else {
-    const msgId = await channel.sendMessage(jid, text, threadId);
-    recordOutgoing(jid, msgId, { content: text, messageType: 'text' });
+  if (!channel.sendPhoto) {
+    return { ok: false, error: 'channel does not support sendPhoto' };
   }
+  const photoResult = await channel.sendPhoto(
+    jid,
+    outcome.previewPath,
+    caption,
+    threadId,
+  );
+  if (!photoResult.ok) return { ok: false, error: photoResult.error };
+  recordOutgoing(jid, photoResult.message_id, {
+    content: `[Photo] (${relPreview})${caption ? ' ' + caption : ''}`,
+    messageType: 'photo',
+    filePath: relPreview,
+    generation: { prompt, original_png_path: relOriginal },
+  });
+  return {
+    ok: true,
+    message_id: photoResult.message_id,
+    file_path: relPreview,
+    message_type: 'photo',
+  };
+}
+
+/**
+ * Send a local image (already on disk) as a compressed photo with optional
+ * caption. Returns `{ ok, message_id }` or `{ ok: false, error }`.
+ */
+async function sendImageFromPath(
+  channel: Channel,
+  jid: string,
+  groupFolder: string,
+  hostPath: string,
+  caption: string | undefined,
+  threadId: string | undefined,
+): Promise<ImageGenDelivery | { ok: false; error: string }> {
+  if (!channel.sendPhoto) {
+    return { ok: false, error: 'channel does not support sendPhoto' };
+  }
+  const result = await channel.sendPhoto(jid, hostPath, caption, threadId);
+  if (!result.ok) return { ok: false, error: result.error };
+  const groupRootAbs = path.resolve(GROUPS_DIR, groupFolder);
+  const relPath = path.relative(groupRootAbs, hostPath);
+  // For paths outside the group root (extra-mounts), keep the absolute path —
+  // matches send_file/recordOutgoingDocument behavior for trace recovery.
+  const tracePath = relPath.startsWith('..') ? hostPath : relPath;
+  recordOutgoing(jid, result.message_id, {
+    content: `[Photo] (${tracePath})${caption ? ' ' + caption : ''}`,
+    messageType: 'photo',
+    filePath: tracePath,
+  });
+  return {
+    ok: true,
+    message_id: result.message_id,
+    file_path: tracePath,
+    message_type: 'photo',
+  };
+}
+
+/**
+ * Synthesize TTS audio and send as a voice message. Returns `{ ok, message_id }`
+ * or `{ ok: false, error }`.
+ */
+async function synthesizeAndSendVoice(
+  channel: Channel,
+  jid: string,
+  text: string,
+  directive: VoiceDirectiveInput,
+  threadId: string | undefined,
+): Promise<{ ok: true; message_id: string } | { ok: false; error: string }> {
+  if (!channel.sendVoice) {
+    return { ok: false, error: 'channel does not support sendVoice' };
+  }
+  const resolved = buildVoiceDirective(directive);
+  let audio: Buffer | null;
+  try {
+    audio = await synthesize(text, resolved);
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  if (!audio) {
+    return { ok: false, error: 'TTS not configured (no API key)' };
+  }
+  const result = await channel.sendVoice(jid, audio, threadId);
+  if (!result.ok) return { ok: false, error: result.error };
+  recordOutgoing(jid, result.message_id, {
+    content: `[Voice] ${text}`,
+    messageType: 'voice',
+  });
+  return { ok: true, message_id: result.message_id };
+}
+
+interface VoiceDirectiveInput {
+  voice?: string;
+  director?: string;
+  profile?: string;
+  scene?: string;
 }
 
 const onecli = new OneCLI({ url: ONECLI_URL });
@@ -665,7 +566,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
-        await sendWithTts(channel, chatJid, text, replyThreadId, group.folder);
+        await sendText(channel, chatJid, text, replyThreadId);
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -1088,24 +989,16 @@ async function main(): Promise<void> {
         return;
       }
       const text = formatOutbound(rawText);
-      // Resolve folder from registered groups so [[image:...]] / [[image-edit:...]]
-      // tags emitted by scheduled tasks hit the image-gen pipeline instead of
-      // being sent as literal text. Mirror the IPC path below.
-      const folder = registeredGroups[jid]?.folder;
       const threadId = getLastIncomingThreadId(jid);
-      if (text) await sendWithTts(channel, jid, text, threadId, folder);
+      if (text) await sendText(channel, jid, text, threadId);
     },
   });
   startIpcWatcher({
     sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      // Same as the scheduler path: resolve folder so image tags emitted via
-      // mcp__nanoclaw__send_message (and from any intermediate, non-final
-      // assistant block) are processed instead of leaking as literal text.
-      const folder = registeredGroups[jid]?.folder;
       const threadId = getLastIncomingThreadId(jid);
-      return sendWithTts(channel, jid, text, threadId, folder);
+      return sendText(channel, jid, text, threadId);
     },
     setReaction: async (jid, messageId, emoji) => {
       const channel = findChannel(channels, jid);
@@ -1179,6 +1072,63 @@ async function main(): Promise<void> {
         messageType: 'document',
         filePath: args.tracePath,
       });
+    },
+    generateImage: async (jid, prompt, presets, caption, threadId) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) return { ok: false, error: 'no channel for jid' };
+      const folder = registeredGroups[jid]?.folder;
+      if (!folder) return { ok: false, error: 'group not registered' };
+      return generateAndDeliverImage(
+        channel,
+        jid,
+        folder,
+        prompt,
+        presets,
+        caption,
+        threadId,
+      );
+    },
+    editImage: async (
+      jid,
+      sourceAbsPath,
+      prompt,
+      presets,
+      caption,
+      threadId,
+    ) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) return { ok: false, error: 'no channel for jid' };
+      const folder = registeredGroups[jid]?.folder;
+      if (!folder) return { ok: false, error: 'group not registered' };
+      return editAndDeliverImage(
+        channel,
+        jid,
+        folder,
+        sourceAbsPath,
+        prompt,
+        presets,
+        caption,
+        threadId,
+      );
+    },
+    sendImage: async (jid, hostPath, caption, threadId) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) return { ok: false, error: 'no channel for jid' };
+      const folder = registeredGroups[jid]?.folder;
+      if (!folder) return { ok: false, error: 'group not registered' };
+      return sendImageFromPath(
+        channel,
+        jid,
+        folder,
+        hostPath,
+        caption,
+        threadId,
+      );
+    },
+    sendVoice: async (jid, text, directive, threadId) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) return { ok: false, error: 'no channel for jid' };
+      return synthesizeAndSendVoice(channel, jid, text, directive, threadId);
     },
   });
   startSessionCleanup();

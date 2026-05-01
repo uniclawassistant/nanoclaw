@@ -8,17 +8,9 @@ import { logger } from './logger.js';
 
 const execFileP = promisify(execFile);
 
-export interface ImageDirective {
-  type: 'generate' | 'edit' | 'file';
-  prompt: string;
-  sourcePath?: string; // For edit: relative path within group dir. For file: relative path to existing image.
-  cleanText: string;
-  presets?: string[]; // Raw preset tokens before validation, e.g. ['portrait', 'hd']
-}
-
 export interface ImageGenResult {
-  previewPath: string; // jpeg if conversion succeeded, otherwise the original png — this is what ships as photo
-  originalPath: string; // the untouched png file — for [[image-file: ...]] follow-ups
+  previewPath: string; // jpeg if conversion succeeded, otherwise the original — this is what ships as photo
+  originalPath: string; // full-fidelity source kept for re-send via send_image
 }
 
 // Outcome of a generate/edit call. `null` is returned only when there's
@@ -58,13 +50,6 @@ function classifyApiError(
   return { reason: 'generic', message: body.slice(0, 300) };
 }
 
-// [[image: prompt text here]] or [[image:portrait,hd: prompt text here]]
-const IMAGE_GEN_RE = /\[\[image:\s*([\s\S]*?)\]\]/i;
-// [[image-edit: path | prompt]] or [[image-edit:portrait,hd: path | prompt]]
-const IMAGE_EDIT_RE = /\[\[image-edit:\s*([\s\S]*?)\]\]/i;
-// [[image-file: path/to/file.png]] — no presets, works on existing files
-const IMAGE_FILE_RE = /\[\[image-file:\s*([\s\S]*?)\]\]/i;
-
 // Named size vocabulary. All other parameters (quality, format, compression)
 // are expressed via explicit key=value tokens (see KNOWN_KEYWORDS below) —
 // we deliberately avoid quality/format shortcut presets so the agent has to
@@ -85,16 +70,6 @@ const CUSTOM_SIZE_RE = /^\d+x\d+$/;
 // the value that can warn-and-ignore without killing the whole directive.
 const KNOWN_KEYWORDS = new Set(['format', 'quality', 'compression', 'size']);
 const KEYWORD_RE = /^([a-z]+)=([a-z0-9x]+)$/;
-
-function isPresetToken(p: string): boolean {
-  if (KNOWN_PRESETS.has(p)) return true;
-  if (CUSTOM_SIZE_RE.test(p)) return true;
-  const kw = p.match(KEYWORD_RE);
-  // Only accept a key=value token if the key is one we know — keeps natural
-  // prompts like "[[image: author=Fedor: biography]]" intact (author isn't
-  // a known keyword so the whole inner falls through as prompt).
-  return kw !== null && KNOWN_KEYWORDS.has(kw[1]);
-}
 
 // Dynamic API timeout tuning. Current 180s blanket was too aggressive for
 // hd + large + png edits (observed 3072x2304 high-png edit timing out) and
@@ -149,44 +124,6 @@ function validateCustomSize(w: number, h: number): string | null {
   return null;
 }
 
-/**
- * If the inner body starts with a comma-separated list of lowercase ASCII
- * tokens (named size, custom WxH, or key=value pair with a known key) followed
- * by a colon, strip it off and return as presets. Otherwise the entire inner
- * is prompt/body and presets are empty.
- *
- * Examples:
- *   "a cat"                              → { presets: [],                       body: "a cat" }
- *   "portrait: a cat"                    → { presets: ["portrait"],             body: "a cat" }
- *   "portrait,quality=high: a cat"       → { presets: ["portrait","quality=high"], body: "a cat" }
- *   "format=png,size=1536x1024: prompt"  → { presets: ["format=png","size=1536x1024"], body: "prompt" }
- *   "Plot: a graph"                      → { presets: [],                       body: "Plot: a graph" } (uppercase → not preset syntax)
- *   "author=Fedor: bio"                  → { presets: [],                       body: "author=Fedor: bio" } (unknown key → not preset syntax)
- *   "foo bar: text"                      → { presets: [],                       body: "foo bar: text" } (space → not preset syntax)
- */
-function splitPresetsAndBody(inner: string): {
-  presets: string[];
-  body: string;
-} {
-  // Character class covers named presets (letters), custom WxH (digits + x),
-  // underscores/hyphens (none used today but safe), and "=" for keyword form.
-  const m = inner.match(/^([a-z0-9_,=-]+)\s*:\s*([\s\S]*)$/);
-  if (!m) return { presets: [], body: inner.trim() };
-  const candidates = m[1]
-    .split(',')
-    .map((p) => p.trim())
-    .filter(Boolean);
-  // Strict: every token must be shape-valid (known preset / custom WxH /
-  // key=value with known key). If any is off, treat the whole inner as a
-  // prompt — protects natural text like "sunset: golden hour" or
-  // "author=Fedor: biography" from silent loss. resolvePresets still warns
-  // on SEMANTIC problems (bad size bounds, bad format value, png+compression).
-  if (candidates.length === 0 || !candidates.every(isPresetToken)) {
-    return { presets: [], body: inner.trim() };
-  }
-  return { presets: candidates, body: m[2].trim() };
-}
-
 export interface ResolvedPresets {
   // Resolved size string ready to send to OpenAI. Named presets map to fixed
   // dimensions; custom WxH tokens pass through verbatim after validation.
@@ -211,12 +148,11 @@ const NAMED_SIZE_MAP: Record<string, string> = {
 /**
  * Resolve raw preset tokens to OpenAI API params.
  *
- * Strict at the parser level (splitPresetsAndBody), lenient here: invalid
- * keyword VALUES (e.g. format=tiff, compression=0) warn and are ignored
- * but don't kill the whole directive — other tokens still apply. Last
- * write wins for same-key keyword tokens (e.g. quality=low,quality=high).
- * Conflicting size tokens (multiple sizes specified) fall back to default
- * size with a warning.
+ * Lenient: invalid keyword VALUES (e.g. format=tiff, compression=0) warn
+ * and are ignored but don't kill the whole directive — other tokens still
+ * apply. Last write wins for same-key keyword tokens (e.g.
+ * quality=low,quality=high). Conflicting size tokens (multiple sizes
+ * specified) fall back to default size with a warning.
  */
 export function resolvePresets(presets: string[] | undefined): ResolvedPresets {
   const out: ResolvedPresets = {
@@ -335,64 +271,6 @@ export function resolvePresets(presets: string[] | undefined): ResolvedPresets {
   }
 
   return out;
-}
-
-export function extractImageDirective(text: string): ImageDirective | null {
-  const fileMatch = text.match(IMAGE_FILE_RE);
-  if (fileMatch) {
-    const sourcePath = fileMatch[1].trim();
-    if (!sourcePath) return null;
-    const cleanText = text.replace(IMAGE_FILE_RE, '').trim();
-    return { type: 'file', prompt: '', sourcePath, cleanText };
-  }
-
-  const editMatch = text.match(IMAGE_EDIT_RE);
-  if (editMatch) {
-    const { presets, body } = splitPresetsAndBody(editMatch[1].trim());
-    const pipeIdx = body.indexOf('|');
-    if (pipeIdx === -1) return null;
-    const sourcePath = body.slice(0, pipeIdx).trim();
-    const prompt = body.slice(pipeIdx + 1).trim();
-    if (!sourcePath || !prompt) return null;
-    const cleanText = text.replace(IMAGE_EDIT_RE, '').trim();
-    return { type: 'edit', prompt, sourcePath, cleanText, presets };
-  }
-
-  const genMatch = text.match(IMAGE_GEN_RE);
-  if (genMatch) {
-    const { presets, body } = splitPresetsAndBody(genMatch[1].trim());
-    if (!body) return null;
-    const cleanText = text.replace(IMAGE_GEN_RE, '').trim();
-    return { type: 'generate', prompt: body, cleanText, presets };
-  }
-
-  return null;
-}
-
-/**
- * Detect a likely-typo'd image tag: opener present (`[[image:`,
- * `[[image-edit:`, `[[image-file:`) but no matching closing `]]` anywhere
- * after it. This is the silent-failure mode where the agent dropped the
- * second `]` — the regexes above fail to match, the tag falls through to
- * literal text in chat, and the agent has no signal that anything went
- * wrong. Returns the orphan opener (e.g. `[[image:`) for the warning text,
- * or null if either no opener exists or the tag is well-formed.
- *
- * Order matters: longer openers (`[[image-edit:`, `[[image-file:`) checked
- * first so a `[[image-edit:` with no closer doesn't get reported as
- * `[[image:` (substring match would find both, but the dashed variants are
- * lexically longer and more specific).
- */
-export function detectOrphanImageTag(text: string): string | null {
-  const openers = [
-    { token: '[[image-file:', re: IMAGE_FILE_RE },
-    { token: '[[image-edit:', re: IMAGE_EDIT_RE },
-    { token: '[[image:', re: IMAGE_GEN_RE },
-  ];
-  for (const { token, re } of openers) {
-    if (text.includes(token) && !re.test(text)) return token;
-  }
-  return null;
 }
 
 function getApiKey(): string | undefined {
@@ -520,7 +398,7 @@ export async function generateImage(
   fs.writeFileSync(imagePath, buf);
 
   // For PNG mode: convert to a JPEG preview so the photo upload stays small,
-  // keep the PNG as "original" for [[image-file:...]] re-sends.
+  // keep the PNG as the full-fidelity "original" for re-send via send_image.
   // For JPEG/WebP: the API-returned file is compact enough to ship directly —
   // preview and "original" are the same path.
   let previewPath: string;
@@ -571,10 +449,8 @@ export async function editImage(
 
   // Pre-flight source checks. Failures here are the single most common
   // agent-side slip (typo'd path, wrong extension, cached reference to a
-  // file that got rotated, etc) and they used to return null — silent
-  // drop, no way for the agent to notice. Now they return a signalable
-  // outcome so sendImageGenFailureSignal can tell the agent to fix the
-  // path on the next turn.
+  // file that got rotated, etc). The MCP edit_image tool surfaces these
+  // back to the agent as { ok: false, error } so it can fix the call.
   const baseName = path.basename(sourcePath);
   if (!fs.existsSync(sourcePath)) {
     logger.error({ sourcePath }, 'Image edit: source file not found');
