@@ -832,6 +832,76 @@ describe('getMessageById', () => {
     });
   });
 
+  it('returns generation.source_message_id on edits and traverses a chain back to the generate root', () => {
+    // Models the FED-8 acceptance scenario: a user runs generate_image →
+    // edit_image → edit_image again. Each edit must persist a pointer back
+    // to its own source so get_message can walk the full chain.
+    storeChatMetadata('tg:123', '2026-05-01T12:00:00.000Z');
+    storeOutgoingMessage({
+      id: '1001',
+      chat_jid: 'tg:123',
+      sender: 'Unic',
+      sender_name: 'Unic',
+      content: '[Photo] (attachments/image_1.jpg)',
+      timestamp: '2026-05-01T12:00:00.000Z',
+      message_type: 'photo',
+      file_path: 'attachments/image_1.jpg',
+      generation: {
+        prompt: '8-bit pixel unicorn',
+        original_png_path: 'attachments/image_1.jpg',
+      },
+    });
+    storeOutgoingMessage({
+      id: '1002',
+      chat_jid: 'tg:123',
+      sender: 'Unic',
+      sender_name: 'Unic',
+      content: '[Photo] (attachments/image_2.jpg)',
+      timestamp: '2026-05-01T12:01:00.000Z',
+      message_type: 'photo',
+      file_path: 'attachments/image_2.jpg',
+      generation: {
+        prompt: 'make it more blue',
+        original_png_path: 'attachments/image_2.jpg',
+        source_message_id: '1001',
+      },
+    });
+    storeOutgoingMessage({
+      id: '1003',
+      chat_jid: 'tg:123',
+      sender: 'Unic',
+      sender_name: 'Unic',
+      content: '[Photo] (attachments/image_3.jpg)',
+      timestamp: '2026-05-01T12:02:00.000Z',
+      message_type: 'photo',
+      file_path: 'attachments/image_3.jpg',
+      generation: {
+        prompt: 'add a green meadow',
+        original_png_path: 'attachments/image_3.jpg',
+        source_message_id: '1002',
+      },
+    });
+
+    const root = getMessageById('1001', 'tg:123');
+    const edit1 = getMessageById('1002', 'tg:123');
+    const edit2 = getMessageById('1003', 'tg:123');
+
+    // Generate root must NOT carry source_message_id.
+    expect(root!.generation?.source_message_id).toBeUndefined();
+    // Each edit points one step back; chain reconstructs to the root.
+    expect(edit1!.generation?.source_message_id).toBe('1001');
+    expect(edit2!.generation?.source_message_id).toBe('1002');
+
+    let cursor: string | undefined = edit2!.message_id;
+    const walk: string[] = [];
+    while (cursor) {
+      walk.push(cursor);
+      const rec = getMessageById(cursor, 'tg:123');
+      cursor = rec?.generation?.source_message_id;
+    }
+    expect(walk).toEqual(['1003', '1002', '1001']);
+  });
+
   it('survives across a fresh DB handle (persisted columns)', () => {
     // Reinit is handled by beforeEach elsewhere; we use storeOutgoingMessage
     // + getMessageById on the same in-memory DB as a sanity check that the

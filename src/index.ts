@@ -101,6 +101,7 @@ function recordOutgoing(
       prompt: string;
       preset?: string;
       original_png_path: string;
+      source_message_id?: string;
     };
   },
 ): void {
@@ -172,6 +173,7 @@ async function editAndDeliverImage(
   jid: string,
   groupFolder: string,
   sourceAbsPath: string,
+  sourceMessageId: string,
   prompt: string,
   presets: string[] | undefined,
   caption: string | undefined,
@@ -192,6 +194,7 @@ async function editAndDeliverImage(
     outcome,
     caption,
     threadId,
+    sourceMessageId,
   );
 }
 
@@ -203,6 +206,7 @@ async function deliverImageOutcome(
   outcome: Awaited<ReturnType<typeof generateImage>>,
   caption: string | undefined,
   threadId: string | undefined,
+  sourceMessageId?: string,
 ): Promise<ImageGenDelivery | { ok: false; error: string }> {
   if (!outcome) {
     return { ok: false, error: 'image generation not configured (no API key)' };
@@ -236,7 +240,11 @@ async function deliverImageOutcome(
       content: `[Document] (${relOriginal})${caption ? ' ' + caption : ''}`,
       messageType: 'document',
       filePath: relOriginal,
-      generation: { prompt, original_png_path: relOriginal },
+      generation: {
+        prompt,
+        original_png_path: relOriginal,
+        ...(sourceMessageId ? { source_message_id: sourceMessageId } : {}),
+      },
     });
     return {
       ok: true,
@@ -260,7 +268,11 @@ async function deliverImageOutcome(
     content: `[Photo] (${relPreview})${caption ? ' ' + caption : ''}`,
     messageType: 'photo',
     filePath: relPreview,
-    generation: { prompt, original_png_path: relOriginal },
+    generation: {
+      prompt,
+      original_png_path: relOriginal,
+      ...(sourceMessageId ? { source_message_id: sourceMessageId } : {}),
+    },
   });
   return {
     ok: true,
@@ -1091,6 +1103,7 @@ async function main(): Promise<void> {
     editImage: async (
       jid,
       sourceAbsPath,
+      sourceMessageId,
       prompt,
       presets,
       caption,
@@ -1105,6 +1118,7 @@ async function main(): Promise<void> {
         jid,
         folder,
         sourceAbsPath,
+        sourceMessageId,
         prompt,
         presets,
         caption,
