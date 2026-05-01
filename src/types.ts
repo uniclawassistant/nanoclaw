@@ -103,18 +103,22 @@ export interface Channel {
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
   // Optional: send a voice message (OGG Opus buffer).
+  // Returns `{ ok: true, message_id }` on success, `{ ok: false, error }` on
+  // terminal failure (after retries). Same contract as `sendDocument`.
   sendVoice?(
     jid: string,
     audio: Buffer,
     threadId?: string,
-  ): Promise<string | undefined>;
+  ): Promise<{ ok: true; message_id: string } | { ok: false; error: string }>;
   // Optional: send a photo from a local file path.
+  // Returns `{ ok: true, message_id }` on success, `{ ok: false, error }` on
+  // terminal failure (after retries). Same contract as `sendDocument`.
   sendPhoto?(
     jid: string,
     filePath: string,
     caption?: string,
     threadId?: string,
-  ): Promise<string | undefined>;
+  ): Promise<{ ok: true; message_id: string } | { ok: false; error: string }>;
   // Optional: send a file as a document (no compression by Telegram).
   // Returns the message_id on success, or an error string on terminal failure
   // (after retries). Errors are surfaced to the caller so the agent can see

@@ -81,7 +81,7 @@ server.tool(
   'send_file',
   `Send a local file to the current chat as a channel-native document (Telegram sendDocument: no compression, original bytes preserved).
 
-USE FOR: arbitrary attachments — markdown, pdf, json, csv, logs, zip, code dumps. NOT for images you generated (use [[image:]] / [[image-file:]]) or voice (use [[tts]]).
+USE FOR: arbitrary attachments — markdown, pdf, json, csv, logs, zip, code dumps. NOT for images you generated or already have on disk (use \`generate_image\` / \`edit_image\` / \`send_image\` — those ship as compressed photos with native preview) or for voice (use \`send_voice\`).
 
 PATH:
 • Relative paths resolve from /workspace/group/ (your CWD).
@@ -177,6 +177,267 @@ function toolError(text: string): {
 async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+const MEDIA_TOOL_TIMEOUT_MS = 600_000; // 10 min hard ceiling for image gen + delivery
+const MEDIA_TOOL_POLL_INTERVAL_MS = 250;
+
+/**
+ * Write a media-tool IPC request, wait up to MEDIA_TOOL_TIMEOUT_MS for the
+ * host to write the response, return the MCP tool payload. Centralized so
+ * the four media tools share the same request/response plumbing.
+ */
+async function dispatchMediaTool(
+  type: 'generate_image' | 'edit_image' | 'send_image' | 'send_voice',
+  fields: Record<string, unknown>,
+  timeoutMs: number = MEDIA_TOOL_TIMEOUT_MS,
+): Promise<{
+  content: Array<{ type: 'text'; text: string }>;
+  isError?: true;
+}> {
+  const requestId = crypto.randomUUID();
+  const data: Record<string, unknown> = {
+    type,
+    chatJid,
+    requestId,
+    groupFolder,
+    timestamp: new Date().toISOString(),
+    ...fields,
+  };
+  writeIpcFile(MESSAGES_DIR, data);
+
+  const responsePath = path.join(RESPONSES_DIR, `${requestId}.json`);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(responsePath)) {
+      try {
+        const resp = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+        fs.unlinkSync(responsePath);
+        // Host already shaped `data` for the agent on success; on failure it
+        // sets success=false + error and we mirror the `send_file` pattern.
+        if (resp.success) {
+          const payload = resp.data ?? { ok: true, message_id: resp.message_id };
+          return {
+            content: [
+              { type: 'text' as const, text: JSON.stringify(payload) },
+            ],
+          };
+        }
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                ok: false,
+                error: resp.error ?? 'unknown error',
+              }),
+            },
+          ],
+          isError: true as const,
+        };
+      } catch (err) {
+        return toolError(
+          `Failed to read ${type} response: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    await sleep(MEDIA_TOOL_POLL_INTERVAL_MS);
+  }
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify({
+          ok: false,
+          error: `${type} request timed out after ${Math.round(timeoutMs / 1000)}s — the action may still be in flight on the host.`,
+        }),
+      },
+    ],
+    isError: true as const,
+  };
+}
+
+server.tool(
+  'generate_image',
+  `Generate an image with GPT Image and ship it to the current chat as a compressed photo (Telegram sendPhoto with native preview).
+
+USE FOR: any new image — illustrations, diagrams, mockups, photos, posters, logos. The result is BOTH delivered to the chat AND saved on disk under \`attachments/image_<timestamp>.<ext>\` so you can re-send it later via \`send_image\` or edit it via \`edit_image\` (the message_id returned here unlocks both).
+
+PROMPT: free-form description. Cyrillic and other non-ASCII work fine.
+
+PRESET (optional, array of tokens). Each token is one of:
+  • named size: "portrait" (1024x1536) | "landscape" (1536x1024) | "square" (1024x1024) | "auto"
+  • custom WxH (e.g. "1920x1088") — each edge ≤ 3840 and a multiple of 16; aspect ≤ 3:1; total pixels in 655360..8388608
+  • key=value: format=jpeg|png|webp (default jpeg) | quality=low|medium|high (default medium) | compression=1..100 (jpeg/webp only, default 85) | size=<named or WxH>
+Examples: ["portrait","quality=high"] | ["1536x1024","format=png","quality=high"] | ["compression=92"]
+Unknown values warn-and-ignore on the host; pick another token instead of the whole call failing.
+
+CAPTION (optional): plain-text caption shown under the photo in chat.
+
+CHANNELS: image tools are Telegram-only today. On other channels the call returns \`{ ok: true, skipped: true, reason: "channel not supported" }\` and nothing is sent.
+
+RETURN (JSON in tool output):
+  • { ok: true, message_id, file_path, message_type } on success — message_id is usable with \`get_message\`, \`react\`, and \`edit_image\` (as source_message_id). file_path is the group-relative path of what shipped to chat.
+  • { ok: false, error } on failure — common reasons: "moderation: ..." (rephrase prompt), "generic: ..." (bad params), "transient: ..." (retry), "channel does not support sendPhoto".`,
+  {
+    prompt: z.string().describe('What to generate. Free-form description.'),
+    preset: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Optional preset tokens. See PRESET in the tool description for the full vocabulary.',
+      ),
+    caption: z
+      .string()
+      .optional()
+      .describe('Optional plain-text caption shown under the photo.'),
+  },
+  async (args) => {
+    return dispatchMediaTool('generate_image', {
+      prompt: args.prompt,
+      preset: args.preset,
+      caption: args.caption,
+    });
+  },
+);
+
+server.tool(
+  'edit_image',
+  `Edit an existing image (one we previously sent or that the user sent us) and ship the edited result to the current chat as a compressed photo.
+
+SOURCE_MESSAGE_ID: the channel-native message_id of the image to edit. Pass the message_id of:
+  • a photo you previously generated with \`generate_image\` (returned in the success payload), or
+  • a photo a user sent (use \`get_message\` to retrieve it from a recent reply / context).
+The host resolves the source path automatically from the stored message — you do NOT pass a file path.
+
+PROMPT: describe the changes you want. The edit endpoint is iterative — small focused asks ("make it bluer", "add a snow leopard", "remove the watermark") work better than full rewrites.
+
+PRESET / CAPTION: same vocabulary as \`generate_image\`.
+
+CHANNELS: Telegram-only; non-Telegram returns \`{ ok: true, skipped: true, reason: "channel not supported" }\`.
+
+RETURN (JSON in tool output):
+  • { ok: true, message_id, file_path, message_type } on success — message_id is the new edited photo's id.
+  • { ok: false, error } on failure — common reasons: "source message X not found in this chat" (wrong message_id), "source message X has no attached image" (the message is text/document), "source_missing: ..." (file rotated off disk), "moderation: ...", "generic: ..." (bad prompt).`,
+  {
+    source_message_id: z
+      .string()
+      .describe(
+        'channel-native message_id of the image to edit (from generate_image success payload or get_message lookup).',
+      ),
+    prompt: z
+      .string()
+      .describe('What to change about the source image.'),
+    preset: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Optional preset tokens. Same vocabulary as generate_image.',
+      ),
+    caption: z
+      .string()
+      .optional()
+      .describe('Optional plain-text caption shown under the edited photo.'),
+  },
+  async (args) => {
+    return dispatchMediaTool('edit_image', {
+      prompt: args.prompt,
+      preset: args.preset,
+      caption: args.caption,
+      source_message_id: args.source_message_id,
+    });
+  },
+);
+
+server.tool(
+  'send_image',
+  `Send a local image file to the current chat as a compressed photo (Telegram sendPhoto with native preview).
+
+USE FOR: re-sending an image you already have on disk — a previous generation, a downloaded asset, a screenshot. For arbitrary attachments without compression (markdown, pdf, json, code dumps, original bytes), use \`send_file\` instead.
+
+PATH:
+• Relative paths resolve from /workspace/group/ (your CWD).
+• Absolute paths must be under /workspace/group/ or /workspace/extra/<mount>/. Anything else (including \`..\` or symlink escapes) is rejected.
+• File must exist and be readable.
+
+CAPTION (optional): plain-text caption shown under the photo.
+
+CHANNELS: Telegram-only; non-Telegram returns \`{ ok: true, skipped: true, reason: "channel not supported" }\`.
+
+RETURN (JSON in tool output):
+  • { ok: true, message_id, file_path, message_type: "photo" } on success.
+  • { ok: false, error } on failure — common reasons: "path escapes its allowed root", "Bad Request: file is too big" (Telegram caps photos at 10MB).`,
+  {
+    path: z
+      .string()
+      .describe(
+        'Image path. Relative is resolved from /workspace/group/; absolute must be under /workspace/group/ or /workspace/extra/<mount>/.',
+      ),
+    caption: z
+      .string()
+      .optional()
+      .describe('Optional plain-text caption shown under the photo.'),
+  },
+  async (args) => {
+    return dispatchMediaTool('send_image', {
+      sourcePath: args.path,
+      caption: args.caption,
+    });
+  },
+);
+
+server.tool(
+  'send_voice',
+  `Synthesize TTS audio with Gemini 3.1 Flash and send it as a Telegram voice note.
+
+USE FOR: voice replies — natural for casual chat, a short spoken summary, or staying in voice mode after the user sent a voice message. For mixed responses, send the spoken summary via this tool and include details in a follow-up text message via \`send_message\`.
+
+TEXT: what should be spoken. Plain text — no markdown / code / bullets (they are read literally). Inline Gemini expression tags work inside the text: \`[laughs]\`, \`[whispers]\`, \`[sighs]\`, \`[gasp]\`, etc. Example: "Ну привет! [laughs] Как ты? [whispers] Это секрет."
+
+VOICE (optional): named Gemini voice. Examples: Kore, Leda, Algenib, Puck, Enceladus, Zephyr. Unknown names warn-and-fall back to the instance default. Full catalog in the tts skill.
+
+DIRECTOR (optional): prose-style stage direction applied to the whole utterance, e.g. "whispered, close to mic" or "warm storyteller tone, unhurried" or "tired late-night sarcasm".
+
+PROFILE / SCENE (optional): persona / setting carried into the synthesis prompt. Use when you want a specific characterization beyond a one-liner director note.
+
+CHANNELS: Telegram-only; non-Telegram returns \`{ ok: true, skipped: true, reason: "channel not supported" }\`.
+
+RETURN (JSON in tool output):
+  • { ok: true, message_id } on success — message_id is usable with \`get_message\` and \`react\`.
+  • { ok: false, error } on failure — common reasons: "TTS not configured (no API key)", Gemini/OpenAI API errors, "channel does not support sendVoice".`,
+  {
+    text: z
+      .string()
+      .describe(
+        'Plain text to speak. Inline Gemini expression tags ([laughs], [whispers], etc.) are honored.',
+      ),
+    voice: z
+      .string()
+      .optional()
+      .describe(
+        'Optional named Gemini voice (e.g. "Kore", "Leda"). Unknown names fall back to instance default.',
+      ),
+    director: z
+      .string()
+      .optional()
+      .describe(
+        'Optional prose-style stage direction applied to the utterance (e.g. "whispered, close to mic").',
+      ),
+    profile: z
+      .string()
+      .optional()
+      .describe('Optional persona/audio profile.'),
+    scene: z.string().optional().describe('Optional scene/setting context.'),
+  },
+  async (args) => {
+    return dispatchMediaTool('send_voice', {
+      text: args.text,
+      voice: args.voice,
+      director: args.director,
+      profile: args.profile,
+      scene: args.scene,
+    });
+  },
+);
 
 server.tool(
   'react',
