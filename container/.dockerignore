@@ -1,0 +1,11 @@
+# Local-only artifacts that must never be transferred to the buildkit context.
+#
+# Apple Container 0.11.0's builder-shim crashes ("unable to write data to the
+# archive, code 0") on large contexts before .dockerignore is even applied —
+# see https://github.com/apple/container/issues/1375 (fixed in 0.12.0). The
+# real workaround in build.sh is to move these dirs aside; this file is the
+# belt-and-suspenders for once the host upgrades to 0.12.x.
+
+agent-runner/node_modules
+agent-runner/dist
+**/.DS_Store
