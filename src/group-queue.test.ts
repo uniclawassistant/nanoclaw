@@ -130,7 +130,8 @@ describe('GroupQueue', () => {
 
     // Release the first processing
     resolveFirst!();
-    await vi.advanceTimersByTimeAsync(10);
+    // Advance past same-group respawn throttle (500ms) so drained task can spawn
+    await vi.advanceTimersByTimeAsync(600);
 
     // Task should have run before the second message check
     expect(executionOrder[0]).toBe('messages'); // first call
@@ -431,6 +432,125 @@ describe('GroupQueue', () => {
 
     resolveTask!();
     await vi.advanceTimersByTimeAsync(10);
+  });
+
+  // --- Same-group respawn throttle (FED-4) ---
+
+  it('throttles back-to-back spawns for the same group to a 500ms gap', async () => {
+    const startTimes: number[] = [];
+    let resolveFirst: () => void;
+
+    const processMessages = vi.fn(async () => {
+      startTimes.push(Date.now());
+      if (startTimes.length === 1) {
+        await new Promise<void>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+
+    // First spawn
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(startTimes).toHaveLength(1);
+
+    // Queue a second spawn while first is active
+    queue.enqueueMessageCheck('group1@g.us');
+
+    // Complete first; drain should pick up pending message
+    resolveFirst!();
+
+    // Within throttle window — second must not have started yet
+    await vi.advanceTimersByTimeAsync(100);
+    expect(startTimes).toHaveLength(1);
+
+    // After throttle elapses
+    await vi.advanceTimersByTimeAsync(500);
+    expect(startTimes).toHaveLength(2);
+    expect(startTimes[1] - startTimes[0]).toBeGreaterThanOrEqual(500);
+  });
+
+  it('does not throttle spawns across different groups', async () => {
+    const startTimes: Record<string, number[]> = {};
+    let resolveFirst: () => void;
+
+    const processMessages = vi.fn(async (jid: string) => {
+      startTimes[jid] = startTimes[jid] || [];
+      startTimes[jid].push(Date.now());
+      if ((startTimes[jid] as number[]).length === 1 && jid === 'group1@g.us') {
+        await new Promise<void>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Complete group1, then immediately enqueue a different group
+    resolveFirst!();
+    await vi.advanceTimersByTimeAsync(10);
+
+    queue.enqueueMessageCheck('group2@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // group2 must spawn without waiting for any throttle
+    expect(startTimes['group2@g.us']).toHaveLength(1);
+  });
+
+  it('throttles a task spawned right after a message run for the same group', async () => {
+    const events: Array<{ kind: string; t: number }> = [];
+    let resolveFirst: () => void;
+
+    const processMessages = vi.fn(async () => {
+      events.push({ kind: 'messages-start', t: Date.now() });
+      await new Promise<void>((resolve) => {
+        resolveFirst = resolve;
+      });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    const taskFn = vi.fn(async () => {
+      events.push({ kind: 'task-start', t: Date.now() });
+    });
+    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
+
+    // Finish the message run; the task should be drained but throttled
+    resolveFirst!();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(taskFn).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(taskFn).toHaveBeenCalledTimes(1);
+    const messagesStart = events.find((e) => e.kind === 'messages-start')!.t;
+    const taskStart = events.find((e) => e.kind === 'task-start')!.t;
+    expect(taskStart - messagesStart).toBeGreaterThanOrEqual(500);
+  });
+
+  it('does not throttle the very first spawn for a group', async () => {
+    const startTimes: number[] = [];
+    const processMessages = vi.fn(async () => {
+      startTimes.push(Date.now());
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    const enqueuedAt = Date.now();
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(startTimes).toHaveLength(1);
+    expect(startTimes[0] - enqueuedAt).toBeLessThan(50);
   });
 
   it('preempts when idle arrives with pending tasks', async () => {
