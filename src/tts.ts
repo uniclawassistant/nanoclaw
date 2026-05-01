@@ -10,15 +10,9 @@ export interface VoiceDirective {
   director?: string;
 }
 
-export interface TtsDirective {
-  ttsText: string;
-  cleanText: string;
-  directive?: VoiceDirective;
-}
-
-// Gemini 3.1 Flash TTS voice catalog. Case-sensitive — a voice slug in a
-// tag that doesn't exactly match one of these falls through to director
-// prose (voice stays at DEFAULT). Source: memory/tools-reference.md
+// Gemini 3.1 Flash TTS voice catalog. Case-sensitive — voices passed via
+// send_voice that don't exactly match one of these are ignored (voice stays
+// at DEFAULT) with a warn log. Source: memory/tools-reference.md
 // "TTS / Gemini Flash — voices catalog".
 export const KNOWN_VOICES = new Set([
   'Achernar',
@@ -69,104 +63,33 @@ function resolveDefaultVoice(): string {
 }
 export const DEFAULT_VOICE = resolveDefaultVoice();
 
-// Outer tag matches four shapes via a first-char discriminator:
-//   [[tts]]                → baseline, no payload
-//   [[tts:text]]           → legacy, payload starts with ':'
-//   [[tts(spec): text]]    → simple mode, payload starts with '('
-//   [[tts\nkey: val\n...]] → block mode, payload starts with '\n'
-// The lookahead [:\n(] keeps malformed tags like "[[ttsfoo]]" from
-// matching, so dispatch below doesn't handle an "other" branch.
-const TTS_TAG_RE = /\[\[tts(?:([:\n(][\s\S]*?))?\]\]|\[tts\]/i;
-
-const BLOCK_KEY_RE = /^(voice|profile|scene|director):\s+(.+)$/;
-const SIMPLE_MODE_RE = /^\(([^)]*)\)\s*:\s*([\s\S]*)$/;
-
-function parseSimpleMode(raw: string, cleanText: string): TtsDirective {
-  const m = raw.match(SIMPLE_MODE_RE);
-  if (!m) {
-    // Payload started with '(' but shape isn't (<spec>): <text>.
-    // Whole raw becomes spoken text. e.g. "[[tts(unclosed]]".
-    return { ttsText: raw.trim(), cleanText };
-  }
-  const inner = m[1].trim();
-  const text = m[2].trim();
-  if (!inner) {
-    // Empty parens — malformed, fall through to legacy.
-    return { ttsText: raw.trim(), cleanText };
-  }
-  const tokens = inner
-    .split(',')
-    .map((t) => t.trim())
-    .filter(Boolean);
-  let voice: string | undefined;
-  const directorTokens: string[] = [];
-  for (const tok of tokens) {
-    if (!voice && KNOWN_VOICES.has(tok)) {
-      voice = tok;
+/**
+ * Build a clean VoiceDirective from MCP-tool input. Validates the voice
+ * against KNOWN_VOICES (warn-and-ignore unknowns, voice stays default).
+ * Returns undefined when nothing was specified so callers can pass through
+ * directly to synthesize().
+ */
+export function buildVoiceDirective(input: {
+  voice?: string;
+  director?: string;
+  profile?: string;
+  scene?: string;
+}): VoiceDirective | undefined {
+  const directive: VoiceDirective = {};
+  if (input.voice) {
+    if (KNOWN_VOICES.has(input.voice)) {
+      directive.voice = input.voice;
     } else {
-      directorTokens.push(tok);
-    }
-  }
-  const directive: VoiceDirective = {};
-  if (voice) directive.voice = voice;
-  if (directorTokens.length > 0) directive.director = directorTokens.join(', ');
-  return {
-    ttsText: text,
-    cleanText,
-    directive: Object.keys(directive).length > 0 ? directive : undefined,
-  };
-}
-
-function parseBlockMode(body: string, cleanText: string): TtsDirective {
-  // body is the payload with the leading '\n' already stripped.
-  const lines = body.split('\n');
-  const directive: VoiceDirective = {};
-  let i = 0;
-  for (; i < lines.length; i++) {
-    const m = lines[i].match(BLOCK_KEY_RE);
-    if (!m) break;
-    const key = m[1] as keyof VoiceDirective;
-    const val = m[2].trim();
-    if (key === 'voice' && !KNOWN_VOICES.has(val)) {
       logger.warn(
-        { voice: val },
-        'TTS block: unknown voice name, ignoring (voice stays default)',
+        { voice: input.voice },
+        'send_voice: unknown voice name, ignoring (voice stays default)',
       );
-      continue;
     }
-    // last-write-wins for duplicate keys, per brief §Rich mode.
-    directive[key] = val;
   }
-  const transcript = lines.slice(i).join('\n').trim();
-  return {
-    ttsText: transcript,
-    cleanText,
-    directive: Object.keys(directive).length > 0 ? directive : undefined,
-  };
-}
-
-export function extractTtsDirective(text: string): TtsDirective | null {
-  const match = text.match(TTS_TAG_RE);
-  if (!match) return null;
-
-  const cleanText = text.replace(TTS_TAG_RE, '').trim();
-  const raw = match[1]; // undefined for `[[tts]]` / `[tts]`
-
-  if (!raw) {
-    if (!cleanText) return null;
-    return { ttsText: cleanText, cleanText };
-  }
-
-  if (raw[0] === '(') return parseSimpleMode(raw, cleanText);
-  if (raw[0] === '\n') return parseBlockMode(raw.slice(1), cleanText);
-
-  // raw[0] === ':' — legacy form [[tts:text]]
-  const payload = raw.slice(1).trim();
-  if (!payload) {
-    if (!cleanText) return null;
-    return { ttsText: cleanText, cleanText };
-  }
-  return { ttsText: payload, cleanText };
+  if (input.director) directive.director = input.director;
+  if (input.profile) directive.profile = input.profile;
+  if (input.scene) directive.scene = input.scene;
+  return Object.keys(directive).length > 0 ? directive : undefined;
 }
 
 /**

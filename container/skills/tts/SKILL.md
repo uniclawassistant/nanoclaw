@@ -1,130 +1,157 @@
 ---
 name: tts
-description: Speak your response as a voice message via Gemini 3.1 Flash TTS. Include a `[[tts]]` tag in your response — the host synthesizes audio and sends it to the chat as a Telegram voice note. Supports 30 voices, persona/scene/director prose, and multi-speaker dialogs via multi-post.
+description: Speak your response as a voice message via the `send_voice` MCP tool (Gemini 3.1 Flash TTS, OpenAI fallback). Returns `{ ok, message_id }` so you can `get_message` / `react`. Supports 30 voices, persona/scene/director prose, and multi-speaker scenes via sequential posts.
 ---
 
-# TTS (Gemini Flash)
+# Voice messages — `send_voice`
 
-`[[tts]]` is a tag the host parses out of my reply and runs through Gemini 3.1 Flash TTS, then sends as a voice message to Telegram. Whatever is inside the tag gets spoken; everything outside stays as text.
+`send_voice` is an MCP tool that synthesizes audio (Gemini 3.1 Flash by default, OpenAI fallback) and ships it to the chat as a Telegram voice note. The tool returns `{ ok, message_id }` so you can react to it, look it up later via `get_message`, or follow it up with text.
 
-The default voice is **configured per instance** via the `TTS_DEFAULT_VOICE` env var (ships as `Enceladus` if unset). That's my voice. Only change it when voicing **someone other than myself** — a character, a retelling from another POV, or a multi-speaker scene.
+```jsonc
+send_voice({
+  text: "Hey, how's it going?",
+})
+```
+
+The default voice is **configured per instance** via the `TTS_DEFAULT_VOICE` env var (ships as `Enceladus` if unset). That's my voice. Only override it with `voice:` when voicing **someone other than myself** — a character, a retelling from another POV, or a multi-speaker scene.
+
+> **Channel scope.** Voice is Telegram-only today. On other channels you get `{ ok: true, skipped: true, reason: "channel not supported" }` and no error.
 
 ## When to use
 
-- User sent a voice message → reply with `[[tts]]` to stay in voice mode
+- User sent a voice message → reply with `send_voice` to stay in voice mode
 - User explicitly asks for voice
 - Short conversational replies where voice feels more natural than text
 
 ## When NOT to use
 
-- Long messages with code, lists, or structured data
+- Long messages with code, lists, or structured data — those need text
 - User is clearly reading/typing, not listening
-- More than ~60 seconds of audio in a single post — split across posts (Gemini docs recommend this, plus Telegram UI handles the separation naturally)
+- More than ~60 seconds of audio in a single post — split across multiple `send_voice` calls (Gemini docs recommend this; Telegram UI handles the separation naturally)
+
+## Mixed responses (voice summary + text details)
+
+Call `send_voice` first with the spoken summary, then `send_message` (or just final text output) with the longer details. The two posts arrive in order.
+
+```jsonc
+send_voice({ text: "Short version, spoken: everything's good, on it." })
+// Then your normal text reply with the full details.
+```
 
 ---
 
-## Syntax — three levels
+## Parameters
 
-### 1. Baseline (default)
-
-```
-Hey, how's it going? [[tts]]
-```
-
-All surrounding text (minus the tag) is synthesized with this instance's default voice, no directives. Same as before.
-
-```
-Here's the detailed answer with code and specifics.
-Short version, spoken: [[tts:Everything's good, on it.]]
+```jsonc
+send_voice({
+  text: string,            // required, plain text — what gets spoken
+  voice?: string,          // optional, named voice (case-sensitive)
+  director?: string,       // optional, prose stage direction applied to delivery
+  profile?: string,        // optional, persona / Audio Profile (block-mode equivalent)
+  scene?: string,          // optional, environment / context (block-mode equivalent)
+})
 ```
 
-Only the payload between `[[tts:` and `]]` is spoken.
+### `text` (required)
 
-**Use this for 80% of cases.** The other two levels — when you actually need control.
+Plain text — no markdown, no code, no bullets (they read literally as "asterisk asterisk bold asterisk asterisk"). Inline Gemini expression tags work **inside** the text:
 
-### 2. Simple mode — one line
-
-```
-[[tts(<voice_spec>): <text>]]
-```
-
-`<voice_spec>` is csv tokens inside parens:
-- The first token matching one of the 30 known voices becomes `voice`
-- Everything else (joined with `, `) goes into director prose, applied to the delivery
-
-Examples:
-
-```
-[[tts(Kore): Serious product briefing.]]
-```
-Voice change, no direction — Kore (F, Firm) for a dry tone.
-
-```
-[[tts(whispered, close to mic): Shhh, it's a secret.]]
-```
-Own voice (instance default), but directed "whispered, close to mic".
-
-```
-[[tts(Leda, warm storyteller tone, unhurried): Once upon a time there was a unicorn in the forest...]]
-```
-Leda (F, Youthful) + delivery "warm storyteller tone, unhurried".
-
-```
-[[tts(Algenib, tired late-night sarcasm): What a day it's been, let me tell you...]]
-```
-Algenib (M, Gravelly) + "tired late-night sarcasm".
-
-If no token matches a known voice, everything goes into director and the voice stays at the instance default.
-
-### 3. Rich block mode — for complex scenes
-
-Trigger: newline immediately after `[[tts` (no text before the newline).
-
-```
-[[tts
-voice: <Name>              # optional
-profile: <free prose>      # optional, persona's Audio Profile
-scene: <free prose>        # optional, environment / context
-director: <free prose>     # optional, Director's note — style/pace/accent
-<transcript, any length, with blank lines allowed>
-]]
+```jsonc
+send_voice({
+  text: "Ну привет! [laughs] Как ты? [whispers] Это секрет. [gasp] Да ладно!",
+})
 ```
 
-All keys are optional, any order. The first line **not** matching `^(voice|profile|scene|director):\s+(.+)$` starts the transcript; everything up to `]]` is the spoken text.
+These are semantic hints, not structured directives. Gemini listens to the surrounding meaning, so `"...and he said [whispers] quietly"` whispers reliably; `[newscaster voice, 2x speed]` is more like a wish. For reliable control over timbre/pacing/style, use `director:` instead.
 
-Example — storytelling:
+Baseline list that works: `[laughs]`, `[giggles]`, `[sighs]`, `[gasp]`, `[whispers]`, `[shouting]`, `[crying]`, `[cough]`, `[excited]`, `[curious]`, `[sarcastic]`, `[serious]`, `[tired]`, `[trembling]`, `[mischievously]`.
 
+### `voice` (optional)
+
+Named voice from the catalog (case-sensitive — `Kore` works, `kore` is silently ignored and the voice stays at the instance default). Full catalog below.
+
+### `director` (optional)
+
+Free-form prose stage direction applied to the whole utterance, e.g. `"whispered, close to mic"` / `"warm storyteller tone, unhurried"` / `"tired late-night sarcasm"`. Layered on top of `voice` — any voice can be colored differently.
+
+### `profile` and `scene` (optional)
+
+Free-form prose carried into the synthesis prompt. Use for richer characterizations than a one-liner director note:
+
+- `profile`: who is speaking — `"warm grandmother telling a bedtime story"` / `"noir detective, 40s, tired, smoking by the window"`
+- `scene`: where / when — `"quiet room, soft lamplight, child drifting off"` / `"rainy night, flickering neon outside, ashtray overflowing"`
+
+You usually only need these for storytelling or character work. For everyday voice replies, leave them out.
+
+---
+
+## Worked examples
+
+```jsonc
+// 80% case — bare voice in instance default
+send_voice({ text: "Hey, how's it going?" })
+
+// Voice change only
+send_voice({
+  text: "Serious product briefing.",
+  voice: "Kore",                  // F, Firm — dry tone
+})
+
+// Director only (own voice)
+send_voice({
+  text: "Shhh, it's a secret.",
+  director: "whispered, close to mic",
+})
+
+// Voice + director
+send_voice({
+  text: "Once upon a time there was a unicorn in the forest...",
+  voice: "Leda",
+  director: "warm storyteller tone, unhurried",
+})
+
+// Storytelling — full block
+send_voice({
+  text: "Once upon a time, in a faraway forest, there lived a little unicorn. [whispers] He was very shy... and only came out at night, to the clearing, to look at the stars.",
+  voice: "Leda",
+  profile: "warm grandmother telling a bedtime story to her grandchild",
+  scene: "quiet room, soft lamplight, child drifting off",
+  director: "unhurried, with long pauses, softer toward the end",
+})
+
+// Character monologue
+send_voice({
+  text: "This city's eating me alive. [sighs] Every night it's the same — a call, a body, questions with no answers.",
+  voice: "Algenib",
+  profile: "noir detective, 40s, tired, smoking by the window",
+  scene: "rainy night, flickering neon outside, ashtray overflowing",
+  director: "hard-boiled delivery, cynical, long drags between lines",
+})
 ```
-[[tts
-voice: Leda
-profile: warm grandmother telling a bedtime story to her grandchild
-scene: quiet room, soft lamplight, child drifting off
-director: unhurried, with long pauses, softer toward the end
-Once upon a time, in a faraway forest, there lived a little unicorn. [whispers] He was very
-shy... and only came out at night, to the clearing, to look at the stars.
-]]
-```
 
-Example — character monologue:
+---
 
-```
-[[tts
-voice: Algenib
-profile: noir detective, 40s, tired, smoking by the window
-scene: rainy night, flickering neon outside, ashtray overflowing
-director: hard-boiled delivery, cynical, long drags between lines
-This city's eating me alive. [sighs] Every night it's the same —
-a call, a body, questions with no answers.
-]]
-```
+## Multi-speaker dialogs
 
-**⚠️ Edge case:** if the transcript itself starts with a line like `voice: ...` / `profile: ...` / `scene: ...` / `director: ...`, the parser will swallow it as a key. If that matters, start the transcript with a blank line or rephrase.
+**Not via the `MultiSpeakerVoiceConfig` API.** Instead, send a **sequence of posts** — each speaker turn is a separate `send_voice` call.
+
+Why:
+- Telegram UI visually separates the turns — "different actors" feeling comes for free
+- No audio stitching, no opus-merge pain
+- Long scenes can be broken up naturally (messenger-style)
+- Each turn ≤ ~60s → stays within safe synthesis range
+
+```jsonc
+send_voice({ text: "Did you see a unicorn?",                voice: "Puck",    director: "excitedly" })
+send_voice({ text: "Saw one. Last Tuesday, at Starbucks.",  voice: "Algenib", director: "wearily" })
+send_voice({ text: "Ugh, how prosaic.",                     voice: "Puck",    director: "disappointed" })
+```
 
 ---
 
 ## Voices catalog (30 voices)
 
-Default voice is per-instance (see `TTS_DEFAULT_VOICE` env). Voice names are **case-sensitive** — `Kore` works, `kore` becomes director prose. Full catalog:
+Default voice is per-instance (see `TTS_DEFAULT_VOICE` env). Voice names are **case-sensitive** — `Kore` works, `kore` is silently ignored (voice stays default).
 
 | Name | Gender | Characteristic |
 |---|---|---|
@@ -177,31 +204,6 @@ The characteristic is the baseline timbre. `director` / `profile` / `scene` laye
 
 ---
 
-## Multi-speaker dialogs
-
-**Not via the `MultiSpeakerVoiceConfig` API.** Instead, use a **sequence of posts** — each speaker turn is a separate post with its own `[[tts]]` tag.
-
-Why:
-- Telegram UI visually separates the turns — "different actors" feeling comes for free
-- No audio stitching, no opus-merge pain
-- Long scenes can be broken up naturally (messenger-style)
-- Each turn ≤ ~60s → stays within safe synthesis range
-
-Pattern:
-```
-Post 1: [[tts(Puck, excitedly): Did you see a unicorn?]]
-Post 2: [[tts(Algenib, wearily): Saw one. Last Tuesday, at Starbucks.]]
-Post 3: [[tts(Puck, disappointed): Ugh, how prosaic.]]
-```
-
-## Inline tags (`[whispers]`, `[laughs]`, `[sighs]`)
-
-These work as **semantic hints**, not structured directives. Gemini listens to the meaning of the surrounding text. If the text is "and he said [whispers] quietly" — whisper will happen. If you write `[newscaster voice, 2x speed]` — the model will probably ignore the pacing, whisper it will likely catch.
-
-**Rule:** reliable control over timbre / pacing / style — via `director:` prose. Inline tags are cherry on top for small emotional accents.
-
-Baseline list that works: `[laughs]`, `[giggles]`, `[sighs]`, `[gasp]`, `[whispers]`, `[shouting]`, `[crying]`, `[cough]`, `[excited]`, `[curious]`, `[sarcastic]`, `[serious]`, `[tired]`, `[trembling]`, `[mischievously]`.
-
 ## The name Fedor — always with Ё
 
 - ✅ `Фёдор` / `Fёdor`
@@ -211,26 +213,18 @@ Works even in the middle of English text — the letter Ё itself triggers corre
 
 ## Limits
 
-- **Long scenes (>~60s)** — split across posts. Gemini TTS docs recommend this themselves.
-- **OpenAI fallback** — when Gemini is unavailable, synthesis falls back to gpt-4o-mini-tts. The `directive` (voice/profile/scene/director) is **dropped** — gpt would read the prefix literally. Logged as warn. No voice control in fallback.
-- **Accent on non-English text** — works with limitations, not tested on Russian in v1. If `director` says "British accent" for Russian text — the effect is unpredictable.
-- **Unknown voice name** — simple mode falls through to legacy (default voice stays, everything treated as director prose). Warn in logs.
-
-## Scar — don't quote live syntax in chat
-
-The host parser doesn't distinguish "example in a message" from "real directive." Any `[[tts(...)]]` I write in chat — the host will try to synthesize it. SOUL already has a scar about image tags; same principle for tts tags:
-
-- Examples in briefs / skills → **files**, path shared with Fedor
-- In the chat itself — either skip the trigger brackets ("double square, tts, colon...") or substitute with «» / ⟦⟧
-- Backticks are unreliable (the parser looks at raw text, markdown may not escape)
+- **Long scenes (>~60s)** — split across multiple `send_voice` calls. Gemini TTS docs recommend this themselves.
+- **OpenAI fallback** — when Gemini is unavailable, synthesis falls back to gpt-4o-mini-tts. `voice` / `director` / `profile` / `scene` are **dropped** — gpt would read the prefix literally. Logged as warn. No voice control in fallback.
+- **Accent on non-English text** — works with limitations, not tested on Russian in v1. If `director` says "British accent" for Russian text, the effect is unpredictable.
+- **Unknown voice name** — silently ignored, voice stays at the instance default. Warn in host log.
 
 ## Default-first
 
-If there's no explicit reason — bare `[[tts]]`. Don't drag in `(voice, director, profile)` for the sake of it. The instance default with natural text sounds good — it's been validated, chosen, it's mine.
+If there's no explicit reason — bare `send_voice({ text })` with no extras. Don't drag in `voice` / `director` / `profile` for the sake of it. The instance default with natural text sounds good — it's been validated, chosen, it's mine.
 
 Control levels engage **consciously**, when:
-- Voicing **not myself** (character, retelling from another POV) → voice + profile
-- Need a specific **tone** the text itself doesn't convey → director
-- Multi-voice **scene** → multi-post with different voice per turn
+- Voicing **not myself** (character, retelling from another POV) → `voice` + `profile`
+- Need a specific **tone** the text itself doesn't convey → `director`
+- Multi-voice **scene** → sequential `send_voice` calls with different `voice` per turn
 
 Otherwise — baseline.

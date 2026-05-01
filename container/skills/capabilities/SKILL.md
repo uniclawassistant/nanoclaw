@@ -44,8 +44,13 @@ Read the allowed tools from your SDK configuration. You always have access to:
 ### 3. MCP server tools
 
 The NanoClaw MCP server exposes these tools (via `mcp__nanoclaw__*` prefix):
-- `send_message` — send a message to the user/group
-- `react` — set/clear an emoji reaction on a Telegram message (👀 while working, ✅ when done)
+- `send_message` — send a text message to the user/group
+- `send_file` — send a local file as a channel-native document (no compression, original bytes)
+- `send_image` — send a local image as a compressed photo with native preview
+- `generate_image` — generate a new image (GPT Image) and ship it as a photo, returns `message_id`
+- `edit_image` — edit a previously sent image (referenced by `source_message_id`) and ship the result
+- `send_voice` — synthesize text via Gemini 3.1 Flash TTS and send as a Telegram voice note
+- `react` — set/clear an emoji reaction on a Telegram message (👀 while working, 👌 when done)
 - `get_message` — look up a stored message by id (text, attachment path, image-gen prompt, …)
 - `schedule_task` — schedule a recurring or one-time task
 - `list_tasks` — list scheduled tasks
@@ -62,7 +67,7 @@ When you see `reply_to_<id>` in an incoming message and need to understand what 
 Use it for:
 - "what was the prompt for this image?" (user replied to a generated image)
 - "remind me what I wrote there" (user referring back to own text)
-- "send the original / re-attach that file" (combine with `[[image-file: <path>]]` using the returned `file_path` or `generation.original_png_path`)
+- "send the original / re-attach that file" (combine with `send_image({ path })` or `send_file({ path })` using the returned `file_path` or `generation.original_png_path`)
 
 Don't spam calls — only query when the reply context is actually needed to answer.
 
@@ -97,7 +102,9 @@ Present the report as a clean, readable message. Example:
 • Core: Bash, Read, Write, Edit, Glob, Grep
 • Web: WebSearch, WebFetch
 • Orchestration: Task, TeamCreate, SendMessage
-• MCP: send_message, schedule_task, list_tasks, pause/resume/cancel/update_task, register_group
+• MCP messaging: send_message, send_file, send_image, send_voice, react, get_message
+• MCP image: generate_image, edit_image
+• MCP tasks: schedule_task, list_tasks, pause/resume/cancel/update_task, register_group
 
 *Container Tools:*
 • agent-browser: ✓

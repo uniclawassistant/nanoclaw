@@ -703,24 +703,40 @@ export class TelegramChannel implements Channel {
     jid: string,
     audio: Buffer,
     threadId?: string,
-  ): Promise<string | undefined> {
-    if (!this.bot) return undefined;
-    try {
-      const numericId = jid.replace(/^tg:/, '');
-      const options = threadId
-        ? { message_thread_id: parseInt(threadId, 10) }
-        : {};
-      const sent = await this.bot.api.sendVoice(
-        numericId,
-        new InputFile(audio, 'voice.ogg'),
-        options,
-      );
-      logger.info({ jid }, 'Telegram voice message sent');
-      return sent?.message_id?.toString();
-    } catch (err) {
-      logger.error({ jid, err }, 'Failed to send Telegram voice message');
-      return undefined;
+  ): Promise<{ ok: true; message_id: string } | { ok: false; error: string }> {
+    if (!this.bot) return { ok: false, error: 'Telegram bot not initialized' };
+    const numericId = jid.replace(/^tg:/, '');
+    const options = threadId
+      ? { message_thread_id: parseInt(threadId, 10) }
+      : {};
+
+    let lastError: string | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const sent = await this.bot.api.sendVoice(
+          numericId,
+          new InputFile(audio, 'voice.ogg'),
+          options,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          AbortSignal.timeout(120_000) as any,
+        );
+        const id = sent?.message_id?.toString();
+        if (id) {
+          logger.info({ jid }, 'Telegram voice message sent');
+          return { ok: true, message_id: id };
+        }
+        lastError = 'Telegram returned no message_id';
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        logger.warn({ jid, attempt, err }, 'sendVoice attempt failed');
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
+      }
     }
+    logger.error(
+      { jid, lastError },
+      'Failed to send Telegram voice after 3 attempts',
+    );
+    return { ok: false, error: lastError ?? 'unknown error' };
   }
 
   async sendPhoto(
@@ -728,13 +744,14 @@ export class TelegramChannel implements Channel {
     filePath: string,
     caption?: string,
     threadId?: string,
-  ): Promise<string | undefined> {
-    if (!this.bot) return undefined;
+  ): Promise<{ ok: true; message_id: string } | { ok: false; error: string }> {
+    if (!this.bot) return { ok: false, error: 'Telegram bot not initialized' };
     const numericId = jid.replace(/^tg:/, '');
     const options: Record<string, unknown> = {};
     if (caption) options.caption = caption;
     if (threadId) options.message_thread_id = parseInt(threadId, 10);
 
+    let lastError: string | undefined;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const sent = await this.bot.api.sendPhoto(
@@ -744,15 +761,23 @@ export class TelegramChannel implements Channel {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           AbortSignal.timeout(120_000) as any,
         );
-        logger.info({ jid }, 'Telegram photo sent');
-        return sent?.message_id?.toString();
+        const id = sent?.message_id?.toString();
+        if (id) {
+          logger.info({ jid }, 'Telegram photo sent');
+          return { ok: true, message_id: id };
+        }
+        lastError = 'Telegram returned no message_id';
       } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
         logger.warn({ jid, attempt, err }, 'sendPhoto attempt failed');
         if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
       }
     }
-    logger.error({ jid }, 'Failed to send Telegram photo after 3 attempts');
-    return undefined;
+    logger.error(
+      { jid, lastError },
+      'Failed to send Telegram photo after 3 attempts',
+    );
+    return { ok: false, error: lastError ?? 'unknown error' };
   }
 
   async sendDocument(

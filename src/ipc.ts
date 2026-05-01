@@ -60,6 +60,70 @@ export interface IpcDeps {
     messageId: string,
     args: { caption?: string; tracePath: string; filename: string },
   ) => void;
+  // Generates an image and ships it to chat. The caller already authorized
+  // the source group → chatJid mapping; this only runs the API call and
+  // delivery. tracePath in the success response is the group-relative path
+  // of the delivered file.
+  generateImage?: (
+    jid: string,
+    prompt: string,
+    presets: string[] | undefined,
+    caption: string | undefined,
+    threadId: string | undefined,
+  ) => Promise<
+    | {
+        ok: true;
+        message_id: string;
+        file_path: string;
+        message_type: 'photo' | 'document';
+      }
+    | { ok: false; error: string }
+  >;
+  // Edits an existing image (sourceAbsPath already resolved + validated by
+  // ipc-watcher) and ships the result. Same contract as generateImage.
+  editImage?: (
+    jid: string,
+    sourceAbsPath: string,
+    prompt: string,
+    presets: string[] | undefined,
+    caption: string | undefined,
+    threadId: string | undefined,
+  ) => Promise<
+    | {
+        ok: true;
+        message_id: string;
+        file_path: string;
+        message_type: 'photo' | 'document';
+      }
+    | { ok: false; error: string }
+  >;
+  // Ships an existing image file as a compressed photo with optional caption.
+  sendImage?: (
+    jid: string,
+    hostPath: string,
+    caption: string | undefined,
+    threadId: string | undefined,
+  ) => Promise<
+    | {
+        ok: true;
+        message_id: string;
+        file_path: string;
+        message_type: 'photo' | 'document';
+      }
+    | { ok: false; error: string }
+  >;
+  // Synthesizes TTS audio and sends as a voice message.
+  sendVoice?: (
+    jid: string,
+    text: string,
+    directive: {
+      voice?: string;
+      director?: string;
+      profile?: string;
+      scene?: string;
+    },
+    threadId: string | undefined,
+  ) => Promise<{ ok: true; message_id: string } | { ok: false; error: string }>;
 }
 
 const RESPONSE_TTL_MS = 60_000;
@@ -112,6 +176,306 @@ function sweepOrphanResponses(ipcBaseDir: string): void {
     } catch (err) {
       logger.debug({ folder, err }, 'Error sweeping orphan IPC responses');
     }
+  }
+}
+
+type MediaToolIpc = {
+  type: 'generate_image' | 'edit_image' | 'send_image' | 'send_voice';
+  chatJid: string;
+  requestId: string;
+  prompt?: string;
+  preset?: string[];
+  caption?: string;
+  source_message_id?: string;
+  sourcePath?: string;
+  text?: string;
+  voice?: string;
+  director?: string;
+  profile?: string;
+  scene?: string;
+};
+
+/**
+ * Authorize the source group for the target chatJid, then dispatch the
+ * media tool (generate_image / edit_image / send_image / send_voice) to
+ * the appropriate dep. Always writes a response file so the container-side
+ * MCP tool unblocks. Each handler returns { success, message_id|error,
+ * file_path?, message_type? } shaped for the agent.
+ */
+async function processMediaToolIpc(
+  data: MediaToolIpc,
+  sourceGroup: string,
+  isMain: boolean,
+  registeredGroups: Record<string, RegisteredGroup>,
+  ipcBaseDir: string,
+  deps: IpcDeps,
+): Promise<void> {
+  const responsesDir = path.join(ipcBaseDir, sourceGroup, 'responses');
+  const targetGroup = registeredGroups[data.chatJid];
+  const authorized =
+    isMain || (targetGroup && targetGroup.folder === sourceGroup);
+  if (!authorized) {
+    logger.warn(
+      { chatJid: data.chatJid, sourceGroup, type: data.type },
+      'Unauthorized IPC media-tool attempt blocked',
+    );
+    writeIpcResponse(responsesDir, data.requestId, {
+      success: false,
+      error: 'unauthorized',
+    });
+    return;
+  }
+
+  // Image / voice tools are Telegram-only at the moment. On other channels,
+  // return ok+skipped so the agent can proceed without surfacing an error.
+  if (!data.chatJid.startsWith('tg:')) {
+    logger.info(
+      { chatJid: data.chatJid, type: data.type },
+      'Media tool skipped on non-Telegram channel',
+    );
+    writeIpcResponse(responsesDir, data.requestId, {
+      success: true,
+      data: { ok: true, skipped: true, reason: 'channel not supported' },
+    });
+    return;
+  }
+
+  const threadId = deps.getLastIncomingThreadId?.(data.chatJid);
+
+  try {
+    if (data.type === 'generate_image') {
+      if (!deps.generateImage) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: 'generate_image not supported on this host',
+        });
+        return;
+      }
+      if (typeof data.prompt !== 'string' || !data.prompt.trim()) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: 'prompt is required',
+        });
+        return;
+      }
+      const result = await deps.generateImage(
+        data.chatJid,
+        data.prompt,
+        data.preset,
+        data.caption,
+        threadId,
+      );
+      if (result.ok) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: true,
+          message_id: result.message_id,
+          data: {
+            ok: true,
+            message_id: result.message_id,
+            file_path: result.file_path,
+            message_type: result.message_type,
+          },
+        });
+      } else {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: result.error,
+        });
+      }
+      return;
+    }
+
+    if (data.type === 'edit_image') {
+      if (!deps.editImage) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: 'edit_image not supported on this host',
+        });
+        return;
+      }
+      if (typeof data.prompt !== 'string' || !data.prompt.trim()) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: 'prompt is required',
+        });
+        return;
+      }
+      if (
+        typeof data.source_message_id !== 'string' ||
+        !data.source_message_id
+      ) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: 'source_message_id is required',
+        });
+        return;
+      }
+      const record = deps.getMessage(data.source_message_id, data.chatJid);
+      if (!record) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: `source message ${data.source_message_id} not found in this chat`,
+        });
+        return;
+      }
+      // Prefer the full-fidelity original (PNG when format=png was used) so
+      // the OpenAI edit endpoint gets max detail to work with.
+      const sourceTrace =
+        record.generation?.original_png_path ?? record.file_path;
+      if (!sourceTrace) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: `source message ${data.source_message_id} has no attached image (type=${record.type})`,
+        });
+        return;
+      }
+      const resolved = resolveContainerPathToHost(
+        sourceTrace,
+        sourceGroup,
+        GROUPS_DIR,
+        targetGroup,
+        isMain,
+      );
+      if (!resolved.ok) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: `source path rejected: ${resolved.error}`,
+        });
+        return;
+      }
+      const result = await deps.editImage(
+        data.chatJid,
+        resolved.hostPath,
+        data.prompt,
+        data.preset,
+        data.caption,
+        threadId,
+      );
+      if (result.ok) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: true,
+          message_id: result.message_id,
+          data: {
+            ok: true,
+            message_id: result.message_id,
+            file_path: result.file_path,
+            message_type: result.message_type,
+          },
+        });
+      } else {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: result.error,
+        });
+      }
+      return;
+    }
+
+    if (data.type === 'send_image') {
+      if (!deps.sendImage) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: 'send_image not supported on this host',
+        });
+        return;
+      }
+      if (typeof data.sourcePath !== 'string' || !data.sourcePath) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: 'path is required',
+        });
+        return;
+      }
+      const resolved = resolveContainerPathToHost(
+        data.sourcePath,
+        sourceGroup,
+        GROUPS_DIR,
+        targetGroup,
+        isMain,
+      );
+      if (!resolved.ok) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: resolved.error,
+        });
+        return;
+      }
+      const result = await deps.sendImage(
+        data.chatJid,
+        resolved.hostPath,
+        data.caption,
+        threadId,
+      );
+      if (result.ok) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: true,
+          message_id: result.message_id,
+          data: {
+            ok: true,
+            message_id: result.message_id,
+            file_path: result.file_path,
+            message_type: result.message_type,
+          },
+        });
+      } else {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: result.error,
+        });
+      }
+      return;
+    }
+
+    if (data.type === 'send_voice') {
+      if (!deps.sendVoice) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: 'send_voice not supported on this host',
+        });
+        return;
+      }
+      if (typeof data.text !== 'string' || !data.text.trim()) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: 'text is required',
+        });
+        return;
+      }
+      const result = await deps.sendVoice(
+        data.chatJid,
+        data.text,
+        {
+          voice: data.voice,
+          director: data.director,
+          profile: data.profile,
+          scene: data.scene,
+        },
+        threadId,
+      );
+      if (result.ok) {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: true,
+          message_id: result.message_id,
+          data: { ok: true, message_id: result.message_id },
+        });
+      } else {
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: result.error,
+        });
+      }
+      return;
+    }
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger.warn(
+      { chatJid: data.chatJid, sourceGroup, type: data.type, err: errMsg },
+      'IPC media-tool delivery threw',
+    );
+    writeIpcResponse(responsesDir, data.requestId, {
+      success: false,
+      error: errMsg,
+    });
   }
 }
 
@@ -458,6 +822,22 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     }
                   }
                 }
+              } else if (
+                (data.type === 'generate_image' ||
+                  data.type === 'edit_image' ||
+                  data.type === 'send_image' ||
+                  data.type === 'send_voice') &&
+                typeof data.chatJid === 'string' &&
+                typeof data.requestId === 'string'
+              ) {
+                await processMediaToolIpc(
+                  data,
+                  sourceGroup,
+                  isMain,
+                  registeredGroups,
+                  ipcBaseDir,
+                  deps,
+                );
               }
               fs.unlinkSync(filePath);
             } catch (err) {
