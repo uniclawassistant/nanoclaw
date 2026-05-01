@@ -81,9 +81,13 @@ export interface IpcDeps {
   >;
   // Edits an existing image (sourceAbsPath already resolved + validated by
   // ipc-watcher) and ships the result. Same contract as generateImage.
+  // sourceMessageId is the channel-native id of the original message — kept
+  // so the delivered result can record `generation.source_message_id` and
+  // the edit chain stays traversable from get_message alone.
   editImage?: (
     jid: string,
     sourceAbsPath: string,
+    sourceMessageId: string,
     prompt: string,
     presets: string[] | undefined,
     caption: string | undefined,
@@ -346,6 +350,7 @@ async function processMediaToolIpc(
       const result = await deps.editImage(
         data.chatJid,
         resolved.hostPath,
+        data.source_message_id,
         data.prompt,
         data.preset,
         data.caption,

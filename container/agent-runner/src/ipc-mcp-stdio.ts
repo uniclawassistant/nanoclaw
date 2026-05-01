@@ -556,7 +556,9 @@ WHEN TO USE:
 • You need the generation prompt of an image you produced earlier (e.g. to re-run, edit, or explain it).
 
 RETURN SHAPE (success case):
-{ message_id, chat_jid, timestamp, sender, direction: "in"|"out", type: "text"|"photo"|"document"|"voice"|"video"|"sticker"|"system", text?, reply_to_message_id?, file_path? (group-relative), generation?: {prompt, preset?, original_png_path}, reactions: [] }
+{ message_id, chat_jid, timestamp, sender, direction: "in"|"out", type: "text"|"photo"|"document"|"voice"|"video"|"sticker"|"system", text?, reply_to_message_id?, file_path? (group-relative), generation?: {prompt, preset?, original_png_path, source_message_id?}, reactions: [] }
+
+\`generation.source_message_id\` is set on photos produced by \`edit_image\` and points at the message that was used as the edit source. Walk this chain backwards (recursively call \`get_message\` on each \`source_message_id\`) to recover the full generate→edit→edit history. It is absent on \`generate_image\` results and on user-uploaded photos.
 
 Missing message returns { found: false, message_id, chat_jid } — not an error.
 

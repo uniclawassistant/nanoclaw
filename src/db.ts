@@ -350,6 +350,7 @@ export function storeOutgoingMessage(msg: {
     prompt: string;
     preset?: string;
     original_png_path: string;
+    source_message_id?: string;
   } | null;
 }): void {
   db.prepare(
@@ -391,6 +392,7 @@ export interface MessageRecord {
     prompt: string;
     preset?: string;
     original_png_path: string;
+    source_message_id?: string;
   };
   reactions: Array<{ emoji: string; sender: string; timestamp: string }>;
 }
