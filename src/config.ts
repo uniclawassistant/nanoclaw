@@ -63,6 +63,13 @@ export const MAX_MESSAGES_PER_PROMPT = Math.max(
 );
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
+// Scheduled tasks are single-turn (poll → ack → exit). 5 min of silent inactivity
+// means the container is hung, not legit work. User-message containers keep the
+// longer 30 min window because real research / sub-agent runs can idle that long.
+export const SCHEDULED_TASK_IDLE_TIMEOUT_MS = parseInt(
+  process.env.SCHEDULED_TASK_IDLE_TIMEOUT_MS || '300000',
+  10,
+);
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
