@@ -14,6 +14,12 @@ interface QueuedTask {
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
 
+// Apple Container per-group IPC bind-mount loses host↔container coherence
+// when a new container spawns immediately after the previous one exits for
+// the same group (FED-3). Force a minimum gap between same-group exit and
+// respawn to give the host filesystem view time to settle.
+const SAME_GROUP_RESPAWN_GAP_MS = 500;
+
 interface GroupState {
   active: boolean;
   idleWaiting: boolean;
@@ -25,6 +31,7 @@ interface GroupState {
   containerName: string | null;
   groupFolder: string | null;
   retryCount: number;
+  lastExitAt: number | null;
 }
 
 export class GroupQueue {
@@ -49,6 +56,7 @@ export class GroupQueue {
         containerName: null,
         groupFolder: null,
         retryCount: 0,
+        lastExitAt: null,
       };
       this.groups.set(groupJid, state);
     }
@@ -193,6 +201,21 @@ export class GroupQueue {
     }
   }
 
+  private async throttleSameGroupRespawn(
+    groupJid: string,
+    state: GroupState,
+  ): Promise<void> {
+    if (state.lastExitAt === null) return;
+    const gapMs = Date.now() - state.lastExitAt;
+    if (gapMs >= SAME_GROUP_RESPAWN_GAP_MS) return;
+    const sleepMs = SAME_GROUP_RESPAWN_GAP_MS - gapMs;
+    logger.debug(
+      { groupJid, gapMs, sleepMs },
+      'Throttling same-group spawn for mount coherence',
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+  }
+
   private async runForGroup(
     groupJid: string,
     reason: 'messages' | 'drain',
@@ -210,6 +233,7 @@ export class GroupQueue {
     );
 
     try {
+      await this.throttleSameGroupRespawn(groupJid, state);
       if (this.processMessagesFn) {
         const success = await this.processMessagesFn(groupJid);
         if (success) {
@@ -226,6 +250,7 @@ export class GroupQueue {
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
+      state.lastExitAt = Date.now();
       this.activeCount--;
       this.drainGroup(groupJid);
     }
@@ -245,6 +270,7 @@ export class GroupQueue {
     );
 
     try {
+      await this.throttleSameGroupRespawn(groupJid, state);
       await task.fn();
     } catch (err) {
       logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
@@ -255,6 +281,7 @@ export class GroupQueue {
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
+      state.lastExitAt = Date.now();
       this.activeCount--;
       this.drainGroup(groupJid);
     }
