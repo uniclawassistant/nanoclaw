@@ -26,6 +26,17 @@ import {
 const ALLOWED_REACTIONS: ReadonlySet<string> = new Set(allowedReactions);
 const REACTION_CACHE_CAP = 5000;
 
+/**
+ * Map a Claude model id to its context window size in thousands of tokens, for
+ * /status display. Anthropic ships 1M-context variants of Claude 4 with the
+ * `[1m]` suffix; everything else is the standard 200K tier. Unknown models
+ * (rare jsonl with no model field) fall back to 200K so percentages stay
+ * conservative rather than understated.
+ */
+export function contextWindowK(model: string): number {
+  return model.includes('[1m]') ? 1000 : 200;
+}
+
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
@@ -312,7 +323,7 @@ export class TelegramChannel implements Channel {
       }
 
       const contextK = Math.round(contextTokens / 1000);
-      const maxK = 1000;
+      const maxK = contextWindowK(model);
       const pct = Math.round((contextTokens / (maxK * 1000)) * 100);
       const total = cacheRead + cacheCreation;
       const hitRate = total > 0 ? Math.round((cacheRead / total) * 100) : 0;
