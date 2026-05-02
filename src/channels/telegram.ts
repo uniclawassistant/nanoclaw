@@ -529,11 +529,17 @@ export class TelegramChannel implements Channel {
       });
     });
     this.bot.on('message:document', (ctx) => {
-      const name = ctx.message.document?.file_name || 'file';
-      storeMedia(ctx, `[Document: ${name}]`, {
-        fileId: ctx.message.document?.file_id,
+      const doc = ctx.message.document;
+      const name = doc?.file_name || 'file';
+      // Forwarded WAV/MP3 from other chats often arrives as a document
+      // rather than message:audio (Telegram's classifier is inconsistent).
+      // Route audio-mime documents through the STT path so the agent sees
+      // the transcript instead of a bare [Document: ...] placeholder.
+      const isAudio = (doc?.mime_type || '').startsWith('audio/');
+      storeMedia(ctx, isAudio ? `[Audio: ${name}]` : `[Document: ${name}]`, {
+        fileId: doc?.file_id,
         filename: name,
-        messageType: 'document',
+        messageType: isAudio ? 'voice' : 'document',
       });
     });
     this.bot.on('message:sticker', (ctx) => {
