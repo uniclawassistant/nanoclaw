@@ -969,6 +969,154 @@ describe('TelegramChannel', () => {
       expect(opts.onMessage).not.toHaveBeenCalled();
     });
 
+    it('routes audio-mime documents through STT (forwarded WAV)', async () => {
+      const origKey = process.env.OPENAI_TTS_API_KEY;
+      process.env.OPENAI_TTS_API_KEY = 'stt-key';
+
+      // STT reads the downloaded file from disk; mock fs to skip the I/O.
+      vi.spyOn(fs, 'statSync').mockReturnValue({ size: 1000 } as fs.Stats);
+      vi.spyOn(fs, 'readFileSync').mockReturnValue(Buffer.from('audio'));
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((url: string) => {
+          if (url.includes('audio/transcriptions')) {
+            return Promise.resolve({
+              ok: true,
+              text: vi.fn().mockResolvedValue('Hello from a forwarded WAV'),
+            });
+          }
+          return Promise.resolve({
+            ok: true,
+            arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(8)),
+          });
+        }),
+      );
+
+      try {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        currentBot().api.getFile.mockResolvedValueOnce({
+          file_path: 'documents/file_0.wav',
+        });
+
+        const ctx = createMediaCtx({
+          extra: {
+            document: {
+              file_id: 'wav_id',
+              file_name: 'recording.wav',
+              mime_type: 'audio/wav',
+            },
+          },
+        });
+        await triggerMediaMessage('message:document', ctx);
+        await flushPromises();
+
+        expect(opts.onMessage).toHaveBeenCalledWith(
+          'tg:100200300',
+          expect.objectContaining({
+            content:
+              '[Audio: recording.wav: Hello from a forwarded WAV] (/workspace/group/attachments/recording.wav)',
+            message_type: 'voice',
+          }),
+        );
+      } finally {
+        if (origKey === undefined) delete process.env.OPENAI_TTS_API_KEY;
+        else process.env.OPENAI_TTS_API_KEY = origKey;
+      }
+    });
+
+    it.each([
+      ['audio/mpeg', 'song.mp3'],
+      ['audio/ogg', 'voice.ogg'],
+      ['audio/x-m4a', 'note.m4a'],
+    ])('labels %s document as [Audio: ...] placeholder', async (mime, name) => {
+      // No STT key — placeholder stays as [Audio: name] without transcript.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      currentBot().api.getFile.mockResolvedValueOnce({
+        file_path: `documents/file_0.${name.split('.').pop()}`,
+      });
+
+      const ctx = createMediaCtx({
+        extra: {
+          document: { file_id: 'doc_id', file_name: name, mime_type: mime },
+        },
+      });
+      await triggerMediaMessage('message:document', ctx);
+      await flushPromises();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: `[Audio: ${name}] (/workspace/group/attachments/${name})`,
+          message_type: 'voice',
+        }),
+      );
+    });
+
+    it('keeps non-audio documents on the document path (PDF)', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      currentBot().api.getFile.mockResolvedValueOnce({
+        file_path: 'documents/file_0.pdf',
+      });
+
+      const ctx = createMediaCtx({
+        extra: {
+          document: {
+            file_id: 'pdf_id',
+            file_name: 'report.pdf',
+            mime_type: 'application/pdf',
+          },
+        },
+      });
+      await triggerMediaMessage('message:document', ctx);
+      await flushPromises();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content:
+            '[Document: report.pdf] (/workspace/group/attachments/report.pdf)',
+          message_type: 'document',
+        }),
+      );
+    });
+
+    it('falls back to document path when mime is missing', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      currentBot().api.getFile.mockResolvedValueOnce({
+        file_path: 'documents/file_0.bin',
+      });
+
+      const ctx = createMediaCtx({
+        extra: {
+          document: { file_id: 'doc_id', file_name: 'unknown.bin' },
+        },
+      });
+      await triggerMediaMessage('message:document', ctx);
+      await flushPromises();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content:
+            '[Document: unknown.bin] (/workspace/group/attachments/unknown.bin)',
+          message_type: 'document',
+        }),
+      );
+    });
+
     it('stores document with fallback name when filename missing', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
