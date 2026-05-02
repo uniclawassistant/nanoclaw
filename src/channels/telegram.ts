@@ -28,13 +28,20 @@ const REACTION_CACHE_CAP = 5000;
 
 /**
  * Map a Claude model id to its context window size in thousands of tokens, for
- * /status display. Anthropic ships 1M-context variants of Claude 4 with the
- * `[1m]` suffix; everything else is the standard 200K tier. Unknown models
- * (rare jsonl with no model field) fall back to 200K so percentages stay
- * conservative rather than understated.
+ * /status display. Two cases return 1000:
+ *   1. Explicit `[1m]` suffix in the model id.
+ *   2. Bare Opus 4.7 / Sonnet 4.6 family ids — the agent-runner spawns these
+ *      with `[1m]` by default (see container/agent-runner/src/index.ts), but
+ *      Anthropic strips the suffix from response.model, so jsonl never carries
+ *      it. Trusting the configured default keeps /status honest for the way
+ *      we actually run.
+ * Everything else (older variants, Haiku, unknown / missing model field)
+ * falls back to 200K so percentages stay conservative.
  */
 export function contextWindowK(model: string): number {
-  return model.includes('[1m]') ? 1000 : 200;
+  if (model.includes('[1m]')) return 1000;
+  if (/^claude-(opus-4-7|sonnet-4-6)$/.test(model)) return 1000;
+  return 200;
 }
 
 export interface TelegramChannelOpts {
