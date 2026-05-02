@@ -1553,17 +1553,23 @@ describe('TelegramChannel', () => {
 });
 
 describe('contextWindowK', () => {
-  it('returns 1000 for [1m] variants', async () => {
+  it('returns 1000 for explicit [1m] variants', async () => {
     const { contextWindowK } = await import('./telegram.js');
     expect(contextWindowK('claude-opus-4-7[1m]')).toBe(1000);
     expect(contextWindowK('claude-sonnet-4-6[1m]')).toBe(1000);
   });
 
-  it('returns 200 for standard 200K models', async () => {
+  it('returns 1000 for bare Opus 4.7 / Sonnet 4.6 (agent-runner spawns with [1m]; Anthropic strips suffix in response)', async () => {
     const { contextWindowK } = await import('./telegram.js');
-    expect(contextWindowK('claude-opus-4-7')).toBe(200);
-    expect(contextWindowK('claude-sonnet-4-6')).toBe(200);
+    expect(contextWindowK('claude-opus-4-7')).toBe(1000);
+    expect(contextWindowK('claude-sonnet-4-6')).toBe(1000);
+  });
+
+  it('returns 200 for other 200K-only models', async () => {
+    const { contextWindowK } = await import('./telegram.js');
     expect(contextWindowK('claude-haiku-4-5-20251001')).toBe(200);
+    expect(contextWindowK('claude-opus-4-6')).toBe(200);
+    expect(contextWindowK('claude-sonnet-4-5')).toBe(200);
   });
 
   it('falls back to 200 for unknown / missing model', async () => {
