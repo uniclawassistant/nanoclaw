@@ -1551,3 +1551,24 @@ describe('TelegramChannel', () => {
     });
   });
 });
+
+describe('contextWindowK', () => {
+  it('returns 1000 for [1m] variants', async () => {
+    const { contextWindowK } = await import('./telegram.js');
+    expect(contextWindowK('claude-opus-4-7[1m]')).toBe(1000);
+    expect(contextWindowK('claude-sonnet-4-6[1m]')).toBe(1000);
+  });
+
+  it('returns 200 for standard 200K models', async () => {
+    const { contextWindowK } = await import('./telegram.js');
+    expect(contextWindowK('claude-opus-4-7')).toBe(200);
+    expect(contextWindowK('claude-sonnet-4-6')).toBe(200);
+    expect(contextWindowK('claude-haiku-4-5-20251001')).toBe(200);
+  });
+
+  it('falls back to 200 for unknown / missing model', async () => {
+    const { contextWindowK } = await import('./telegram.js');
+    expect(contextWindowK('?')).toBe(200);
+    expect(contextWindowK('')).toBe(200);
+  });
+});
