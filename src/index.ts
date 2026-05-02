@@ -59,6 +59,13 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { autoClearEyeIfSet } from './auto-clear-eye.js';
 import { startIpcWatcher } from './ipc.js';
+import {
+  beginTurn,
+  checkClassA,
+  checkClassB,
+  endTurn,
+  recordOutbound,
+} from './outbound-mismatch-hook.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { editImage, generateImage } from './image-gen.js';
 import { buildVoiceDirective, synthesize } from './tts.js';
@@ -567,57 +574,82 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
-        await sendText(channel, chatJid, text, replyThreadId);
-        outputSentToUser = true;
-      }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
-
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
-
-    if (result.status === 'error') {
-      hadError = true;
-    }
+  // FED-9: per-turn state for outbound-mismatch detection (recap leak / silent
+  // deadlock). processGroupMessages only runs when there are missed user
+  // messages, so isUserFacing is always true on this path. Scheduled-task
+  // turns use a different runAgent call (task-scheduler.ts) and skip the hook.
+  const turnState = beginTurn(chatJid, {
+    groupName: group.name,
+    isUserFacing: true,
   });
+  let rawAccumulated = '';
 
-  await channel.setTyping?.(chatJid, false);
-  if (idleTimer) clearTimeout(idleTimer);
+  try {
+    const output = await runAgent(group, prompt, chatJid, async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        rawAccumulated += raw;
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
+        if (text) {
+          // FED-9 Class A: a prior outbound (MCP send_message etc.) already
+          // ran this turn — this trailing plain text is a recap leak.
+          checkClassA(turnState, text);
+          await sendText(channel, chatJid, text, replyThreadId);
+          turnState.outboundCount++;
+          outputSentToUser = true;
+        }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
+      }
 
-  if (output === 'error' || hadError) {
-    // If we already sent output to the user, don't roll back the cursor —
-    // the user got their response and re-processing would send duplicates.
-    if (outputSentToUser) {
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+      }
+
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    });
+
+    await channel.setTyping?.(chatJid, false);
+    if (idleTimer) clearTimeout(idleTimer);
+
+    // FED-9 Class B: user-facing turn that produced no outbound. Skip on error
+    // — error path already logs separately and would create noisy duplicates.
+    checkClassB(turnState, rawAccumulated, {
+      hadError: hadError || output === 'error',
+    });
+
+    if (output === 'error' || hadError) {
+      // If we already sent output to the user, don't roll back the cursor —
+      // the user got their response and re-processing would send duplicates.
+      if (outputSentToUser) {
+        logger.warn(
+          { group: group.name },
+          'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
+        );
+        return true;
+      }
+      // Roll back cursor so retries can re-process these messages
+      lastAgentTimestamp[chatJid] = previousCursor;
+      saveState();
       logger.warn(
         { group: group.name },
-        'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
+        'Agent error, rolled back message cursor for retry',
       );
-      return true;
+      return false;
     }
-    // Roll back cursor so retries can re-process these messages
-    lastAgentTimestamp[chatJid] = previousCursor;
-    saveState();
-    logger.warn(
-      { group: group.name },
-      'Agent error, rolled back message cursor for retry',
-    );
-    return false;
-  }
 
-  return true;
+    return true;
+  } finally {
+    endTurn(chatJid);
+  }
 }
 
 async function runAgent(
@@ -1006,11 +1038,14 @@ async function main(): Promise<void> {
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => {
+    sendMessage: async (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       const threadId = getLastIncomingThreadId(jid);
-      return sendText(channel, jid, text, threadId);
+      await sendText(channel, jid, text, threadId);
+      // FED-9: record outbound for the active turn so Class A leak detection
+      // and Class B silent-finish detection see this delivery.
+      recordOutbound(jid);
     },
     setReaction: async (jid, messageId, emoji) => {
       const channel = findChannel(channels, jid);
@@ -1074,7 +1109,16 @@ async function main(): Promise<void> {
       if (!channel || !channel.sendDocument) {
         return { ok: false, error: 'send_file not supported on this channel' };
       }
-      return channel.sendDocument(jid, hostPath, caption, threadId, filename);
+      const result = await channel.sendDocument(
+        jid,
+        hostPath,
+        caption,
+        threadId,
+        filename,
+      );
+      // FED-9: count successful document delivery against the active turn.
+      if (result.ok) recordOutbound(jid);
+      return result;
     },
     recordOutgoingDocument: (jid, messageId, args) => {
       recordOutgoing(jid, messageId, {
@@ -1090,7 +1134,7 @@ async function main(): Promise<void> {
       if (!channel) return { ok: false, error: 'no channel for jid' };
       const folder = registeredGroups[jid]?.folder;
       if (!folder) return { ok: false, error: 'group not registered' };
-      return generateAndDeliverImage(
+      const result = await generateAndDeliverImage(
         channel,
         jid,
         folder,
@@ -1099,6 +1143,9 @@ async function main(): Promise<void> {
         caption,
         threadId,
       );
+      // FED-9: count successful image delivery against the active turn.
+      if (result.ok) recordOutbound(jid);
+      return result;
     },
     editImage: async (
       jid,
@@ -1113,7 +1160,7 @@ async function main(): Promise<void> {
       if (!channel) return { ok: false, error: 'no channel for jid' };
       const folder = registeredGroups[jid]?.folder;
       if (!folder) return { ok: false, error: 'group not registered' };
-      return editAndDeliverImage(
+      const result = await editAndDeliverImage(
         channel,
         jid,
         folder,
@@ -1124,13 +1171,16 @@ async function main(): Promise<void> {
         caption,
         threadId,
       );
+      // FED-9: count successful image edit delivery against the active turn.
+      if (result.ok) recordOutbound(jid);
+      return result;
     },
     sendImage: async (jid, hostPath, caption, threadId) => {
       const channel = findChannel(channels, jid);
       if (!channel) return { ok: false, error: 'no channel for jid' };
       const folder = registeredGroups[jid]?.folder;
       if (!folder) return { ok: false, error: 'group not registered' };
-      return sendImageFromPath(
+      const result = await sendImageFromPath(
         channel,
         jid,
         folder,
@@ -1138,11 +1188,23 @@ async function main(): Promise<void> {
         caption,
         threadId,
       );
+      // FED-9: count successful image delivery against the active turn.
+      if (result.ok) recordOutbound(jid);
+      return result;
     },
     sendVoice: async (jid, text, directive, threadId) => {
       const channel = findChannel(channels, jid);
       if (!channel) return { ok: false, error: 'no channel for jid' };
-      return synthesizeAndSendVoice(channel, jid, text, directive, threadId);
+      const result = await synthesizeAndSendVoice(
+        channel,
+        jid,
+        text,
+        directive,
+        threadId,
+      );
+      // FED-9: count successful voice delivery against the active turn.
+      if (result.ok) recordOutbound(jid);
+      return result;
     },
   });
   startSessionCleanup();
