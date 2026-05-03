@@ -10,20 +10,26 @@ You are a host-side operator for NanoClaw-Unic. An agent inside the container tr
    ```
    If pull fails (merge conflict, etc.) — abort and write failure result.
 
-3. **Build container:**
+3. **Build host TypeScript** (the `node dist/index.js` process restarted in step 5 reads `dist/`, not `src/` — without this step host-side changes silently never run):
+   ```bash
+   cd ~/nanoclaw-unic && npm run build 2>&1 | tail -20
+   ```
+   If build fails — read the error, try to fix. If unfixable — `git revert HEAD --no-edit && npm run build`.
+
+4. **Build container:**
    ```bash
    cd ~/nanoclaw-unic && ./container/build.sh 2>&1 | tail -30
    ```
-   If build fails — read the error, try to fix. If unfixable — `git revert HEAD --no-edit && ./container/build.sh`.
+   If build fails — read the error, try to fix. If unfixable — `git revert HEAD --no-edit && npm run build && ./container/build.sh`.
 
-4. **Clear session cache and restart:**
+5. **Clear session cache and restart:**
    ```bash
    rm -rf ~/nanoclaw-unic/data/sessions/*/agent-runner-src/
    rm -f ~/nanoclaw-unic/data/sessions/*/.claude/sessions/*.json
    launchctl kickstart -k gui/$(id -u)/com.nanoclaw-unic
    ```
 
-5. **Verify (wait 5 seconds, then check):**
+6. **Verify (wait 5 seconds, then check):**
    ```bash
    sleep 5 && tail -15 ~/nanoclaw-unic/logs/nanoclaw.log
    ```
@@ -32,12 +38,12 @@ You are a host-side operator for NanoClaw-Unic. An agent inside the container tr
    tail -30 ~/nanoclaw-unic/logs/nanoclaw.error.log
    ```
 
-6. **If service didn't come up:**
+7. **If service didn't come up:**
    - Read error logs, diagnose the issue
-   - If it's a code issue from the PR: `git revert HEAD --no-edit`, rebuild and restart
+   - If it's a code issue from the PR: `git revert HEAD --no-edit`, rebuild (host + container) and restart
    - If it's something else: document in result file
 
-7. **Write result file:**
+8. **Write result file:**
    ```bash
    cat > ~/nanoclaw-unic/groups/unic-shared-memory/rebuild-result.json << 'RESULT'
    {
@@ -50,7 +56,7 @@ You are a host-side operator for NanoClaw-Unic. An agent inside the container tr
    RESULT
    ```
 
-8. **If rebuild failed — notify Fedor via Telegram:**
+9. **If rebuild failed — notify Fedor via Telegram:**
    ```bash
    source ~/nanoclaw-unic/.env
    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
