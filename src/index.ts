@@ -44,10 +44,12 @@ import {
   getLastIncomingThreadId,
   getLastUserMessageId,
   getMessageById,
+  getMessagesAroundTimestamp,
   getMessagesSince,
   getNewMessages,
   getRouterState,
   initDatabase,
+  searchMessages,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -1103,6 +1105,9 @@ async function main(): Promise<void> {
       }
     },
     getMessage: (messageId, jid) => getMessageById(messageId, jid),
+    searchMessages: (params) => searchMessages(params),
+    getMessagesAroundTimestamp: (chatJid, timestamp, messageId, n) =>
+      getMessagesAroundTimestamp(chatJid, timestamp, messageId, n),
     getLastIncomingThreadId: (jid) => getLastIncomingThreadId(jid),
     sendDocument: async (jid, hostPath, caption, filename, threadId) => {
       const channel = findChannel(channels, jid);

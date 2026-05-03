@@ -620,6 +620,147 @@ Don't spam calls — query only when you actually need the referenced message's 
   },
 );
 
+const SEARCH_MESSAGES_TIMEOUT_MS = 5_000;
+const SEARCH_MESSAGES_POLL_INTERVAL_MS = 100;
+
+server.tool(
+  'search_messages',
+  `Search stored chat history. Backed by an SQLite FTS5 index over message content, sender names, and (optionally) the prompts of images you generated.
+
+WHEN TO USE:
+• You wrote a memory/diary entry but want to fact-check it against the original message wording or timestamp.
+• You need to recover an exact quote, attachment, or generation prompt the user referenced.
+• Pair with \`get_message\` to dig deeper, or with \`forward_message\` (when available) to repost a found message.
+
+QUERY MODES:
+• Substring (default, \`is_regex: false\`): case-insensitive token-prefix match. "Cross" matches messages containing "Crosstalk". Multi-word queries match adjacent tokens.
+• Regex (\`is_regex: true\`): JavaScript-style regex applied case-insensitively. Invalid regex returns isError. No FTS5 — slower on large history but flexible.
+
+FILTERS:
+• \`jid\` — single string or array of chat JIDs. Defaults to all chats you can read. Non-main groups can only search their own chat.
+• \`since\` / \`until\` — ISO 8601 inclusive bounds.
+• \`sender\` — display name (case-insensitive exact match).
+• \`message_type\` — restrict to one of text/photo/voice/document/video/sticker, or "all" (default).
+• \`include_generation\` — also search the prompts of images you produced. Default true.
+• \`context\` — for each hit also return up to N neighboring messages before and after in the same chat (default 0).
+• \`limit\` — max hits returned (default 20, max 100). Use \`total_matches\` + \`truncated\` to see if you should re-query with tighter filters.
+
+RETURN SHAPE (success):
+{
+  results: [
+    { message_id, chat_jid, timestamp, sender, direction: "in"|"out", type, snippet, matched_field: "content"|"generation_prompt"|"sender_name", file_path?, generation?, context_messages?: [{ message_id, timestamp, sender, direction, snippet }] }
+  ],
+  total_matches: number,
+  truncated: boolean
+}
+
+\`snippet\` highlights the matched span with markdown **bold**. \`matched_field\` tells you whether the hit was on the message body, an image's generation prompt, or the sender's display name.`,
+  {
+    query: z
+      .string()
+      .min(1)
+      .describe('Search text. Treated as substring (default) or regex (when is_regex=true).'),
+    is_regex: z
+      .boolean()
+      .optional()
+      .describe('When true, query is a JavaScript regex applied case-insensitively. Default false.'),
+    jid: z
+      .union([z.string(), z.array(z.string())])
+      .optional()
+      .describe('Restrict to one or more chat JIDs. Defaults to chats the caller can read.'),
+    since: z
+      .string()
+      .optional()
+      .describe('ISO 8601 lower bound on message timestamp (inclusive).'),
+    until: z
+      .string()
+      .optional()
+      .describe('ISO 8601 upper bound on message timestamp (inclusive).'),
+    sender: z
+      .string()
+      .optional()
+      .describe('Filter by sender display name (case-insensitive exact match).'),
+    message_type: z
+      .enum(['text', 'photo', 'voice', 'document', 'video', 'sticker', 'all'])
+      .optional()
+      .describe('Restrict to a single message type. Default "all".'),
+    include_generation: z
+      .boolean()
+      .optional()
+      .describe('Also search image generation prompts. Default true.'),
+    context: z
+      .number()
+      .int()
+      .min(0)
+      .max(20)
+      .optional()
+      .describe('For each hit also return up to N neighboring messages before and after. Default 0.'),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe('Max hits returned. Default 20, max 100.'),
+  },
+  async (args) => {
+    const requestId = crypto.randomUUID();
+    const data: Record<string, unknown> = {
+      type: 'search_messages',
+      requestId,
+      groupFolder,
+      query: args.query,
+      is_regex: args.is_regex ?? false,
+      include_generation: args.include_generation ?? true,
+      context: args.context ?? 0,
+      limit: args.limit ?? 20,
+      timestamp: new Date().toISOString(),
+    };
+    if (args.jid !== undefined) data.jid = args.jid;
+    if (args.since !== undefined) data.since = args.since;
+    if (args.until !== undefined) data.until = args.until;
+    if (args.sender !== undefined) data.sender = args.sender;
+    if (args.message_type !== undefined) data.message_type = args.message_type;
+
+    if (!isMain && args.jid === undefined) {
+      data.jid = chatJid;
+    }
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    const responsePath = path.join(RESPONSES_DIR, `${requestId}.json`);
+    const deadline = Date.now() + SEARCH_MESSAGES_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(responsePath)) {
+        try {
+          const resp = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+          fs.unlinkSync(responsePath);
+          if (!resp.success) {
+            return toolError(
+              `search_messages failed: ${resp.error ?? 'unknown error'}`,
+            );
+          }
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify(resp.data, null, 2),
+              },
+            ],
+          };
+        } catch (err) {
+          return toolError(
+            `Failed to read search_messages response: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      await sleep(SEARCH_MESSAGES_POLL_INTERVAL_MS);
+    }
+
+    return toolError('search_messages request timed out after 5s.');
+  },
+);
+
 server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.

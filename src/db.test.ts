@@ -10,9 +10,11 @@ import {
   getLastIncomingThreadId,
   getLastUserMessageId,
   getMessageById,
+  getMessagesAroundTimestamp,
   getMessagesSince,
   getNewMessages,
   getTaskById,
+  searchMessages,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
@@ -1034,5 +1036,280 @@ describe('thread_id persistence and getLastIncomingThreadId', () => {
       is_from_me: false,
     });
     expect(getLastIncomingThreadId('tg:111')).toBeUndefined();
+  });
+});
+
+// --- searchMessages (FED-11 search_messages MCP tool) ---
+
+describe('searchMessages', () => {
+  function seedMain() {
+    storeChatMetadata('tg:main', '2026-05-01T00:00:00.000Z');
+    storeMessage({
+      id: 'm1',
+      chat_jid: 'tg:main',
+      sender: '1',
+      sender_name: 'Fedor',
+      content: 'Crosstalk is annoying today',
+      timestamp: '2026-05-01T10:00:00.000Z',
+      is_from_me: false,
+    });
+    storeMessage({
+      id: 'm2',
+      chat_jid: 'tg:main',
+      sender: '1',
+      sender_name: 'Fedor',
+      content: 'хорошо погода сегодня',
+      timestamp: '2026-05-01T11:00:00.000Z',
+      is_from_me: false,
+    });
+    storeMessage({
+      id: 'm3',
+      chat_jid: 'tg:main',
+      sender: '2',
+      sender_name: 'Bob',
+      content: 'see FED-11 ticket then FED-12',
+      timestamp: '2026-05-01T12:00:00.000Z',
+      is_from_me: false,
+    });
+    storeOutgoingMessage({
+      id: 'm4',
+      chat_jid: 'tg:main',
+      sender: 'Unic',
+      sender_name: 'Unic',
+      content: '[Photo] (attachments/img.jpg)',
+      timestamp: '2026-05-01T13:00:00.000Z',
+      message_type: 'photo',
+      file_path: 'attachments/img.jpg',
+      generation: {
+        prompt: '8-bit pixel unicorn on the moon',
+        original_png_path: 'attachments/img.png',
+      },
+    });
+  }
+
+  it('returns substring hits with bolded snippet and matched_field=content', () => {
+    seedMain();
+    const result = searchMessages({ query: 'Crosstalk', jids: ['tg:main'] });
+    expect(result.total_matches).toBe(1);
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0].message_id).toBe('m1');
+    expect(result.hits[0].matched_field).toBe('content');
+    expect(result.hits[0].snippet).toMatch(/\*\*Crosstalk\*\*/);
+    expect(result.hits[0].direction).toBe('in');
+  });
+
+  it('matches russian/cyrillic content', () => {
+    seedMain();
+    const result = searchMessages({ query: 'хорошо', jids: ['tg:main'] });
+    expect(result.total_matches).toBe(1);
+    expect(result.hits[0].message_id).toBe('m2');
+  });
+
+  it('matches generation prompts when include_generation=true (default)', () => {
+    seedMain();
+    const result = searchMessages({ query: '8-bit', jids: ['tg:main'] });
+    expect(result.hits.some((h) => h.message_id === 'm4')).toBe(true);
+    const photoHit = result.hits.find((h) => h.message_id === 'm4')!;
+    expect(photoHit.matched_field).toBe('generation_prompt');
+    expect(photoHit.generation?.prompt).toContain('8-bit');
+    expect(photoHit.type).toBe('photo');
+  });
+
+  it('skips generation prompts when include_generation=false', () => {
+    seedMain();
+    const result = searchMessages({
+      query: '8-bit',
+      jids: ['tg:main'],
+      includeGeneration: false,
+    });
+    expect(result.hits.some((h) => h.message_id === 'm4')).toBe(false);
+  });
+
+  it('regex mode returns all matches and reports total_matches', () => {
+    seedMain();
+    storeMessage({
+      id: 'm5',
+      chat_jid: 'tg:main',
+      sender: '2',
+      sender_name: 'Bob',
+      content: 'unrelated FED-99 cross-ref',
+      timestamp: '2026-05-01T14:00:00.000Z',
+      is_from_me: false,
+    });
+    const result = searchMessages({
+      query: 'FED-\\d+',
+      isRegex: true,
+      jids: ['tg:main'],
+      limit: 1,
+    });
+    expect(result.total_matches).toBe(2);
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0].snippet).toMatch(/\*\*FED-\d+\*\*/);
+  });
+
+  it('rejects invalid regex with a clear error', () => {
+    seedMain();
+    expect(() =>
+      searchMessages({
+        query: '[unterminated',
+        isRegex: true,
+        jids: ['tg:main'],
+      }),
+    ).toThrow(/invalid regex/);
+  });
+
+  it('filters by sender (case-insensitive)', () => {
+    seedMain();
+    // "ticket" appears only in Bob's m3 content, not in any sender_name.
+    const fedor = searchMessages({
+      query: 'ticket',
+      sender: 'fedor',
+      jids: ['tg:main'],
+    });
+    expect(fedor.total_matches).toBe(0);
+    const bob = searchMessages({
+      query: 'ticket',
+      sender: 'bob',
+      jids: ['tg:main'],
+    });
+    expect(bob.total_matches).toBe(1);
+    expect(bob.hits[0].message_id).toBe('m3');
+  });
+
+  it('filters by message_type', () => {
+    seedMain();
+    const result = searchMessages({
+      query: 'unicorn',
+      messageTypes: ['photo'],
+      jids: ['tg:main'],
+    });
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0].message_id).toBe('m4');
+
+    const noText = searchMessages({
+      query: 'unicorn',
+      messageTypes: ['text'],
+      jids: ['tg:main'],
+    });
+    expect(noText.total_matches).toBe(0);
+  });
+
+  it('honors since/until bounds (inclusive)', () => {
+    seedMain();
+    const result = searchMessages({
+      query: 'FED',
+      since: '2026-05-01T11:30:00.000Z',
+      until: '2026-05-01T12:30:00.000Z',
+      jids: ['tg:main'],
+    });
+    expect(result.total_matches).toBe(1);
+    expect(result.hits[0].message_id).toBe('m3');
+  });
+
+  it('respects jids filter — does not leak across chats', () => {
+    seedMain();
+    storeChatMetadata('tg:other', '2026-05-01T00:00:00.000Z');
+    storeMessage({
+      id: 'x1',
+      chat_jid: 'tg:other',
+      sender: '9',
+      sender_name: 'Carol',
+      content: 'Crosstalk in another chat',
+      timestamp: '2026-05-01T15:00:00.000Z',
+      is_from_me: false,
+    });
+    const result = searchMessages({ query: 'Crosstalk', jids: ['tg:main'] });
+    expect(result.hits.every((h) => h.chat_jid === 'tg:main')).toBe(true);
+  });
+
+  it('returns total_matches and obeys limit cap', () => {
+    seedMain();
+    for (let i = 0; i < 25; i++) {
+      storeMessage({
+        id: `bulk-${i}`,
+        chat_jid: 'tg:main',
+        sender: '1',
+        sender_name: 'Fedor',
+        content: `Crosstalk burst ${i}`,
+        timestamp: `2026-05-02T10:${String(i).padStart(2, '0')}:00.000Z`,
+        is_from_me: false,
+      });
+    }
+    const result = searchMessages({
+      query: 'Crosstalk',
+      jids: ['tg:main'],
+      limit: 5,
+    });
+    expect(result.total_matches).toBeGreaterThan(20);
+    expect(result.hits).toHaveLength(5);
+  });
+
+  it('returns empty result for query made entirely of punctuation', () => {
+    seedMain();
+    const result = searchMessages({ query: '!!!', jids: ['tg:main'] });
+    expect(result.total_matches).toBe(0);
+    expect(result.hits).toHaveLength(0);
+  });
+
+  it('keeps FTS index in sync after UPDATE on messages', () => {
+    seedMain();
+    // INSERT OR REPLACE goes through DELETE + INSERT triggers; verify
+    // the FTS index reflects the new content.
+    storeMessage({
+      id: 'm1',
+      chat_jid: 'tg:main',
+      sender: '1',
+      sender_name: 'Fedor',
+      content: 'Replaced content with NewKeyword',
+      timestamp: '2026-05-01T10:00:00.000Z',
+      is_from_me: false,
+    });
+    const stale = searchMessages({ query: 'Crosstalk', jids: ['tg:main'] });
+    expect(stale.hits.find((h) => h.message_id === 'm1')).toBeUndefined();
+    const fresh = searchMessages({ query: 'NewKeyword', jids: ['tg:main'] });
+    expect(fresh.hits.some((h) => h.message_id === 'm1')).toBe(true);
+  });
+});
+
+describe('getMessagesAroundTimestamp', () => {
+  it('returns N before and N after, excluding the anchor', () => {
+    storeChatMetadata('tg:main', '2026-05-01T00:00:00.000Z');
+    for (let i = 0; i < 6; i++) {
+      storeMessage({
+        id: `n${i}`,
+        chat_jid: 'tg:main',
+        sender: '1',
+        sender_name: 'Fedor',
+        content: `msg ${i}`,
+        timestamp: `2026-05-01T10:0${i}:00.000Z`,
+        is_from_me: false,
+      });
+    }
+    const ctx = getMessagesAroundTimestamp(
+      'tg:main',
+      '2026-05-01T10:03:00.000Z',
+      'n3',
+      2,
+    );
+    const ids = ctx.map((m) => m.message_id);
+    expect(ids).toEqual(['n1', 'n2', 'n4', 'n5']);
+    expect(ctx[0].snippet).toBe('msg 1');
+    expect(ctx[0].direction).toBe('in');
+  });
+
+  it('returns empty array when n=0', () => {
+    storeChatMetadata('tg:main', '2026-05-01T00:00:00.000Z');
+    storeMessage({
+      id: 'a',
+      chat_jid: 'tg:main',
+      sender: '1',
+      sender_name: 'Fedor',
+      content: 'hi',
+      timestamp: '2026-05-01T10:00:00.000Z',
+      is_from_me: false,
+    });
+    expect(
+      getMessagesAroundTimestamp('tg:main', '2026-05-01T10:00:00.000Z', 'a', 0),
+    ).toEqual([]);
   });
 });
