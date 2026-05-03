@@ -130,6 +130,18 @@ export interface Channel {
     threadId?: string,
     filename?: string,
   ): Promise<{ ok: true; message_id: string } | { ok: false; error: string }>;
+  // Optional: forward or copy an existing message into another chat on this
+  // channel. `mode` distinguishes Telegram's forwardMessage (keeps the
+  // "Forwarded from" tag) from copyMessage (sends as a new message from us,
+  // optionally with a different caption).
+  forwardMessage?(args: {
+    toJid: string;
+    fromJid: string;
+    messageId: string;
+    mode: 'forward' | 'copy';
+    captionOverride?: string;
+    threadId?: string;
+  }): Promise<{ ok: true; message_id: string } | { ok: false; error: string }>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: set a reaction on a message. `emoji: null` removes the reaction.
