@@ -1256,7 +1256,6 @@ async function main(): Promise<void> {
         messageType: persistedType,
         filePath: source.file_path,
       });
-      // FED-9: count successful forward delivery against the active turn.
       recordOutbound(toJid);
       return result;
     },
