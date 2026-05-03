@@ -1211,6 +1211,55 @@ async function main(): Promise<void> {
       if (result.ok) recordOutbound(jid);
       return result;
     },
+    forwardMessage: async ({
+      toJid,
+      fromJid,
+      messageId,
+      mode,
+      captionOverride,
+      threadId,
+      source,
+    }) => {
+      const targetChannel = findChannel(channels, toJid);
+      if (!targetChannel || !targetChannel.forwardMessage) {
+        return { ok: false, error: 'channel does not support forward' };
+      }
+      const sourceChannel = findChannel(channels, fromJid);
+      if (!sourceChannel || sourceChannel.name !== targetChannel.name) {
+        return {
+          ok: false,
+          error: 'cross-platform forward not supported in MVP',
+        };
+      }
+      const result = await targetChannel.forwardMessage({
+        toJid,
+        fromJid,
+        messageId,
+        mode,
+        captionOverride,
+        threadId,
+      });
+      if (!result.ok) return result;
+      const persistedType: 'text' | 'photo' | 'document' | 'voice' | 'video' =
+        source.type === 'photo' ||
+        source.type === 'document' ||
+        source.type === 'voice' ||
+        source.type === 'video'
+          ? source.type
+          : 'text';
+      const persistedContent =
+        mode === 'copy' && captionOverride !== undefined
+          ? captionOverride
+          : (source.text ?? '');
+      recordOutgoing(toJid, result.message_id, {
+        content: persistedContent,
+        messageType: persistedType,
+        filePath: source.file_path,
+      });
+      // FED-9: count successful forward delivery against the active turn.
+      recordOutbound(toJid);
+      return result;
+    },
   });
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);

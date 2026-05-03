@@ -939,6 +939,64 @@ export class TelegramChannel implements Channel {
     return { ok: false, error: lastError ?? 'unknown error' };
   }
 
+  async forwardMessage(args: {
+    toJid: string;
+    fromJid: string;
+    messageId: string;
+    mode: 'forward' | 'copy';
+    captionOverride?: string;
+    threadId?: string;
+  }): Promise<{ ok: true; message_id: string } | { ok: false; error: string }> {
+    if (!this.bot) return { ok: false, error: 'Telegram bot not initialized' };
+    const toChatId = args.toJid.replace(/^tg:/, '');
+    const fromChatId = args.fromJid.replace(/^tg:/, '');
+    const numericMessageId = parseInt(args.messageId, 10);
+    if (Number.isNaN(numericMessageId)) {
+      return { ok: false, error: `invalid message_id: "${args.messageId}"` };
+    }
+
+    const baseOpts: Record<string, unknown> = {};
+    if (args.threadId) {
+      baseOpts.message_thread_id = parseInt(args.threadId, 10);
+    }
+
+    try {
+      if (args.mode === 'forward') {
+        const sent = await this.bot.api.forwardMessage(
+          toChatId,
+          fromChatId,
+          numericMessageId,
+          baseOpts,
+        );
+        return { ok: true, message_id: String(sent.message_id) };
+      }
+      const copyOpts = { ...baseOpts };
+      if (typeof args.captionOverride === 'string') {
+        (copyOpts as { caption?: string }).caption = args.captionOverride;
+      }
+      const sent = await this.bot.api.copyMessage(
+        toChatId,
+        fromChatId,
+        numericMessageId,
+        copyOpts,
+      );
+      return { ok: true, message_id: String(sent.message_id) };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn(
+        {
+          toJid: args.toJid,
+          fromJid: args.fromJid,
+          messageId: args.messageId,
+          mode: args.mode,
+          err,
+        },
+        'Telegram forward/copy failed',
+      );
+      return { ok: false, error: message };
+    }
+  }
+
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
     if (!this.bot || !isTyping) return;
     try {

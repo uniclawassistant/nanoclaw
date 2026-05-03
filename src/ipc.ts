@@ -143,6 +143,20 @@ export interface IpcDeps {
     },
     threadId: string | undefined,
   ) => Promise<{ ok: true; message_id: string } | { ok: false; error: string }>;
+  // Forwards or copies an existing message into the target chat. `source` is
+  // the already-loaded MessageRecord for `(messageId, fromJid)` — passed in so
+  // the host can reuse it for outbound persistence without a second DB read.
+  forwardMessage?: (args: {
+    toJid: string;
+    fromJid: string;
+    messageId: string;
+    mode: 'forward' | 'copy';
+    captionOverride: string | undefined;
+    threadId: string | undefined;
+    source: MessageRecord;
+  }) => Promise<
+    { ok: true; message_id: string } | { ok: false; error: string }
+  >;
 }
 
 const RESPONSE_TTL_MS = 60_000;
@@ -346,6 +360,164 @@ async function processSearchMessagesIpc(
       truncated: result.total_matches > enriched.length,
     },
   });
+}
+
+interface ForwardMessageIpc {
+  type: 'forward_message';
+  requestId: string;
+  toJid: string;
+  sourceJid: string;
+  message_id: string;
+  mode?: 'forward' | 'copy';
+  caption_override?: string;
+}
+
+/**
+ * Authorize the source group for `forward_message`, validate the source
+ * message exists, then dispatch to deps.forwardMessage which handles channel
+ * routing, cross-platform checks, and outbound persistence. Mirrors the
+ * get_message/search_messages auth model: main can forward across any
+ * registered chat; non-main is locked to its own chat.
+ */
+async function processForwardMessageIpc(
+  data: ForwardMessageIpc,
+  sourceGroup: string,
+  isMain: boolean,
+  registeredGroups: Record<string, RegisteredGroup>,
+  responsesDir: string,
+  deps: IpcDeps,
+): Promise<void> {
+  if (!deps.forwardMessage) {
+    writeIpcResponse(responsesDir, data.requestId, {
+      success: false,
+      error: 'forward_message not supported on this host',
+    });
+    return;
+  }
+
+  const ownJids = new Set(
+    Object.entries(registeredGroups)
+      .filter(([, g]) => g.folder === sourceGroup)
+      .map(([jid]) => jid),
+  );
+
+  const toGroup = registeredGroups[data.toJid];
+  const sourceGroupEntry = registeredGroups[data.sourceJid];
+  const targetAuthorized =
+    isMain || (toGroup !== undefined && toGroup.folder === sourceGroup);
+  const sourceAuthorized =
+    isMain ||
+    (sourceGroupEntry !== undefined &&
+      sourceGroupEntry.folder === sourceGroup) ||
+    ownJids.has(data.sourceJid);
+
+  if (!targetAuthorized || !sourceAuthorized) {
+    logger.warn(
+      {
+        toJid: data.toJid,
+        sourceJid: data.sourceJid,
+        sourceGroup,
+      },
+      'Unauthorized IPC forward_message attempt blocked',
+    );
+    writeIpcResponse(responsesDir, data.requestId, {
+      success: false,
+      error: isMain
+        ? 'unauthorized'
+        : 'authorization: cannot forward outside own chat',
+    });
+    return;
+  }
+
+  const sourceRecord = deps.getMessage(data.message_id, data.sourceJid);
+  if (!sourceRecord) {
+    writeIpcResponse(responsesDir, data.requestId, {
+      success: false,
+      error: 'source message not found',
+    });
+    return;
+  }
+  if (sourceRecord.type === 'system') {
+    writeIpcResponse(responsesDir, data.requestId, {
+      success: false,
+      error: 'cannot forward system messages',
+    });
+    return;
+  }
+
+  const mode: 'forward' | 'copy' = data.mode === 'copy' ? 'copy' : 'forward';
+  const captionOverride =
+    typeof data.caption_override === 'string' && mode === 'copy'
+      ? data.caption_override
+      : undefined;
+  const threadId = deps.getLastIncomingThreadId?.(data.toJid);
+
+  try {
+    const result = await deps.forwardMessage({
+      toJid: data.toJid,
+      fromJid: data.sourceJid,
+      messageId: data.message_id,
+      mode,
+      captionOverride,
+      threadId,
+      source: sourceRecord,
+    });
+    if (result.ok) {
+      logger.info(
+        {
+          toJid: data.toJid,
+          sourceJid: data.sourceJid,
+          sourceGroup,
+          mode,
+          messageId: result.message_id,
+        },
+        'IPC forward_message delivered',
+      );
+      writeIpcResponse(responsesDir, data.requestId, {
+        success: true,
+        data: {
+          ok: true,
+          new_message_id: result.message_id,
+          source: {
+            message_id: sourceRecord.message_id,
+            source_jid: sourceRecord.chat_jid,
+            sender: sourceRecord.sender,
+            timestamp: sourceRecord.timestamp,
+          },
+        },
+      });
+    } else {
+      logger.warn(
+        {
+          toJid: data.toJid,
+          sourceJid: data.sourceJid,
+          sourceGroup,
+          mode,
+          error: result.error,
+        },
+        'IPC forward_message failed',
+      );
+      writeIpcResponse(responsesDir, data.requestId, {
+        success: false,
+        error: result.error,
+      });
+    }
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger.warn(
+      {
+        toJid: data.toJid,
+        sourceJid: data.sourceJid,
+        sourceGroup,
+        err: errMsg,
+      },
+      'IPC forward_message threw',
+    );
+    writeIpcResponse(responsesDir, data.requestId, {
+      success: false,
+      error: errMsg,
+    });
+  }
 }
 
 type MediaToolIpc = {
@@ -1010,6 +1182,26 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     }
                   }
                 }
+              } else if (
+                data.type === 'forward_message' &&
+                typeof data.requestId === 'string' &&
+                typeof data.toJid === 'string' &&
+                typeof data.sourceJid === 'string' &&
+                typeof data.message_id === 'string'
+              ) {
+                const responsesDir = path.join(
+                  ipcBaseDir,
+                  sourceGroup,
+                  'responses',
+                );
+                await processForwardMessageIpc(
+                  data as ForwardMessageIpc,
+                  sourceGroup,
+                  isMain,
+                  registeredGroups,
+                  responsesDir,
+                  deps,
+                );
               } else if (
                 (data.type === 'generate_image' ||
                   data.type === 'edit_image' ||

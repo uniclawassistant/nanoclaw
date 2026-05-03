@@ -630,7 +630,7 @@ server.tool(
 WHEN TO USE:
 • You wrote a memory/diary entry but want to fact-check it against the original message wording or timestamp.
 • You need to recover an exact quote, attachment, or generation prompt the user referenced.
-• Pair with \`get_message\` to dig deeper, or with \`forward_message\` (when available) to repost a found message.
+• Pair with \`get_message\` to dig deeper, or with \`forward_message\` to repost a found message into the current chat.
 
 QUERY MODES:
 • Substring (default, \`is_regex: false\`): case-insensitive token-prefix match. "Cross" matches messages containing "Crosstalk". Multi-word queries match adjacent tokens.
@@ -758,6 +758,121 @@ RETURN SHAPE (success):
     }
 
     return toolError('search_messages request timed out after 5s.');
+  },
+);
+
+const FORWARD_MESSAGE_TIMEOUT_MS = 30_000;
+const FORWARD_MESSAGE_POLL_INTERVAL_MS = 100;
+
+server.tool(
+  'forward_message',
+  `Repost a stored message into the current chat using Telegram's native forward/copy. Pairs with \`search_messages\` and \`get_message\`: find the message id, then surface the original to the user with native preview, attachment bytes, and authorship intact.
+
+WHEN TO USE:
+• The user asks "show me that message", "repost X from earlier", or wants to re-see an old screenshot/voice/document with native preview.
+• You found a relevant past message via \`search_messages\` and want the user to see the original instead of a snippet.
+
+MODES:
+• \`forward\` (default): Telegram \`forwardMessage\`. Keeps the "Forwarded from <sender>" tag and original timestamp. Caption / content cannot be changed.
+• \`copy\`: Telegram \`copyMessage\`. Sends as a new message from the bot — no forwarded-from tag. \`caption_override\` is honored on media in this mode.
+
+JID:
+• \`source_jid\` defaults to the current chat. Pass it only when forwarding from another chat.
+• Non-main groups can only forward messages from their own chat. The host blocks cross-chat attempts.
+
+LIMITS / FAILURES (returned as { ok: false, error }):
+• "source message not found" — the (message_id, source_jid) pair has no row in the message store.
+• "channel does not support forward" — the current chat is not Telegram (MVP).
+• "cross-platform forward not supported in MVP" — source_jid is on a different platform than the current chat.
+• "authorization: cannot forward outside own chat" — a non-main group requested a source_jid it does not own.
+• Telegram API errors (e.g. message too old, deleted, or restricted) are surfaced verbatim.
+
+RETURN (JSON in tool output): { ok: true, new_message_id, source: { message_id, source_jid, sender, timestamp } } on success — \`new_message_id\` is usable with \`get_message\` and \`react\`. { ok: false, error } on any failure mode above.`,
+  {
+    message_id: z
+      .string()
+      .describe(
+        'The channel-native message_id to repost. Get it from search_messages or get_message.',
+      ),
+    source_jid: z
+      .string()
+      .optional()
+      .describe(
+        'Chat JID where the original message lives. Defaults to the current chat. Required for cross-chat forward.',
+      ),
+    as: z
+      .enum(['forward', 'copy'])
+      .optional()
+      .describe(
+        'forward (default) keeps the "Forwarded from" tag. copy strips it and sends as a new message from the bot.',
+      ),
+    caption_override: z
+      .string()
+      .optional()
+      .describe(
+        'Override caption for media. Honored only when as="copy". Ignored for forward mode (Telegram does not allow editing forwarded content).',
+      ),
+  },
+  async (args) => {
+    const requestId = crypto.randomUUID();
+    const data: Record<string, string> = {
+      type: 'forward_message',
+      requestId,
+      groupFolder,
+      toJid: chatJid,
+      sourceJid: args.source_jid ?? chatJid,
+      message_id: args.message_id,
+      mode: args.as ?? 'forward',
+      timestamp: new Date().toISOString(),
+    };
+    if (typeof args.caption_override === 'string') {
+      data.caption_override = args.caption_override;
+    }
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    const responsePath = path.join(RESPONSES_DIR, `${requestId}.json`);
+    const deadline = Date.now() + FORWARD_MESSAGE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(responsePath)) {
+        try {
+          const resp = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+          fs.unlinkSync(responsePath);
+          if (resp.success) {
+            const payload = resp.data ?? {
+              ok: true,
+              new_message_id: resp.message_id,
+            };
+            return {
+              content: [
+                { type: 'text' as const, text: JSON.stringify(payload) },
+              ],
+            };
+          }
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  ok: false,
+                  error: resp.error ?? 'unknown error',
+                }),
+              },
+            ],
+            isError: true as const,
+          };
+        } catch (err) {
+          return toolError(
+            `Failed to read forward_message response: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      await sleep(FORWARD_MESSAGE_POLL_INTERVAL_MS);
+    }
+
+    return toolError(
+      'forward_message request timed out after 30s — the forward may still be in flight on the host.',
+    );
   },
 );
 
