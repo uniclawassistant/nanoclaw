@@ -39,12 +39,7 @@ export interface IpcDeps {
   ) => void;
   onTasksChanged: () => void;
   getMessage: (messageId: string, jid: string) => MessageRecord | null;
-  // FTS5-backed search across stored messages. The IPC handler enforces
-  // chat_jid authorization before passing the filter set into here.
   searchMessages?: (params: SearchMessagesParams) => SearchMessagesResult;
-  // Returns up to N messages immediately before and N messages immediately
-  // after the given (timestamp, message_id) point in the same chat, used to
-  // populate `context_messages` on each search hit.
   getMessagesAroundTimestamp?: (
     chatJid: string,
     timestamp: string,
@@ -244,9 +239,6 @@ async function processSearchMessagesIpc(
     .filter(([, g]) => g.folder === sourceGroup)
     .map(([jid]) => jid);
 
-  // Normalize jid param into a deduped array. Empty array means "no caller
-  // restriction" — main expands that to all registered chats; non-main is
-  // forced onto its own chat below.
   const requestedJids: string[] = (() => {
     if (Array.isArray(data.jid)) {
       return data.jid.filter((j) => typeof j === 'string' && j.length > 0);

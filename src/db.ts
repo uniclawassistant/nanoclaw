@@ -15,9 +15,6 @@ import {
 let db: Database.Database;
 
 function createSchema(database: Database.Database): void {
-  // Required so that INSERT OR REPLACE on `messages` fires AFTER DELETE
-  // triggers — the FTS5 sync triggers below depend on it. Off by default
-  // in older SQLite builds; safe to set unconditionally.
   database.pragma('recursive_triggers = ON');
 
   database.exec(`
@@ -191,10 +188,6 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
-  // FTS5 index for search_messages MCP tool. Idempotent: only creates and
-  // backfills when the virtual table is missing. Triggers keep the index in
-  // sync with INSERT / UPDATE / DELETE on messages — INSERT OR REPLACE goes
-  // through the AFTER DELETE + AFTER INSERT pair.
   const ftsExists = database
     .prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='messages_fts'`,
@@ -617,9 +610,6 @@ function buildFtsMatchExpression(
   rawQuery: string,
   includeGeneration: boolean,
 ): string | null {
-  // Strip FTS5-special punctuation; keep letters, digits, underscores, and
-  // whitespace. Each surviving token becomes a quoted prefix term so callers
-  // get substring-on-token semantics ("Cross" matches "Crosstalk").
   const sanitized = rawQuery.replace(/[^\p{L}\p{N}\s_]/gu, ' ').trim();
   if (!sanitized) return null;
   const tokens = sanitized
@@ -696,8 +686,6 @@ function detectMatchedFieldSubstring(
     return 'generation_prompt';
   }
   if ((row.sender_name ?? '').toLowerCase().includes(q)) return 'sender_name';
-  // FTS5 found a tokenized match the substring check missed (e.g. diacritics
-  // folded). Fall back to content as the most user-relevant field.
   return 'content';
 }
 
@@ -816,8 +804,6 @@ export function searchMessages(
           : matched === 'generation_prompt'
             ? (row.generation_prompt ?? '')
             : (row.sender_name ?? '');
-      // Reset lastIndex defensively (regex does not use the g flag, but be
-      // explicit since the same RegExp instance is reused across rows).
       re.lastIndex = 0;
       const m = re.exec(source);
       const snippet = m

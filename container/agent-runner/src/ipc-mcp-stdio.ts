@@ -620,7 +620,7 @@ Don't spam calls — query only when you actually need the referenced message's 
   },
 );
 
-const SEARCH_MESSAGES_TIMEOUT_MS = 15_000;
+const SEARCH_MESSAGES_TIMEOUT_MS = 5_000;
 const SEARCH_MESSAGES_POLL_INTERVAL_MS = 100;
 
 server.tool(
@@ -722,8 +722,6 @@ RETURN SHAPE (success):
     if (args.sender !== undefined) data.sender = args.sender;
     if (args.message_type !== undefined) data.message_type = args.message_type;
 
-    // Non-main containers cannot read other chats' history; the host
-    // enforces this, but we also default the jid scope server-side.
     if (!isMain && args.jid === undefined) {
       data.jid = chatJid;
     }
@@ -759,7 +757,7 @@ RETURN SHAPE (success):
       await sleep(SEARCH_MESSAGES_POLL_INTERVAL_MS);
     }
 
-    return toolError('search_messages request timed out after 15s.');
+    return toolError('search_messages request timed out after 5s.');
   },
 );
 
