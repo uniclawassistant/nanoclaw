@@ -15,6 +15,11 @@ import {
 let db: Database.Database;
 
 function createSchema(database: Database.Database): void {
+  // Required so that INSERT OR REPLACE on `messages` fires AFTER DELETE
+  // triggers — the FTS5 sync triggers below depend on it. Off by default
+  // in older SQLite builds; safe to set unconditionally.
+  database.pragma('recursive_triggers = ON');
+
   database.exec(`
     CREATE TABLE IF NOT EXISTS chats (
       jid TEXT PRIMARY KEY,
@@ -184,6 +189,56 @@ function createSchema(database: Database.Database): void {
     database.exec(`ALTER TABLE messages ADD COLUMN thread_id TEXT`);
   } catch {
     /* column already exists */
+  }
+
+  // FTS5 index for search_messages MCP tool. Idempotent: only creates and
+  // backfills when the virtual table is missing. Triggers keep the index in
+  // sync with INSERT / UPDATE / DELETE on messages — INSERT OR REPLACE goes
+  // through the AFTER DELETE + AFTER INSERT pair.
+  const ftsExists = database
+    .prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='messages_fts'`,
+    )
+    .get();
+  if (!ftsExists) {
+    database.exec(`
+      CREATE VIRTUAL TABLE messages_fts USING fts5(
+        id UNINDEXED,
+        chat_jid UNINDEXED,
+        sender_name,
+        content,
+        generation_prompt,
+        tokenize = 'unicode61 remove_diacritics 2'
+      );
+      INSERT INTO messages_fts(id, chat_jid, sender_name, content, generation_prompt)
+      SELECT id, chat_jid,
+        COALESCE(sender_name, ''),
+        COALESCE(content, ''),
+        COALESCE(json_extract(generation_json, '$.prompt'), '')
+      FROM messages;
+      CREATE TRIGGER messages_ai_fts AFTER INSERT ON messages BEGIN
+        INSERT INTO messages_fts(id, chat_jid, sender_name, content, generation_prompt)
+        VALUES (
+          new.id, new.chat_jid,
+          COALESCE(new.sender_name, ''),
+          COALESCE(new.content, ''),
+          COALESCE(json_extract(new.generation_json, '$.prompt'), '')
+        );
+      END;
+      CREATE TRIGGER messages_ad_fts AFTER DELETE ON messages BEGIN
+        DELETE FROM messages_fts WHERE id = old.id AND chat_jid = old.chat_jid;
+      END;
+      CREATE TRIGGER messages_au_fts AFTER UPDATE ON messages BEGIN
+        DELETE FROM messages_fts WHERE id = old.id AND chat_jid = old.chat_jid;
+        INSERT INTO messages_fts(id, chat_jid, sender_name, content, generation_prompt)
+        VALUES (
+          new.id, new.chat_jid,
+          COALESCE(new.sender_name, ''),
+          COALESCE(new.content, ''),
+          COALESCE(json_extract(new.generation_json, '$.prompt'), '')
+        );
+      END;
+    `);
   }
 }
 
@@ -483,6 +538,402 @@ export function getMessageById(
     generation,
     reactions: [],
   };
+}
+
+// --- search_messages support ---
+
+export interface SearchMessagesParams {
+  query: string;
+  isRegex?: boolean;
+  jids?: string[];
+  since?: string;
+  until?: string;
+  sender?: string;
+  messageTypes?: string[];
+  includeGeneration?: boolean;
+  limit?: number;
+}
+
+export type SearchMatchedField =
+  | 'content'
+  | 'generation_prompt'
+  | 'sender_name';
+
+export interface SearchHit {
+  message_id: string;
+  chat_jid: string;
+  timestamp: string;
+  sender: string;
+  direction: 'in' | 'out';
+  type: MessageRecord['type'];
+  snippet: string;
+  matched_field: SearchMatchedField;
+  file_path?: string;
+  generation?: MessageRecord['generation'];
+}
+
+export interface SearchMessagesResult {
+  hits: SearchHit[];
+  total_matches: number;
+}
+
+export interface ContextMessage {
+  message_id: string;
+  timestamp: string;
+  sender: string;
+  direction: 'in' | 'out';
+  snippet: string;
+}
+
+interface SearchRow {
+  id: string;
+  chat_jid: string;
+  sender: string;
+  sender_name: string | null;
+  content: string | null;
+  timestamp: string;
+  is_from_me: number | null;
+  is_bot_message: number | null;
+  message_type: string | null;
+  file_path: string | null;
+  generation_json: string | null;
+  generation_prompt: string | null;
+  fts_snippet?: string | null;
+}
+
+const SNIPPET_RADIUS_CHARS = 60;
+const CONTEXT_SNIPPET_CHARS = 100;
+const VALID_MESSAGE_TYPES: MessageRecord['type'][] = [
+  'text',
+  'photo',
+  'document',
+  'voice',
+  'video',
+  'sticker',
+  'system',
+];
+
+function buildFtsMatchExpression(
+  rawQuery: string,
+  includeGeneration: boolean,
+): string | null {
+  // Strip FTS5-special punctuation; keep letters, digits, underscores, and
+  // whitespace. Each surviving token becomes a quoted prefix term so callers
+  // get substring-on-token semantics ("Cross" matches "Crosstalk").
+  const sanitized = rawQuery.replace(/[^\p{L}\p{N}\s_]/gu, ' ').trim();
+  if (!sanitized) return null;
+  const tokens = sanitized
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((t) => `"${t.replace(/"/g, '""')}"*`);
+  if (tokens.length === 0) return null;
+  const cols = includeGeneration
+    ? '{sender_name content generation_prompt}'
+    : '{sender_name content}';
+  return `${cols} : (${tokens.join(' ')})`;
+}
+
+function buildFilterClauses(
+  jids: string[],
+  since: string | undefined,
+  until: string | undefined,
+  sender: string | undefined,
+  messageTypes: string[],
+  alias: string = 'm',
+): { clauses: string[]; params: unknown[] } {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (jids.length > 0) {
+    clauses.push(`${alias}.chat_jid IN (${jids.map(() => '?').join(',')})`);
+    params.push(...jids);
+  }
+  if (since) {
+    clauses.push(`${alias}.timestamp >= ?`);
+    params.push(since);
+  }
+  if (until) {
+    clauses.push(`${alias}.timestamp <= ?`);
+    params.push(until);
+  }
+  if (sender) {
+    clauses.push(`LOWER(COALESCE(${alias}.sender_name, '')) = LOWER(?)`);
+    params.push(sender);
+  }
+  if (messageTypes.length > 0) {
+    clauses.push(
+      `COALESCE(${alias}.message_type, 'text') IN (${messageTypes
+        .map(() => '?')
+        .join(',')})`,
+    );
+    params.push(...messageTypes);
+  }
+  return { clauses, params };
+}
+
+function rowDirection(row: {
+  is_from_me: number | null;
+  is_bot_message: number | null;
+}): 'in' | 'out' {
+  return row.is_from_me || row.is_bot_message ? 'out' : 'in';
+}
+
+function rowType(rawType: string | null): MessageRecord['type'] {
+  const t = (rawType ?? 'text') as MessageRecord['type'];
+  return VALID_MESSAGE_TYPES.includes(t) ? t : 'text';
+}
+
+function detectMatchedFieldSubstring(
+  query: string,
+  row: SearchRow,
+  includeGeneration: boolean,
+): SearchMatchedField {
+  const q = query.toLowerCase();
+  if ((row.content ?? '').toLowerCase().includes(q)) return 'content';
+  if (
+    includeGeneration &&
+    (row.generation_prompt ?? '').toLowerCase().includes(q)
+  ) {
+    return 'generation_prompt';
+  }
+  if ((row.sender_name ?? '').toLowerCase().includes(q)) return 'sender_name';
+  // FTS5 found a tokenized match the substring check missed (e.g. diacritics
+  // folded). Fall back to content as the most user-relevant field.
+  return 'content';
+}
+
+function detectMatchedFieldRegex(
+  re: RegExp,
+  row: SearchRow,
+  includeGeneration: boolean,
+): SearchMatchedField | null {
+  if (row.content && re.test(row.content)) return 'content';
+  if (
+    includeGeneration &&
+    row.generation_prompt &&
+    re.test(row.generation_prompt)
+  ) {
+    return 'generation_prompt';
+  }
+  if (row.sender_name && re.test(row.sender_name)) return 'sender_name';
+  return null;
+}
+
+function buildJsSnippet(source: string, index: number, length: number): string {
+  const start = Math.max(0, index - SNIPPET_RADIUS_CHARS);
+  const end = Math.min(source.length, index + length + SNIPPET_RADIUS_CHARS);
+  const before = source.slice(start, index);
+  const matched = source.slice(index, index + length);
+  const after = source.slice(index + length, end);
+  const prefix = start > 0 ? '...' : '';
+  const suffix = end < source.length ? '...' : '';
+  return `${prefix}${before}**${matched}**${after}${suffix}`;
+}
+
+function buildContextSnippet(content: string | null): string {
+  const text = (content ?? '').trim();
+  if (text.length <= CONTEXT_SNIPPET_CHARS) return text;
+  return `${text.slice(0, CONTEXT_SNIPPET_CHARS)}...`;
+}
+
+function rowToHit(
+  row: SearchRow,
+  matchedField: SearchMatchedField,
+  snippet: string,
+): SearchHit {
+  let generation: MessageRecord['generation'] | undefined;
+  if (row.generation_json) {
+    try {
+      generation = JSON.parse(row.generation_json);
+    } catch {
+      generation = undefined;
+    }
+  }
+  return {
+    message_id: row.id,
+    chat_jid: row.chat_jid,
+    timestamp: row.timestamp,
+    sender: row.sender_name || row.sender,
+    direction: rowDirection(row),
+    type: rowType(row.message_type),
+    snippet,
+    matched_field: matchedField,
+    file_path: row.file_path ?? undefined,
+    generation,
+  };
+}
+
+export function searchMessages(
+  params: SearchMessagesParams,
+): SearchMessagesResult {
+  const limit = Math.max(1, Math.min(params.limit ?? 20, 100));
+  const includeGeneration = params.includeGeneration ?? true;
+  const jids = params.jids ?? [];
+  const messageTypes = (params.messageTypes ?? []).filter(
+    (t) => t && t !== 'all',
+  );
+  const sender = params.sender;
+  const since = params.since;
+  const until = params.until;
+
+  if (params.isRegex) {
+    let re: RegExp;
+    try {
+      re = new RegExp(params.query, 'i');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`invalid regex: ${msg}`, { cause: err });
+    }
+
+    const { clauses, params: clauseParams } = buildFilterClauses(
+      jids,
+      since,
+      until,
+      sender,
+      messageTypes,
+    );
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const sql = `
+      SELECT m.id, m.chat_jid, m.sender, m.sender_name, m.content, m.timestamp,
+             m.is_from_me, m.is_bot_message, m.message_type, m.file_path,
+             m.generation_json,
+             COALESCE(json_extract(m.generation_json, '$.prompt'), '') AS generation_prompt
+      FROM messages m
+      ${where}
+      ORDER BY m.timestamp DESC
+    `;
+    const candidates = db.prepare(sql).all(...clauseParams) as SearchRow[];
+
+    const hits: SearchHit[] = [];
+    let total = 0;
+    for (const row of candidates) {
+      const matched = detectMatchedFieldRegex(re, row, includeGeneration);
+      if (!matched) continue;
+      total += 1;
+      if (hits.length >= limit) continue;
+      const source =
+        matched === 'content'
+          ? (row.content ?? '')
+          : matched === 'generation_prompt'
+            ? (row.generation_prompt ?? '')
+            : (row.sender_name ?? '');
+      // Reset lastIndex defensively (regex does not use the g flag, but be
+      // explicit since the same RegExp instance is reused across rows).
+      re.lastIndex = 0;
+      const m = re.exec(source);
+      const snippet = m
+        ? buildJsSnippet(source, m.index, m[0].length)
+        : source.slice(0, SNIPPET_RADIUS_CHARS * 2);
+      hits.push(rowToHit(row, matched, snippet));
+    }
+    return { hits, total_matches: total };
+  }
+
+  const matchExpr = buildFtsMatchExpression(params.query, includeGeneration);
+  if (!matchExpr) {
+    return { hits: [], total_matches: 0 };
+  }
+
+  const { clauses, params: clauseParams } = buildFilterClauses(
+    jids,
+    since,
+    until,
+    sender,
+    messageTypes,
+  );
+  const allClauses = ['messages_fts MATCH ?', ...clauses];
+  const where = `WHERE ${allClauses.join(' AND ')}`;
+
+  const countSql = `
+    SELECT COUNT(*) AS cnt
+    FROM messages_fts
+    JOIN messages m ON m.id = messages_fts.id AND m.chat_jid = messages_fts.chat_jid
+    ${where}
+  `;
+  const countRow = db.prepare(countSql).get(matchExpr, ...clauseParams) as
+    | { cnt: number }
+    | undefined;
+  const total = countRow?.cnt ?? 0;
+
+  const sql = `
+    SELECT m.id, m.chat_jid, m.sender, m.sender_name, m.content, m.timestamp,
+           m.is_from_me, m.is_bot_message, m.message_type, m.file_path,
+           m.generation_json,
+           COALESCE(json_extract(m.generation_json, '$.prompt'), '') AS generation_prompt,
+           snippet(messages_fts, -1, '**', '**', '...', 16) AS fts_snippet
+    FROM messages_fts
+    JOIN messages m ON m.id = messages_fts.id AND m.chat_jid = messages_fts.chat_jid
+    ${where}
+    ORDER BY m.timestamp DESC
+    LIMIT ?
+  `;
+  const rows = db
+    .prepare(sql)
+    .all(matchExpr, ...clauseParams, limit) as SearchRow[];
+
+  const hits: SearchHit[] = rows.map((row) => {
+    const matched = detectMatchedFieldSubstring(
+      params.query,
+      row,
+      includeGeneration,
+    );
+    const snippet =
+      row.fts_snippet && row.fts_snippet.length > 0
+        ? row.fts_snippet
+        : buildContextSnippet(row.content);
+    return rowToHit(row, matched, snippet);
+  });
+
+  return { hits, total_matches: total };
+}
+
+export function getMessagesAroundTimestamp(
+  chatJid: string,
+  timestamp: string,
+  messageId: string,
+  n: number,
+): ContextMessage[] {
+  if (n <= 0) return [];
+  const before = db
+    .prepare(
+      `SELECT id, sender, sender_name, content, timestamp, is_from_me, is_bot_message
+         FROM messages
+        WHERE chat_jid = ? AND timestamp < ? AND id != ?
+        ORDER BY timestamp DESC
+        LIMIT ?`,
+    )
+    .all(chatJid, timestamp, messageId, n) as Array<{
+    id: string;
+    sender: string;
+    sender_name: string | null;
+    content: string | null;
+    timestamp: string;
+    is_from_me: number | null;
+    is_bot_message: number | null;
+  }>;
+  const after = db
+    .prepare(
+      `SELECT id, sender, sender_name, content, timestamp, is_from_me, is_bot_message
+         FROM messages
+        WHERE chat_jid = ? AND timestamp > ? AND id != ?
+        ORDER BY timestamp ASC
+        LIMIT ?`,
+    )
+    .all(chatJid, timestamp, messageId, n) as Array<{
+    id: string;
+    sender: string;
+    sender_name: string | null;
+    content: string | null;
+    timestamp: string;
+    is_from_me: number | null;
+    is_bot_message: number | null;
+  }>;
+  return [...before.reverse(), ...after].map((row) => ({
+    message_id: row.id,
+    timestamp: row.timestamp,
+    sender: row.sender_name || row.sender,
+    direction: rowDirection(row),
+    snippet: buildContextSnippet(row.content),
+  }));
 }
 
 /**

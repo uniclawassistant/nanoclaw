@@ -10,6 +10,8 @@ import {
   deleteTask,
   getTaskById,
   MessageRecord,
+  SearchMessagesParams,
+  SearchMessagesResult,
   updateTask,
 } from './db.js';
 import { resolveContainerPathToHost } from './document-paths.js';
@@ -37,6 +39,24 @@ export interface IpcDeps {
   ) => void;
   onTasksChanged: () => void;
   getMessage: (messageId: string, jid: string) => MessageRecord | null;
+  // FTS5-backed search across stored messages. The IPC handler enforces
+  // chat_jid authorization before passing the filter set into here.
+  searchMessages?: (params: SearchMessagesParams) => SearchMessagesResult;
+  // Returns up to N messages immediately before and N messages immediately
+  // after the given (timestamp, message_id) point in the same chat, used to
+  // populate `context_messages` on each search hit.
+  getMessagesAroundTimestamp?: (
+    chatJid: string,
+    timestamp: string,
+    messageId: string,
+    n: number,
+  ) => Array<{
+    message_id: string;
+    timestamp: string;
+    sender: string;
+    direction: 'in' | 'out';
+    snippet: string;
+  }>;
   // Resolves the topic the user most recently wrote in for this chat so
   // outbound IPC paths can reply into the same topic instead of General.
   // Returns undefined for plain chats and DMs.
@@ -181,6 +201,159 @@ function sweepOrphanResponses(ipcBaseDir: string): void {
       logger.debug({ folder, err }, 'Error sweeping orphan IPC responses');
     }
   }
+}
+
+interface SearchMessagesIpc {
+  type: 'search_messages';
+  requestId: string;
+  query: string;
+  is_regex?: boolean;
+  jid?: string | string[];
+  since?: string;
+  until?: string;
+  sender?: string;
+  message_type?: string;
+  include_generation?: boolean;
+  context?: number;
+  limit?: number;
+}
+
+/**
+ * Authorize the source group's requested jid set for search_messages, then
+ * dispatch into deps.searchMessages and enrich each hit with surrounding
+ * context messages. Mirrors the get_message authorization model: main can
+ * search any registered jid; non-main is locked to its own jid.
+ */
+async function processSearchMessagesIpc(
+  data: SearchMessagesIpc,
+  sourceGroup: string,
+  isMain: boolean,
+  registeredGroups: Record<string, RegisteredGroup>,
+  responsesDir: string,
+  deps: IpcDeps,
+): Promise<void> {
+  if (!deps.searchMessages) {
+    writeIpcResponse(responsesDir, data.requestId, {
+      success: false,
+      error: 'search_messages not supported on this host',
+    });
+    return;
+  }
+
+  const ownJids = Object.entries(registeredGroups)
+    .filter(([, g]) => g.folder === sourceGroup)
+    .map(([jid]) => jid);
+
+  // Normalize jid param into a deduped array. Empty array means "no caller
+  // restriction" — main expands that to all registered chats; non-main is
+  // forced onto its own chat below.
+  const requestedJids: string[] = (() => {
+    if (Array.isArray(data.jid)) {
+      return data.jid.filter((j) => typeof j === 'string' && j.length > 0);
+    }
+    if (typeof data.jid === 'string' && data.jid.length > 0) {
+      return [data.jid];
+    }
+    return [];
+  })();
+
+  let effectiveJids: string[];
+  if (isMain) {
+    effectiveJids =
+      requestedJids.length > 0 ? requestedJids : Object.keys(registeredGroups);
+  } else {
+    if (ownJids.length === 0) {
+      writeIpcResponse(responsesDir, data.requestId, {
+        success: false,
+        error: 'unauthorized: caller has no registered chat',
+      });
+      return;
+    }
+    if (requestedJids.length === 0) {
+      effectiveJids = ownJids;
+    } else {
+      const ownSet = new Set(ownJids);
+      const outOfScope = requestedJids.filter((j) => !ownSet.has(j));
+      if (outOfScope.length > 0) {
+        logger.warn(
+          { sourceGroup, requestedJids, outOfScope },
+          'Unauthorized IPC search_messages attempt blocked',
+        );
+        writeIpcResponse(responsesDir, data.requestId, {
+          success: false,
+          error: 'unauthorized: cannot search outside own chat',
+        });
+        return;
+      }
+      effectiveJids = requestedJids;
+    }
+  }
+
+  const messageTypes: string[] = [];
+  if (typeof data.message_type === 'string' && data.message_type !== 'all') {
+    messageTypes.push(data.message_type);
+  }
+
+  const limit = Math.max(
+    1,
+    Math.min(
+      typeof data.limit === 'number' && Number.isFinite(data.limit)
+        ? Math.floor(data.limit)
+        : 20,
+      100,
+    ),
+  );
+  const contextN = Math.max(
+    0,
+    typeof data.context === 'number' && Number.isFinite(data.context)
+      ? Math.floor(data.context)
+      : 0,
+  );
+
+  let result: SearchMessagesResult;
+  try {
+    result = deps.searchMessages({
+      query: data.query,
+      isRegex: data.is_regex === true,
+      jids: effectiveJids,
+      since: typeof data.since === 'string' ? data.since : undefined,
+      until: typeof data.until === 'string' ? data.until : undefined,
+      sender: typeof data.sender === 'string' ? data.sender : undefined,
+      messageTypes,
+      includeGeneration: data.include_generation !== false,
+      limit,
+    });
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger.warn({ sourceGroup, err: errMsg }, 'IPC search_messages failed');
+    writeIpcResponse(responsesDir, data.requestId, {
+      success: false,
+      error: errMsg,
+    });
+    return;
+  }
+
+  const enriched = result.hits.map((hit) => {
+    if (contextN <= 0 || !deps.getMessagesAroundTimestamp) {
+      return hit;
+    }
+    const context_messages = deps.getMessagesAroundTimestamp(
+      hit.chat_jid,
+      hit.timestamp,
+      hit.message_id,
+      contextN,
+    );
+    return { ...hit, context_messages };
+  });
+
+  writeIpcResponse(responsesDir, data.requestId, {
+    success: true,
+    data: {
+      results: enriched,
+      total_matches: result.total_matches,
+      truncated: result.total_matches > enriched.length,
+    },
+  });
 }
 
 type MediaToolIpc = {
@@ -640,6 +813,24 @@ export function startIpcWatcher(deps: IpcDeps): void {
                         },
                   });
                 }
+              } else if (
+                data.type === 'search_messages' &&
+                typeof data.requestId === 'string' &&
+                typeof data.query === 'string'
+              ) {
+                const responsesDir = path.join(
+                  ipcBaseDir,
+                  sourceGroup,
+                  'responses',
+                );
+                await processSearchMessagesIpc(
+                  data,
+                  sourceGroup,
+                  isMain,
+                  registeredGroups,
+                  responsesDir,
+                  deps,
+                );
               } else if (
                 data.type === 'reaction' &&
                 data.chatJid &&
