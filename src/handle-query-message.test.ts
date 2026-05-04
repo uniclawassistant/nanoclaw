@@ -5,7 +5,7 @@ import {
   type AgentRunnerOutput,
   type QueryLoopState,
   type QueryMessage,
-} from './handle-query-message.js';
+} from '../container/agent-runner/src/handle-query-message.js';
 
 function makeHarness() {
   const emitted: AgentRunnerOutput[] = [];
