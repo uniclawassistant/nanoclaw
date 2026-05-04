@@ -49,12 +49,24 @@ export interface ContainerInput {
 
 export const IDLE_TIMEOUT_ERROR = 'idle_timeout';
 
+export interface ContainerUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  totalCostUsd: number | null;
+  contextWindow: number | null;
+  contextUsedTokens: number;
+  numTurns: number;
+}
+
 export interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
   newSessionId?: string;
   error?: string;
   turnEnd?: boolean;
+  usage?: ContainerUsage;
 }
 
 interface VolumeMount {

@@ -20,6 +20,7 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
+import { checkThreshold, getState, recordUsage } from './usage-tracker.js';
 
 /**
  * Compute the next run time for a recurring task, anchored to the
@@ -198,6 +199,21 @@ async function runTask(
         }
         if (streamedOutput.status === 'error') {
           error = streamedOutput.error || 'Unknown error';
+        }
+        if (streamedOutput.turnEnd && streamedOutput.usage) {
+          recordUsage({
+            jid: task.chat_jid,
+            sessionId: streamedOutput.newSessionId ?? sessionId ?? null,
+            usage: streamedOutput.usage,
+            origin: 'scheduled',
+          });
+          const state = getState(task.chat_jid);
+          if (state) {
+            const threshold = checkThreshold(state);
+            if (threshold) {
+              await deps.sendMessage(task.chat_jid, threshold.message);
+            }
+          }
         }
       },
     );
