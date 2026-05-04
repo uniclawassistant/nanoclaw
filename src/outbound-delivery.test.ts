@@ -4,6 +4,7 @@ import { _initTestDatabase, getMessageById, storeChatMetadata } from './db.js';
 import { sendText } from './index.js';
 import { logger } from './logger.js';
 import {
+  _resetSilentFinishCounter,
   beginTurn,
   checkClassA,
   checkClassB,
@@ -200,5 +201,170 @@ describe('outbound-mismatch hook (FED-9)', () => {
     expect(typeof data.rawSample).toBe('string');
     expect((data.rawSample as string).length).toBe(2000);
     expect(data.internalBlockCount).toBe(1);
+  });
+});
+
+// FED-16 Phase 2: on Class B detection the host ships a `[host] ...` ack-stub
+// through the supplied sendAckStub callback so the user sees something instead
+// of silence, and the in-memory counter logs per-hour and warns on threshold
+// exceed.
+describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
+  beforeEach(() => {
+    endTurn('tg:123');
+    _resetSilentFinishCounter();
+    delete process.env.SILENT_FINISH_THRESHOLD_PER_HOUR;
+  });
+
+  it('ships a formatted ack-stub via sendAckStub when Class B fires', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const sendAckStub = vi.fn().mockResolvedValue(undefined);
+    const turn = beginTurn('tg:123', {
+      groupName: 'unic',
+      isUserFacing: true,
+    });
+
+    await checkClassB(
+      turn,
+      '<internal>забыл написать в чат, виноват</internal>',
+      { hadError: false, sendAckStub },
+    );
+
+    expect(sendAckStub).toHaveBeenCalledTimes(1);
+    expect(sendAckStub).toHaveBeenCalledWith(
+      '[host] Юник ушёл в тишину (внутренняя записка: забыл написать в чат, виноват)',
+    );
+  });
+
+  it('truncates internal samples longer than 200 chars and adds an ellipsis', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const sendAckStub = vi.fn().mockResolvedValue(undefined);
+    const turn = beginTurn('tg:123', {
+      groupName: 'unic',
+      isUserFacing: true,
+    });
+    const long = 'я'.repeat(500);
+
+    await checkClassB(turn, `<internal>${long}</internal>`, {
+      hadError: false,
+      sendAckStub,
+    });
+
+    const [text] = sendAckStub.mock.calls[0] as [string];
+    expect(text).toBe(
+      `[host] Юник ушёл в тишину (внутренняя записка: ${'я'.repeat(200)}…)`,
+    );
+  });
+
+  it('falls back to no-internal stub when raw has no internal block', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const sendAckStub = vi.fn().mockResolvedValue(undefined);
+    const turn = beginTurn('tg:123', {
+      groupName: 'unic',
+      isUserFacing: true,
+    });
+
+    await checkClassB(turn, '', { hadError: false, sendAckStub });
+
+    expect(sendAckStub).toHaveBeenCalledWith(
+      '[host] Юник ушёл в тишину без внутренней записки.',
+    );
+  });
+
+  it('falls back to no-internal stub when the internal block is whitespace-only', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const sendAckStub = vi.fn().mockResolvedValue(undefined);
+    const turn = beginTurn('tg:123', {
+      groupName: 'unic',
+      isUserFacing: true,
+    });
+
+    await checkClassB(turn, '<internal>   \n  </internal>', {
+      hadError: false,
+      sendAckStub,
+    });
+
+    expect(sendAckStub).toHaveBeenCalledWith(
+      '[host] Юник ушёл в тишину без внутренней записки.',
+    );
+  });
+
+  it('does not invoke sendAckStub on healthy turns (no Class B trigger)', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const sendAckStub = vi.fn().mockResolvedValue(undefined);
+    const turn = beginTurn('tg:123', {
+      groupName: 'unic',
+      isUserFacing: true,
+    });
+    turn.outboundCount++;
+
+    await checkClassB(turn, '<internal>note</internal>', {
+      hadError: false,
+      sendAckStub,
+    });
+
+    expect(sendAckStub).not.toHaveBeenCalled();
+  });
+
+  it('increments silentFinishCount and logs per-hour breakdown on each trigger', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const sendAckStub = vi.fn().mockResolvedValue(undefined);
+
+    for (let i = 0; i < 3; i++) {
+      const turn = beginTurn('tg:123', {
+        groupName: 'unic',
+        isUserFacing: true,
+      });
+      await checkClassB(turn, '<internal>x</internal>', {
+        hadError: false,
+        sendAckStub,
+      });
+      endTurn('tg:123');
+    }
+
+    const counterCalls = info.mock.calls.filter(
+      ([, msg]) =>
+        typeof msg === 'string' && msg.startsWith('silent_finish_count='),
+    );
+    expect(counterCalls.length).toBe(3);
+    const [data, msg] = counterCalls[2] as [Record<string, unknown>, string];
+    expect(data.total).toBe(3);
+    expect(data.hourCount).toBe(3);
+    expect(typeof data.hour).toBe('string');
+    expect(msg).toMatch(/silent_finish_count=3/);
+    expect(msg).toMatch(/total=3/);
+    expect(sendAckStub).toHaveBeenCalledTimes(3);
+  });
+
+  it('warns "excess silent finishes" when hourly count exceeds SILENT_FINISH_THRESHOLD_PER_HOUR', async () => {
+    process.env.SILENT_FINISH_THRESHOLD_PER_HOUR = '2';
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const sendAckStub = vi.fn().mockResolvedValue(undefined);
+
+    for (let i = 0; i < 3; i++) {
+      const turn = beginTurn('tg:123', {
+        groupName: 'unic',
+        isUserFacing: true,
+      });
+      await checkClassB(turn, '<internal>x</internal>', {
+        hadError: false,
+        sendAckStub,
+      });
+      endTurn('tg:123');
+    }
+
+    const excessCalls = warn.mock.calls.filter(
+      ([, msg]) => msg === 'excess silent finishes',
+    );
+    expect(excessCalls.length).toBe(1);
+    const [data] = excessCalls[0] as [Record<string, unknown>, string];
+    expect(data.threshold).toBe(2);
+    expect(data.hourCount).toBe(3);
   });
 });
