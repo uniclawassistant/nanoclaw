@@ -8,7 +8,7 @@ import type { ReactionType } from 'grammy/types';
 import { execSync } from 'child_process';
 
 import { ASSISTANT_NAME, DATA_DIR, TRIGGER_PATTERN } from '../config.js';
-import { deleteSession } from '../db.js';
+import { deleteSession, getTasksForGroup } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
@@ -21,6 +21,7 @@ import {
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
+  ScheduledTask,
 } from '../types.js';
 
 const ALLOWED_REACTIONS: ReadonlySet<string> = new Set(allowedReactions);
@@ -42,6 +43,94 @@ export function contextWindowK(model: string): number {
   if (model.includes('[1m]')) return 1000;
   if (/^claude-(opus-4-7|sonnet-4-6)$/.test(model)) return 1000;
   return 200;
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+function formatRelativeOffset(diffMs: number): string {
+  const sign = diffMs >= 0 ? '~' : '-';
+  const absMs = Math.abs(diffMs);
+  const min = Math.round(absMs / 60000);
+  if (min < 60) return `${sign}${min}m`;
+  const hr = Math.round(absMs / 3600000);
+  if (hr < 48) return `${sign}${hr}h`;
+  const day = Math.round(absMs / 86400000);
+  return `${sign}${day}d`;
+}
+
+export function formatTaskTimestamp(iso: string | null, now: Date): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const stamp = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(
+    d.getDate(),
+  )} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return `${stamp} (${formatRelativeOffset(d.getTime() - now.getTime())})`;
+}
+
+function decodeCron(expr: string): string | null {
+  const trimmed = expr.trim();
+  let m;
+  if ((m = /^\*\/(\d+) \* \* \* \*$/.exec(trimmed))) {
+    return `every ${m[1]} min`;
+  }
+  if (/^0 \* \* \* \*$/.test(trimmed)) return 'hourly';
+  if ((m = /^0 (\d{1,2}) \* \* \*$/.exec(trimmed))) {
+    return `daily at ${pad2(parseInt(m[1], 10))}:00`;
+  }
+  if ((m = /^0 (\d{1,2}) \* \* 1-5$/.exec(trimmed))) {
+    return `weekdays at ${pad2(parseInt(m[1], 10))}:00`;
+  }
+  return null;
+}
+
+export function formatTaskSchedule(
+  type: ScheduledTask['schedule_type'],
+  value: string,
+): string {
+  if (type === 'cron') {
+    const decoded = decodeCron(value);
+    return decoded ? `\`${value}\` (${decoded})` : `\`${value}\``;
+  }
+  if (type === 'interval') {
+    const ms = parseInt(value, 10);
+    if (!Number.isFinite(ms) || ms <= 0) return value;
+    if (ms % 3600000 === 0) return `every ${ms / 3600000}h`;
+    if (ms % 60000 === 0) return `every ${ms / 60000}m`;
+    if (ms % 1000 === 0) return `every ${ms / 1000}s`;
+    return `every ${ms}ms`;
+  }
+  return value;
+}
+
+function escapeMarkdownV1(s: string): string {
+  return s.replace(/([_*`[\]])/g, '\\$1');
+}
+
+function truncatePromptForList(s: string, max: number): string {
+  const collapsed = s.replace(/\s+/g, ' ').trim();
+  if (collapsed.length <= max) return collapsed;
+  return collapsed.slice(0, max - 1) + '…';
+}
+
+export function formatTasksList(tasks: ScheduledTask[], now: Date): string {
+  if (tasks.length === 0) return 'No scheduled tasks for this group.';
+  return tasks
+    .map((t) => {
+      const idShort = t.id.slice(0, 8);
+      const schedule = formatTaskSchedule(t.schedule_type, t.schedule_value);
+      const next = formatTaskTimestamp(t.next_run, now);
+      const last = formatTaskTimestamp(t.last_run, now);
+      const prompt = escapeMarkdownV1(truncatePromptForList(t.prompt, 80));
+      return [
+        `• #${idShort} — ${schedule} (${t.schedule_type}) — ${t.status}`,
+        `  Next: ${next} · Last: ${last}`,
+        `  Prompt: «${prompt}»`,
+      ].join('\n');
+    })
+    .join('\n\n');
 }
 
 export interface TelegramChannelOpts {
@@ -340,6 +429,20 @@ export class TelegramChannel implements Channel {
       );
     });
 
+    this.bot.command('tasks', (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const groups = this.opts.registeredGroups();
+      const group = groups[chatJid];
+      if (!group) {
+        ctx.reply('Chat not registered.');
+        return;
+      }
+
+      const tasks = getTasksForGroup(group.folder);
+      const text = formatTasksList(tasks, new Date());
+      ctx.reply(text, { parse_mode: 'Markdown' });
+    });
+
     // Telegram bot commands handled above — skip them in the general handler
     // so they don't also get stored as messages. All other /commands flow through.
     const TELEGRAM_BOT_COMMANDS = new Set([
@@ -348,6 +451,7 @@ export class TelegramChannel implements Channel {
       'new',
       'status',
       'restart',
+      'tasks',
     ]);
 
     this.bot.on('message:text', async (ctx) => {
@@ -635,6 +739,7 @@ export class TelegramChannel implements Channel {
           this.bot!.api.setMyCommands([
             { command: 'new', description: 'Reset session' },
             { command: 'status', description: 'Show context usage' },
+            { command: 'tasks', description: 'List scheduled tasks' },
             { command: 'chatid', description: 'Show chat ID' },
             { command: 'ping', description: 'Check if bot is online' },
             { command: 'restart', description: 'Restart NanoClaw' },
