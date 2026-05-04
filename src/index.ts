@@ -624,8 +624,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
     // FED-9 Class B: user-facing turn that produced no outbound. Skip on error
     // — error path already logs separately and would create noisy duplicates.
-    checkClassB(turnState, rawAccumulated, {
+    await checkClassB(turnState, rawAccumulated, {
       hadError: hadError || output === 'error',
+      sendAckStub: async (text) => {
+        await sendText(channel, chatJid, text, replyThreadId);
+        outputSentToUser = true;
+      },
     });
 
     if (output === 'error' || hadError) {

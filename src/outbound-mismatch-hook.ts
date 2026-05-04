@@ -9,9 +9,10 @@ import { logger } from './logger.js';
 //     final output empty or wholly inside <internal>...</internal> → user sees
 //     silence and assumes the agent hung.
 //
-// Phase 1 = log-only. Both detectors emit a structured logger.warn with a raw
-// sample so we can grep nanoclaw.log and decide on Phase 2 (suppress / auto-ack)
-// after a couple weeks of real-world data.
+// Phase 1 = log-only. Phase 2 (FED-16) = host-side ack-stub on Class B: when
+// a Class B trigger fires the hook ships a `[host] ...` message via the
+// supplied sendAckStub callback, increments an in-memory counter and warns
+// when the per-hour count exceeds SILENT_FINISH_THRESHOLD_PER_HOUR.
 
 export interface TurnState {
   groupName: string;
@@ -21,10 +22,63 @@ export interface TurnState {
 }
 
 const RAW_SAMPLE_LIMIT = 2000;
+const ACK_INTERNAL_SAMPLE_LIMIT = 200;
 const INTERNAL_RX = /<internal>[\s\S]*?<\/internal>/g;
+const INTERNAL_CONTENT_RX = /<internal>([\s\S]*?)<\/internal>/g;
 const INTERNAL_OPEN_RX = /<internal>/g;
+const ACK_PREFIX = '[host] Юник ушёл в тишину';
+const ACK_FALLBACK = `${ACK_PREFIX} без внутренней записки.`;
+const SILENT_FINISH_THRESHOLD_DEFAULT = 5;
 
 const activeTurns = new Map<string, TurnState>();
+
+const silentFinish = {
+  hour: '',
+  hourCount: 0,
+  total: 0,
+};
+
+function silentFinishThreshold(): number {
+  const raw = process.env.SILENT_FINISH_THRESHOLD_PER_HOUR;
+  if (!raw) return SILENT_FINISH_THRESHOLD_DEFAULT;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : SILENT_FINISH_THRESHOLD_DEFAULT;
+}
+
+function bumpSilentFinishCounter(now: Date = new Date()): {
+  hour: string;
+  hourCount: number;
+  total: number;
+} {
+  const hour = now.toISOString().slice(0, 13);
+  if (silentFinish.hour !== hour) {
+    silentFinish.hour = hour;
+    silentFinish.hourCount = 0;
+  }
+  silentFinish.hourCount++;
+  silentFinish.total++;
+  return {
+    hour,
+    hourCount: silentFinish.hourCount,
+    total: silentFinish.total,
+  };
+}
+
+function extractInternalSample(raw: string): string {
+  let combined = '';
+  for (const m of raw.matchAll(INTERNAL_CONTENT_RX)) combined += m[1];
+  return combined.trim();
+}
+
+function buildAckStub(raw: string): string {
+  const sample = extractInternalSample(raw);
+  if (!sample) return ACK_FALLBACK;
+  const truncated =
+    sample.length > ACK_INTERNAL_SAMPLE_LIMIT
+      ? `${sample.slice(0, ACK_INTERNAL_SAMPLE_LIMIT)}…`
+      : sample;
+  return `${ACK_PREFIX} (внутренняя записка: ${truncated})`;
+}
 
 export function beginTurn(
   jid: string,
@@ -67,15 +121,21 @@ export function checkClassA(state: TurnState, text: string): void {
   );
 }
 
-export function checkClassB(
+export interface CheckClassBOpts {
+  hadError: boolean;
+  sendAckStub?: (text: string) => Promise<void>;
+}
+
+export async function checkClassB(
   state: TurnState,
   raw: string,
-  opts: { hadError: boolean },
-): void {
+  opts: CheckClassBOpts,
+): Promise<void> {
   if (opts.hadError) return;
   if (!state.isUserFacing) return;
   if (state.outboundCount > 0) return;
   const stripped = raw.replace(INTERNAL_RX, '').trim();
+  if (stripped.length > 0) return;
   const internalBlockCount = (raw.match(INTERNAL_OPEN_RX) || []).length;
   logger.warn(
     {
@@ -88,6 +148,37 @@ export function checkClassB(
     },
     'CLASS_B_SILENT_DEADLOCK: user-facing turn ended without outbound',
   );
+
+  if (!opts.sendAckStub) return;
+
+  const ackStub = buildAckStub(raw);
+  const { hour, hourCount, total } = bumpSilentFinishCounter();
+  logger.info(
+    { hour, hourCount, total },
+    `silent_finish_count=${hourCount} / hour=${hour} / total=${total}`,
+  );
+
+  const threshold = silentFinishThreshold();
+  if (hourCount > threshold) {
+    logger.warn(
+      {
+        group: state.groupName,
+        jid: state.jid,
+        hour,
+        hourCount,
+        threshold,
+      },
+      'excess silent finishes',
+    );
+  }
+
+  await opts.sendAckStub(ackStub);
+}
+
+export function _resetSilentFinishCounter(): void {
+  silentFinish.hour = '';
+  silentFinish.hourCount = 0;
+  silentFinish.total = 0;
 }
 
 export const _RAW_SAMPLE_LIMIT = RAW_SAMPLE_LIMIT;
