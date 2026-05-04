@@ -32,6 +32,11 @@ vi.mock('../group-folder.js', () => ({
   ),
 }));
 
+vi.mock('../db.js', () => ({
+  deleteSession: vi.fn(),
+  getTasksForGroup: vi.fn(() => []),
+}));
+
 // --- Grammy mock ---
 
 type Handler = (...args: any[]) => any;
@@ -83,7 +88,15 @@ vi.mock('grammy', () => ({
 }));
 
 import fs from 'fs';
-import { TelegramChannel, TelegramChannelOpts } from './telegram.js';
+import { getTasksForGroup } from '../db.js';
+import {
+  TelegramChannel,
+  TelegramChannelOpts,
+  formatTasksList,
+  formatTaskSchedule,
+  formatTaskTimestamp,
+} from './telegram.js';
+import type { ScheduledTask } from '../types.js';
 
 // --- Test helpers ---
 
@@ -1367,6 +1380,109 @@ describe('TelegramChannel', () => {
 
       expect(ctx.reply).toHaveBeenCalledWith('Andy is online.');
     });
+
+    describe('/tasks', () => {
+      function makeTask(overrides: Partial<ScheduledTask>): ScheduledTask {
+        return {
+          id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          group_folder: 'test-group',
+          chat_jid: 'tg:100200300',
+          prompt: 'Do the thing',
+          script: null,
+          schedule_type: 'cron',
+          schedule_value: '*/5 * * * *',
+          context_mode: 'isolated',
+          next_run: null,
+          last_run: null,
+          last_result: null,
+          status: 'active',
+          created_at: '2026-05-04T00:00:00.000Z',
+          ...overrides,
+        };
+      }
+
+      it('replies with formatted list for registered group (cron + interval)', async () => {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        vi.mocked(getTasksForGroup).mockReturnValueOnce([
+          makeTask({
+            id: '11111111-2222-3333-4444-555555555555',
+            schedule_type: 'cron',
+            schedule_value: '*/5 * * * *',
+            prompt: 'Check inbox and reply',
+            status: 'active',
+            next_run: null,
+            last_run: null,
+          }),
+          makeTask({
+            id: '99999999-8888-7777-6666-555555555555',
+            schedule_type: 'interval',
+            schedule_value: '3600000',
+            prompt: 'Hourly heartbeat',
+            status: 'paused',
+            next_run: null,
+            last_run: null,
+          }),
+        ]);
+
+        const handler = currentBot().commandHandlers.get('tasks')!;
+        const ctx = {
+          chat: { id: 100200300, type: 'group' as const },
+          reply: vi.fn(),
+        };
+        await handler(ctx);
+
+        expect(getTasksForGroup).toHaveBeenCalledWith('test-group');
+        expect(ctx.reply).toHaveBeenCalledTimes(1);
+        const [text, options] = ctx.reply.mock.calls[0];
+        expect(options).toEqual({ parse_mode: 'Markdown' });
+        expect(text).toContain(
+          '• #11111111 — `*/5 * * * *` (every 5 min) (cron) — active',
+        );
+        expect(text).toContain('• #99999999 — every 1h (interval) — paused');
+        expect(text).toContain('Prompt: «Check inbox and reply»');
+        expect(text).toContain('Prompt: «Hourly heartbeat»');
+        expect(text).toContain('Next: — · Last: —');
+      });
+
+      it('replies with empty-list message when group has no tasks', async () => {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        vi.mocked(getTasksForGroup).mockReturnValueOnce([]);
+
+        const handler = currentBot().commandHandlers.get('tasks')!;
+        const ctx = {
+          chat: { id: 100200300, type: 'group' as const },
+          reply: vi.fn(),
+        };
+        await handler(ctx);
+
+        expect(ctx.reply).toHaveBeenCalledWith(
+          'No scheduled tasks for this group.',
+          { parse_mode: 'Markdown' },
+        );
+      });
+
+      it('replies "Chat not registered." for unknown chat', async () => {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        const handler = currentBot().commandHandlers.get('tasks')!;
+        const ctx = {
+          chat: { id: 999999, type: 'group' as const },
+          reply: vi.fn(),
+        };
+        await handler(ctx);
+
+        expect(ctx.reply).toHaveBeenCalledWith('Chat not registered.');
+        expect(getTasksForGroup).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // --- Channel properties ---
@@ -1549,6 +1665,114 @@ describe('TelegramChannel', () => {
       expect(channel.getCachedReaction('tg:100200300', '43')).toBe('👌');
       expect(channel.getCachedReaction('tg:999', '42')).toBeUndefined();
     });
+  });
+});
+
+describe('formatTaskSchedule', () => {
+  it('decodes common cron patterns and wraps raw expression in code', () => {
+    expect(formatTaskSchedule('cron', '*/5 * * * *')).toBe(
+      '`*/5 * * * *` (every 5 min)',
+    );
+    expect(formatTaskSchedule('cron', '0 * * * *')).toBe(
+      '`0 * * * *` (hourly)',
+    );
+    expect(formatTaskSchedule('cron', '0 9 * * *')).toBe(
+      '`0 9 * * *` (daily at 09:00)',
+    );
+    expect(formatTaskSchedule('cron', '0 17 * * 1-5')).toBe(
+      '`0 17 * * 1-5` (weekdays at 17:00)',
+    );
+  });
+
+  it('falls back to raw cron expression when pattern unknown', () => {
+    expect(formatTaskSchedule('cron', '15 3 1,15 * *')).toBe('`15 3 1,15 * *`');
+  });
+
+  it('formats interval ms as every Xh / Xm / Xs', () => {
+    expect(formatTaskSchedule('interval', '3600000')).toBe('every 1h');
+    expect(formatTaskSchedule('interval', '300000')).toBe('every 5m');
+    expect(formatTaskSchedule('interval', '15000')).toBe('every 15s');
+  });
+
+  it('returns once value as-is', () => {
+    expect(formatTaskSchedule('once', '2026-05-04T10:00:00')).toBe(
+      '2026-05-04T10:00:00',
+    );
+  });
+});
+
+describe('formatTaskTimestamp', () => {
+  it('returns em-dash for null', () => {
+    expect(formatTaskTimestamp(null, new Date())).toBe('—');
+  });
+
+  it('formats future ISO with ~Xm offset', () => {
+    const now = new Date('2026-05-04T08:00:00.000Z');
+    const future = new Date(now.getTime() + 7 * 60_000).toISOString();
+    expect(formatTaskTimestamp(future, now)).toMatch(/\(~7m\)$/);
+  });
+
+  it('formats past ISO with negative offset', () => {
+    const now = new Date('2026-05-04T08:00:00.000Z');
+    const past = new Date(now.getTime() - 3 * 3600_000).toISOString();
+    expect(formatTaskTimestamp(past, now)).toMatch(/\(-3h\)$/);
+  });
+});
+
+describe('formatTasksList', () => {
+  function task(overrides: Partial<ScheduledTask>): ScheduledTask {
+    return {
+      id: 'aaaaaaaa-bbbb',
+      group_folder: 'g',
+      chat_jid: 'tg:1',
+      prompt: 'p',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '*/5 * * * *',
+      context_mode: 'isolated',
+      next_run: null,
+      last_run: null,
+      last_result: null,
+      status: 'active',
+      created_at: '2026-05-04T00:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  it('returns empty-list message for []', () => {
+    expect(formatTasksList([], new Date())).toBe(
+      'No scheduled tasks for this group.',
+    );
+  });
+
+  it('truncates long prompt to 80 chars with ellipsis and escapes Markdown', () => {
+    const long = 'a'.repeat(100) + ' *bold* _it_';
+    const out = formatTasksList(
+      [task({ prompt: long })],
+      new Date('2026-05-04T08:00:00.000Z'),
+    );
+    expect(out).toContain('«' + 'a'.repeat(79) + '…»');
+  });
+
+  it('escapes Markdown special chars in short prompts', () => {
+    const out = formatTasksList(
+      [task({ prompt: 'see *bold* and `code`' })],
+      new Date('2026-05-04T08:00:00.000Z'),
+    );
+    expect(out).toContain('«see \\*bold\\* and \\`code\\`»');
+  });
+
+  it('joins multiple tasks with blank line separator', () => {
+    const out = formatTasksList(
+      [
+        task({ id: '11111111-aa', prompt: 'one' }),
+        task({ id: '22222222-bb', prompt: 'two' }),
+      ],
+      new Date('2026-05-04T08:00:00.000Z'),
+    );
+    expect(out).toContain('#11111111');
+    expect(out).toContain('#22222222');
+    expect(out.split('\n\n').length).toBe(2);
   });
 });
 
