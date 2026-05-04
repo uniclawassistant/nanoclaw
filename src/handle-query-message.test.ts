@@ -107,4 +107,90 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
     expect(emitted[0]?.turnEnd).toBe(true);
     expect(emitted[0]?.result).toBeNull();
   });
+
+  it('extracts SDK usage block + total_cost_usd into the emitted output (FED-20)', async () => {
+    const { emitted, state, deps } = makeHarness();
+    const sequence: QueryMessage[] = [
+      { type: 'system', subtype: 'init', session_id: 'sess-4' },
+      {
+        type: 'result',
+        subtype: 'success',
+        result: 'ok',
+        total_cost_usd: 0.1234,
+        num_turns: 7,
+        usage: {
+          input_tokens: 1500,
+          output_tokens: 320,
+          cache_read_input_tokens: 4000,
+          cache_creation_input_tokens: 100,
+        },
+        modelUsage: {
+          'claude-opus-4-7': {
+            inputTokens: 1500,
+            outputTokens: 320,
+            cacheReadInputTokens: 4000,
+            cacheCreationInputTokens: 100,
+            contextWindow: 1_000_000,
+          },
+        },
+      },
+    ];
+
+    for await (const message of mockSdkStream(sequence)) {
+      handleQueryMessage(message, state, deps);
+    }
+
+    expect(emitted).toHaveLength(1);
+    const out = emitted[0]!;
+    expect(out.usage).toBeDefined();
+    expect(out.usage?.inputTokens).toBe(1500);
+    expect(out.usage?.outputTokens).toBe(320);
+    expect(out.usage?.cacheReadInputTokens).toBe(4000);
+    expect(out.usage?.cacheCreationInputTokens).toBe(100);
+    expect(out.usage?.totalCostUsd).toBeCloseTo(0.1234, 6);
+    expect(out.usage?.contextWindow).toBe(1_000_000);
+    expect(out.usage?.contextUsedTokens).toBe(1500 + 4000 + 100);
+    expect(out.usage?.numTurns).toBe(7);
+  });
+
+  it('emits usage with null total_cost_usd when SDK omits it', async () => {
+    const { emitted, state, deps } = makeHarness();
+    const sequence: QueryMessage[] = [
+      { type: 'system', subtype: 'init', session_id: 'sess-5' },
+      {
+        type: 'result',
+        subtype: 'success',
+        result: 'ok',
+        usage: {
+          input_tokens: 100,
+          output_tokens: 20,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      },
+    ];
+
+    for await (const message of mockSdkStream(sequence)) {
+      handleQueryMessage(message, state, deps);
+    }
+
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.usage?.totalCostUsd).toBeNull();
+    expect(emitted[0]?.usage?.contextWindow).toBeNull();
+  });
+
+  it('omits usage on result without a usage block', async () => {
+    const { emitted, state, deps } = makeHarness();
+    const sequence: QueryMessage[] = [
+      { type: 'system', subtype: 'init', session_id: 'sess-6' },
+      { type: 'result', subtype: 'success', result: 'ok' },
+    ];
+
+    for await (const message of mockSdkStream(sequence)) {
+      handleQueryMessage(message, state, deps);
+    }
+
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.usage).toBeUndefined();
+  });
 });

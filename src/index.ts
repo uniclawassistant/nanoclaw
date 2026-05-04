@@ -68,6 +68,11 @@ import {
   endTurn,
   recordOutbound,
 } from './outbound-mismatch-hook.js';
+import {
+  checkThreshold,
+  formatUsageLine,
+  recordUsage,
+} from './usage-tracker.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { editImage, generateImage } from './image-gen.js';
 import { buildVoiceDirective, synthesize } from './tts.js';
@@ -544,7 +549,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  const usageLine = formatUsageLine(chatJid);
+  const prompt = usageLine
+    ? `${usageLine}\n${formatMessages(missedMessages, TIMEZONE)}`
+    : formatMessages(missedMessages, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -627,6 +635,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             outputSentToUser = true;
           },
         });
+        if (result.usage) {
+          const state = recordUsage({
+            jid: chatJid,
+            sessionId: result.newSessionId ?? sessions[group.folder] ?? null,
+            usage: result.usage,
+            origin: 'interactive',
+          });
+          const threshold = checkThreshold(state);
+          if (threshold) {
+            await sendText(channel, chatJid, threshold.message, replyThreadId);
+            outputSentToUser = true;
+          }
+        }
         turnState.outboundCount = 0;
         rawAccumulated = '';
         turnEndProcessed = true;
