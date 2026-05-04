@@ -23,6 +23,11 @@ import {
   PreCompactHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import {
+  handleQueryMessage,
+  type AgentRunnerOutput,
+  type QueryLoopState,
+} from './handle-query-message.js';
 
 interface ContainerInput {
   prompt: string;
@@ -35,13 +40,7 @@ interface ContainerInput {
   script?: string;
 }
 
-interface ContainerOutput {
-  status: 'success' | 'error';
-  result: string | null;
-  newSessionId?: string;
-  error?: string;
-  turnEnd?: boolean;
-}
+type ContainerOutput = AgentRunnerOutput;
 
 interface SessionEntry {
   sessionId: string;
@@ -440,10 +439,10 @@ async function runQuery(
   };
   setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
 
-  let newSessionId: string | undefined;
-  let lastAssistantUuid: string | undefined;
-  let messageCount = 0;
-  let resultCount = 0;
+  const state: QueryLoopState = {
+    messageCount: 0,
+    resultCount: 0,
+  };
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -528,56 +527,25 @@ async function runQuery(
       },
     },
   })) {
-    messageCount++;
-    const msgType =
-      message.type === 'system'
-        ? `system/${(message as { subtype?: string }).subtype}`
-        : message.type;
-    log(`[msg #${messageCount}] type=${msgType}`);
-
-    if (message.type === 'assistant' && 'uuid' in message) {
-      lastAssistantUuid = (message as { uuid: string }).uuid;
-    }
-
-    if (message.type === 'system' && message.subtype === 'init') {
-      newSessionId = message.session_id;
-      log(`Session initialized: ${newSessionId}`);
-    }
-
-    if (
-      message.type === 'system' &&
-      (message as { subtype?: string }).subtype === 'task_notification'
-    ) {
-      const tn = message as {
-        task_id: string;
-        status: string;
-        summary: string;
-      };
-      log(
-        `Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`,
-      );
-    }
-
-    if (message.type === 'result') {
-      resultCount++;
-      const textResult =
-        'result' in message ? (message as { result?: string }).result : null;
-      log(
-        `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
-      );
-      writeOutput({
-        status: 'success',
-        result: textResult || null,
-        newSessionId,
-      });
-    }
+    handleQueryMessage(
+      message as { type: string } & Record<string, unknown>,
+      state,
+      {
+        emit: writeOutput,
+        log,
+      },
+    );
   }
 
   ipcPolling = false;
   log(
-    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
+    `Query done. Messages: ${state.messageCount}, results: ${state.resultCount}, lastAssistantUuid: ${state.lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
   );
-  return { newSessionId, lastAssistantUuid, closedDuringQuery };
+  return {
+    newSessionId: state.newSessionId,
+    lastAssistantUuid: state.lastAssistantUuid,
+    closedDuringQuery,
+  };
 }
 
 interface ScriptResult {
@@ -740,14 +708,6 @@ async function main(): Promise<void> {
         log('Close sentinel consumed during query, exiting');
         break;
       }
-
-      // Emit session update so host can track it
-      writeOutput({
-        status: 'success',
-        result: null,
-        newSessionId: sessionId,
-        turnEnd: true,
-      });
 
       log('Query ended, waiting for next IPC message...');
 
