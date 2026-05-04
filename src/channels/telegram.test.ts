@@ -95,6 +95,7 @@ import {
   formatTasksList,
   formatTaskSchedule,
   formatTaskTimestamp,
+  shortenTaskId,
 } from './telegram.js';
 import type { ScheduledTask } from '../types.js';
 
@@ -1408,7 +1409,7 @@ describe('TelegramChannel', () => {
 
         vi.mocked(getTasksForGroup).mockReturnValueOnce([
           makeTask({
-            id: '11111111-2222-3333-4444-555555555555',
+            id: 'task-1777659847821-30z1xo',
             schedule_type: 'cron',
             schedule_value: '*/5 * * * *',
             prompt: 'Check inbox and reply',
@@ -1417,7 +1418,7 @@ describe('TelegramChannel', () => {
             last_run: null,
           }),
           makeTask({
-            id: '99999999-8888-7777-6666-555555555555',
+            id: 'task-1777659847900-abc123',
             schedule_type: 'interval',
             schedule_value: '3600000',
             prompt: 'Hourly heartbeat',
@@ -1439,9 +1440,9 @@ describe('TelegramChannel', () => {
         const [text, options] = ctx.reply.mock.calls[0];
         expect(options).toEqual({ parse_mode: 'Markdown' });
         expect(text).toContain(
-          '• #11111111 — `*/5 * * * *` (every 5 min) (cron) — active',
+          '• #30z1xo — `*/5 * * * *` (every 5 min) (cron) — active',
         );
-        expect(text).toContain('• #99999999 — every 1h (interval) — paused');
+        expect(text).toContain('• #abc123 — every 1h (interval) — paused');
         expect(text).toContain('Prompt: «Check inbox and reply»');
         expect(text).toContain('Prompt: «Hourly heartbeat»');
         expect(text).toContain('Next: — · Last: —');
@@ -1717,6 +1718,34 @@ describe('formatTaskTimestamp', () => {
     const past = new Date(now.getTime() - 3 * 3600_000).toISOString();
     expect(formatTaskTimestamp(past, now)).toMatch(/\(-3h\)$/);
   });
+
+  it('converts UTC → Europe/Stockholm with CEST suffix in summer (DST)', () => {
+    const now = new Date('2026-05-04T06:23:00.000Z');
+    expect(formatTaskTimestamp('2026-05-04T06:23:00.000Z', now)).toBe(
+      '2026-05-04 08:23 CEST (~0m)',
+    );
+  });
+
+  it('uses CET suffix in winter (no DST)', () => {
+    const now = new Date('2026-01-15T07:00:00.000Z');
+    expect(formatTaskTimestamp('2026-01-15T07:00:00.000Z', now)).toBe(
+      '2026-01-15 08:00 CET (~0m)',
+    );
+  });
+});
+
+describe('shortenTaskId', () => {
+  it('returns suffix after the last dash for normal scheduler ids', () => {
+    expect(shortenTaskId('task-1777659847821-30z1xo')).toBe('30z1xo');
+  });
+
+  it('falls back to last 6 chars when there is no dash', () => {
+    expect(shortenTaskId('abcdef1234567890')).toBe('567890');
+  });
+
+  it('falls back to last 6 chars when the suffix is empty', () => {
+    expect(shortenTaskId('task-1777659847821-')).toBe('47821-');
+  });
 });
 
 describe('formatTasksList', () => {
@@ -1745,13 +1774,22 @@ describe('formatTasksList', () => {
     );
   });
 
-  it('truncates long prompt to 80 chars with ellipsis and escapes Markdown', () => {
-    const long = 'a'.repeat(100) + ' *bold* _it_';
+  it('truncates long prompt to 200 chars with ellipsis and escapes Markdown', () => {
+    const long = 'a'.repeat(250) + ' *bold* _it_';
     const out = formatTasksList(
       [task({ prompt: long })],
       new Date('2026-05-04T08:00:00.000Z'),
     );
-    expect(out).toContain('«' + 'a'.repeat(79) + '…»');
+    expect(out).toContain('«' + 'a'.repeat(199) + '…»');
+  });
+
+  it('keeps prompts under 200 chars intact (no truncation)', () => {
+    const prompt = 'a'.repeat(150);
+    const out = formatTasksList(
+      [task({ prompt })],
+      new Date('2026-05-04T08:00:00.000Z'),
+    );
+    expect(out).toContain('«' + prompt + '»');
   });
 
   it('escapes Markdown special chars in short prompts', () => {
@@ -1762,16 +1800,16 @@ describe('formatTasksList', () => {
     expect(out).toContain('«see \\*bold\\* and \\`code\\`»');
   });
 
-  it('joins multiple tasks with blank line separator', () => {
+  it('joins multiple tasks with blank-line separator and uses shortened suffix as id', () => {
     const out = formatTasksList(
       [
-        task({ id: '11111111-aa', prompt: 'one' }),
-        task({ id: '22222222-bb', prompt: 'two' }),
+        task({ id: 'task-1777659847821-30z1xo', prompt: 'one' }),
+        task({ id: 'task-1777659847900-abc123', prompt: 'two' }),
       ],
       new Date('2026-05-04T08:00:00.000Z'),
     );
-    expect(out).toContain('#11111111');
-    expect(out).toContain('#22222222');
+    expect(out).toContain('#30z1xo');
+    expect(out).toContain('#abc123');
     expect(out.split('\n\n').length).toBe(2);
   });
 });

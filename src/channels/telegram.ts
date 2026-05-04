@@ -60,14 +60,26 @@ function formatRelativeOffset(diffMs: number): string {
   return `${sign}${day}d`;
 }
 
+const STOCKHOLM_TS_FMT = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Europe/Stockholm',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+  timeZoneName: 'short',
+});
+
 export function formatTaskTimestamp(iso: string | null, now: Date): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  const stamp = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(
-    d.getDate(),
-  )} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  return `${stamp} (${formatRelativeOffset(d.getTime() - now.getTime())})`;
+  const parts = STOCKHOLM_TS_FMT.formatToParts(d);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  const stamp = `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`;
+  const tz = get('timeZoneName');
+  return `${stamp} ${tz} (${formatRelativeOffset(d.getTime() - now.getTime())})`;
 }
 
 function decodeCron(expr: string): string | null {
@@ -115,15 +127,23 @@ function truncatePromptForList(s: string, max: number): string {
   return collapsed.slice(0, max - 1) + '…';
 }
 
+export function shortenTaskId(id: string): string {
+  const idx = id.lastIndexOf('-');
+  if (idx === -1) return id.slice(-6);
+  const suffix = id.slice(idx + 1);
+  if (suffix.length === 0) return id.slice(-6);
+  return suffix;
+}
+
 export function formatTasksList(tasks: ScheduledTask[], now: Date): string {
   if (tasks.length === 0) return 'No scheduled tasks for this group.';
   return tasks
     .map((t) => {
-      const idShort = t.id.slice(0, 8);
+      const idShort = shortenTaskId(t.id);
       const schedule = formatTaskSchedule(t.schedule_type, t.schedule_value);
       const next = formatTaskTimestamp(t.next_run, now);
       const last = formatTaskTimestamp(t.last_run, now);
-      const prompt = escapeMarkdownV1(truncatePromptForList(t.prompt, 80));
+      const prompt = escapeMarkdownV1(truncatePromptForList(t.prompt, 200));
       return [
         `• #${idShort} — ${schedule} (${t.schedule_type}) — ${t.status}`,
         `  Next: ${next} · Last: ${last}`,
