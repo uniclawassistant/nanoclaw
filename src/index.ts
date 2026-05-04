@@ -5,6 +5,7 @@ import { OneCLI } from '@onecli-sh/sdk';
 
 import {
   ASSISTANT_NAME,
+  DATA_DIR,
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
@@ -700,7 +701,33 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  let sessionId: string | undefined = sessions[group.folder];
+
+  // FED-21 Bug 3 guard: if a sessionId is cached but its JSONL file no longer
+  // exists on disk (e.g. /new wiped it without our knowledge, or a crash mid
+  // session), drop the cached id silently instead of letting the SDK raise
+  // "no conversation found" and round-tripping through the staleSession
+  // recovery path. This makes /new's reset deterministic on the next turn.
+  if (sessionId) {
+    const jsonlPath = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      '.claude',
+      'projects',
+      '-workspace-group',
+      `${sessionId}.jsonl`,
+    );
+    if (!fs.existsSync(jsonlPath)) {
+      logger.info(
+        { group: group.name, droppedSessionId: sessionId },
+        'Cached sessionId has no JSONL on disk — starting fresh',
+      );
+      delete sessions[group.folder];
+      deleteSession(group.folder);
+      sessionId = undefined;
+    }
+  }
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -1042,6 +1069,9 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    clearInMemorySession: (folder: string) => {
+      delete sessions[folder];
+    },
   };
 
   // Create and connect all registered channels.
