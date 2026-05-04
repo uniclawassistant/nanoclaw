@@ -113,6 +113,18 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
     const sequence: QueryMessage[] = [
       { type: 'system', subtype: 'init', session_id: 'sess-4' },
       {
+        type: 'assistant',
+        uuid: 'a1',
+        message: {
+          usage: {
+            input_tokens: 1500,
+            output_tokens: 320,
+            cache_read_input_tokens: 4000,
+            cache_creation_input_tokens: 100,
+          },
+        },
+      },
+      {
         type: 'result',
         subtype: 'success',
         result: 'ok',
@@ -151,6 +163,133 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
     expect(out.usage?.contextWindow).toBe(1_000_000);
     expect(out.usage?.contextUsedTokens).toBe(1500 + 4000 + 100);
     expect(out.usage?.numTurns).toBe(7);
+  });
+
+  it('FED-21: contextUsedTokens uses last assistant per-call usage, not cumulative result.usage', async () => {
+    const { emitted, state, deps } = makeHarness();
+    // Three turns inside one open query() session. The SDK's `result.usage`
+    // accumulates across all API calls in the session, while each
+    // `assistant.message.usage` is per-API-call. The host needs the per-call
+    // value to render an accurate context-size indicator.
+    const sequence: QueryMessage[] = [
+      { type: 'system', subtype: 'init', session_id: 'sess-multi' },
+      {
+        type: 'assistant',
+        uuid: 'a1',
+        message: {
+          usage: {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: 80_000,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      },
+      {
+        type: 'result',
+        subtype: 'success',
+        result: 'r1',
+        total_cost_usd: 0.5,
+        usage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          cache_read_input_tokens: 80_000,
+          cache_creation_input_tokens: 0,
+        },
+      },
+      {
+        type: 'assistant',
+        uuid: 'a2',
+        message: {
+          usage: {
+            input_tokens: 200,
+            output_tokens: 75,
+            cache_read_input_tokens: 90_000,
+            cache_creation_input_tokens: 100,
+          },
+        },
+      },
+      {
+        // result.usage cumulative-усугублённое: input/cache from BOTH turns.
+        type: 'result',
+        subtype: 'success',
+        result: 'r2',
+        total_cost_usd: 1.1,
+        usage: {
+          input_tokens: 300,
+          output_tokens: 125,
+          cache_read_input_tokens: 170_000,
+          cache_creation_input_tokens: 100,
+        },
+      },
+      {
+        type: 'assistant',
+        uuid: 'a3',
+        message: {
+          usage: {
+            input_tokens: 400,
+            output_tokens: 90,
+            cache_read_input_tokens: 95_000,
+            cache_creation_input_tokens: 200,
+          },
+        },
+      },
+      {
+        type: 'result',
+        subtype: 'success',
+        result: 'r3',
+        total_cost_usd: 1.7,
+        usage: {
+          input_tokens: 700,
+          output_tokens: 215,
+          cache_read_input_tokens: 265_000,
+          cache_creation_input_tokens: 300,
+        },
+      },
+    ];
+
+    for await (const message of mockSdkStream(sequence)) {
+      handleQueryMessage(message, state, deps);
+    }
+
+    expect(emitted).toHaveLength(3);
+    // contextUsedTokens reflects per-call context size of the assistant
+    // message that immediately preceded each result.
+    expect(emitted[0]?.usage?.contextUsedTokens).toBe(100 + 80_000 + 0);
+    expect(emitted[1]?.usage?.contextUsedTokens).toBe(200 + 90_000 + 100);
+    expect(emitted[2]?.usage?.contextUsedTokens).toBe(400 + 95_000 + 200);
+    // total_cost_usd remains the cumulative cost from result message — that
+    // is the authoritative session cost figure.
+    expect(emitted[0]?.usage?.totalCostUsd).toBeCloseTo(0.5, 6);
+    expect(emitted[1]?.usage?.totalCostUsd).toBeCloseTo(1.1, 6);
+    expect(emitted[2]?.usage?.totalCostUsd).toBeCloseTo(1.7, 6);
+  });
+
+  it('FED-21: falls back to result.usage for context when no assistant.usage seen', async () => {
+    // Single-turn / SDK-omits-assistant-usage case: contextUsedTokens
+    // gracefully falls back to result.usage so we never emit zero context.
+    const { emitted, state, deps } = makeHarness();
+    const sequence: QueryMessage[] = [
+      { type: 'system', subtype: 'init', session_id: 'sess-fallback' },
+      {
+        type: 'result',
+        subtype: 'success',
+        result: 'ok',
+        usage: {
+          input_tokens: 50,
+          output_tokens: 20,
+          cache_read_input_tokens: 1000,
+          cache_creation_input_tokens: 5,
+        },
+      },
+    ];
+
+    for await (const message of mockSdkStream(sequence)) {
+      handleQueryMessage(message, state, deps);
+    }
+
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.usage?.contextUsedTokens).toBe(50 + 1000 + 5);
   });
 
   it('emits usage with null total_cost_usd when SDK omits it', async () => {

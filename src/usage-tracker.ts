@@ -242,12 +242,12 @@ function formatThresholdMessage(
   pct: number,
 ): string {
   if (band === 0.7) {
-    return `[host] Контекст ${contextK}k/${contextMaxK}k (${pct}%) — может compact'нём перед следующей задачей?`;
+    return `[host] Context ${contextK}k/${contextMaxK}k (${pct}%) — consider /compact before the next task.`;
   }
   if (band === 0.85) {
-    return `[host] Контекст ${contextK}k/${contextMaxK}k (${pct}%) — рекомендую /compact сейчас.`;
+    return `[host] Context ${contextK}k/${contextMaxK}k (${pct}%) — recommend /compact now.`;
   }
-  return `[host] Контекст близок к лимиту (${pct}%) — нужен /compact или restart прямо сейчас.`;
+  return `[host] Context approaching limit (${pct}%) — run /compact or /new now.`;
 }
 
 export function formatUsageLine(jid: string): string | null {
