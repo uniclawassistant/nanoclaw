@@ -54,6 +54,7 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  turnEnd?: boolean;
 }
 
 interface VolumeMount {

@@ -585,6 +585,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     isUserFacing: true,
   });
   let rawAccumulated = '';
+  let turnEndProcessed = false;
 
   try {
     const output = await runAgent(group, prompt, chatJid, async (result) => {
@@ -617,20 +618,33 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       if (result.status === 'error') {
         hadError = true;
       }
+
+      if (result.turnEnd) {
+        await checkClassB(turnState, rawAccumulated, {
+          hadError,
+          sendAckStub: async (ackText) => {
+            await sendText(channel, chatJid, ackText, replyThreadId);
+            outputSentToUser = true;
+          },
+        });
+        turnState.outboundCount = 0;
+        rawAccumulated = '';
+        turnEndProcessed = true;
+      }
     });
 
     await channel.setTyping?.(chatJid, false);
     if (idleTimer) clearTimeout(idleTimer);
 
-    // FED-9 Class B: user-facing turn that produced no outbound. Skip on error
-    // — error path already logs separately and would create noisy duplicates.
-    await checkClassB(turnState, rawAccumulated, {
-      hadError: hadError || output === 'error',
-      sendAckStub: async (text) => {
-        await sendText(channel, chatJid, text, replyThreadId);
-        outputSentToUser = true;
-      },
-    });
+    if (!turnEndProcessed) {
+      await checkClassB(turnState, rawAccumulated, {
+        hadError: hadError || output === 'error',
+        sendAckStub: async (text) => {
+          await sendText(channel, chatJid, text, replyThreadId);
+          outputSentToUser = true;
+        },
+      });
+    }
 
     if (output === 'error' || hadError) {
       // If we already sent output to the user, don't roll back the cursor —
