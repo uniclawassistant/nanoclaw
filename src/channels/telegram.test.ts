@@ -1369,6 +1369,51 @@ describe('TelegramChannel', () => {
       );
     });
 
+    it('/new clears DB session and invokes clearInMemorySession callback', async () => {
+      const clearInMemorySession = vi.fn();
+      const opts = createTestOpts({ clearInMemorySession });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      // Skip the JSONL cleanup branch — execSync for `container list` is
+      // wrapped in a try/catch so the handler still proceeds.
+      vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+
+      const handler = currentBot().commandHandlers.get('new')!;
+      const ctx = {
+        chat: { id: 100200300, type: 'group' as const },
+        reply: vi.fn(),
+      };
+
+      const { deleteSession } = await import('../db.js');
+
+      await handler(ctx);
+
+      expect(deleteSession).toHaveBeenCalledWith('test-group');
+      expect(clearInMemorySession).toHaveBeenCalledWith('test-group');
+      expect(ctx.reply).toHaveBeenCalledWith(
+        'Session reset. Next message starts fresh.',
+      );
+    });
+
+    it('/new replies "not registered" for unknown chat (no callback)', async () => {
+      const clearInMemorySession = vi.fn();
+      const opts = createTestOpts({ clearInMemorySession });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const handler = currentBot().commandHandlers.get('new')!;
+      const ctx = {
+        chat: { id: 999999999, type: 'group' as const },
+        reply: vi.fn(),
+      };
+
+      await handler(ctx);
+
+      expect(clearInMemorySession).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith('Chat not registered.');
+    });
+
     it('/ping replies with bot status', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);

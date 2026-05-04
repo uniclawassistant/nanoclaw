@@ -157,6 +157,7 @@ export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  clearInMemorySession?: (folder: string) => void;
 }
 
 // Marker file used to notify a chat after /restart kickstart completes.
@@ -328,8 +329,11 @@ export class TelegramChannel implements Channel {
         }
       }
 
-      // Clear session ID from DB
+      // Clear session ID from DB and from the host's in-memory sessions map.
+      // The latter survives /new without this callback — the next user message
+      // would otherwise re-resume the old sessionId until the SDK errors out.
       deleteSession(group.folder);
+      this.opts.clearInMemorySession?.(group.folder);
       logger.info({ group: group.name }, '/new: session reset');
       ctx.reply('Session reset. Next message starts fresh.');
     });
