@@ -348,3 +348,25 @@ describe('container-runner timeout behavior', () => {
     expect(result.status).toBe('success');
   });
 });
+
+describe('containerNamePrefix', () => {
+  it('replaces underscores with dashes to match Apple Container naming', async () => {
+    const { containerNamePrefix } = await import('./container-runner.js');
+    // FED-21 hotfix root cause: spawn uses sanitized name, /new used the raw
+    // folder. With this folder the two diverged and /new silently missed.
+    expect(containerNamePrefix('telegram_fedor-unic-test')).toBe(
+      'nanoclaw-telegram-fedor-unic-test-',
+    );
+  });
+
+  it('passes through dash-only folder names unchanged', async () => {
+    const { containerNamePrefix } = await import('./container-runner.js');
+    expect(containerNamePrefix('main')).toBe('nanoclaw-main-');
+    expect(containerNamePrefix('test-group')).toBe('nanoclaw-test-group-');
+  });
+
+  it('strips other special chars (defensive — folder validation lives elsewhere)', async () => {
+    const { containerNamePrefix } = await import('./container-runner.js');
+    expect(containerNamePrefix('a.b/c_d')).toBe('nanoclaw-a-b-c-d-');
+  });
+});
