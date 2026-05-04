@@ -8,6 +8,7 @@ import type { ReactionType } from 'grammy/types';
 import { execSync } from 'child_process';
 
 import { ASSISTANT_NAME, DATA_DIR, TRIGGER_PATTERN } from '../config.js';
+import { containerNamePrefix } from '../container-runner.js';
 import { deleteSession, getTasksForGroup } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
@@ -297,7 +298,7 @@ export class TelegramChannel implements Channel {
           encoding: 'utf-8',
         });
         for (const line of list.split('\n')) {
-          if (line.includes(`nanoclaw-${group.folder}-`)) {
+          if (line.includes(containerNamePrefix(group.folder))) {
             const name = line.trim().split(/\s+/)[0];
             if (name) {
               execSync(`container stop ${name} 2>/dev/null`);
