@@ -23,6 +23,11 @@ export interface QueryLoopState {
   resultCount: number;
   newSessionId?: string;
   lastAssistantUuid?: string;
+  // FED-21: usage from the latest `assistant` message in the SDK stream.
+  // `result.usage` is cumulative across all internal API calls inside a
+  // single query() session; `assistant.message.usage` is per-API-call and
+  // accurately reflects the current context size of that call.
+  lastAssistantUsage?: SdkResultUsage;
 }
 
 export interface QueryLoopDeps {
@@ -44,8 +49,14 @@ export function handleQueryMessage(
       : message.type;
   deps.log(`[msg #${state.messageCount}] type=${msgType}`);
 
-  if (message.type === 'assistant' && 'uuid' in message) {
-    state.lastAssistantUuid = (message as unknown as { uuid: string }).uuid;
+  if (message.type === 'assistant') {
+    if ('uuid' in message) {
+      state.lastAssistantUuid = (message as unknown as { uuid: string }).uuid;
+    }
+    const inner = (message as { message?: { usage?: SdkResultUsage } }).message;
+    if (inner?.usage) {
+      state.lastAssistantUsage = inner.usage;
+    }
   }
 
   if (
@@ -75,7 +86,7 @@ export function handleQueryMessage(
     const textResult =
       'result' in message ? (message as { result?: string }).result : null;
     const subtype = (message as { subtype?: string }).subtype;
-    const usage = extractUsageFromResult(message);
+    const usage = extractUsageFromResult(message, state);
     deps.log(
       `Result #${state.resultCount}: subtype=${subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}${usage ? ` cost=${usage.totalCostUsd ?? 'null'} ctx=${usage.contextUsedTokens}/${usage.contextWindow ?? '?'}` : ''}`,
     );
@@ -104,14 +115,33 @@ interface SdkModelUsageEntry {
   contextWindow?: number;
 }
 
-function extractUsageFromResult(message: QueryMessage): UsageReport | null {
+function extractUsageFromResult(
+  message: QueryMessage,
+  state: QueryLoopState,
+): UsageReport | null {
   const usage = (message as { usage?: SdkResultUsage }).usage;
   if (!usage) return null;
 
   const inputTokens = numberOr(usage.input_tokens, 0);
   const outputTokens = numberOr(usage.output_tokens, 0);
   const cacheReadInputTokens = numberOr(usage.cache_read_input_tokens, 0);
-  const cacheCreationInputTokens = numberOr(usage.cache_creation_input_tokens, 0);
+  const cacheCreationInputTokens = numberOr(
+    usage.cache_creation_input_tokens,
+    0,
+  );
+
+  // FED-21: contextUsedTokens reflects the SIZE of the current context, which
+  // is per-API-call. `result.usage` is cumulative across all API calls inside
+  // a single query() session, so we fall back to the last assistant message's
+  // per-call usage when available.
+  const perCall = state.lastAssistantUsage;
+  const ctxInput = perCall ? numberOr(perCall.input_tokens, 0) : inputTokens;
+  const ctxCacheRead = perCall
+    ? numberOr(perCall.cache_read_input_tokens, 0)
+    : cacheReadInputTokens;
+  const ctxCacheCreate = perCall
+    ? numberOr(perCall.cache_creation_input_tokens, 0)
+    : cacheCreationInputTokens;
 
   const totalCostRaw = (message as { total_cost_usd?: unknown }).total_cost_usd;
   const totalCostUsd =
@@ -144,8 +174,7 @@ function extractUsageFromResult(message: QueryMessage): UsageReport | null {
     cacheCreationInputTokens,
     totalCostUsd,
     contextWindow,
-    contextUsedTokens:
-      inputTokens + cacheReadInputTokens + cacheCreationInputTokens,
+    contextUsedTokens: ctxInput + ctxCacheRead + ctxCacheCreate,
     numTurns,
   };
 }

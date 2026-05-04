@@ -239,7 +239,8 @@ describe('checkThreshold — 70/85/95% bands and anti-spam', () => {
     const state = getState('g1')!;
     const ev = checkThreshold(state);
     expect(ev?.band).toBe(0.95);
-    expect(ev?.message).toContain('лимиту');
+    expect(ev?.message).toContain('approaching limit');
+    expect(ev?.message).toContain('/new');
     expect(checkThreshold(state)).toBeNull();
   });
 

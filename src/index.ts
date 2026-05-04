@@ -870,8 +870,13 @@ async function startMessageLoop(): Promise<void> {
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend, TIMEZONE);
+          // FED-21 Bug 2: prepend [host-status] line on the IPC-pipe path so
+          // follow-up turns into a live container also see context/cost,
+          // matching processGroupMessages behavior on the cold-spawn path.
+          const usageLine = formatUsageLine(chatJid);
+          const piped = usageLine ? `${usageLine}\n${formatted}` : formatted;
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          if (queue.sendMessage(chatJid, piped)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
