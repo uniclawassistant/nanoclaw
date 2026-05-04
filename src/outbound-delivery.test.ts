@@ -341,6 +341,51 @@ describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
     expect(sendAckStub).toHaveBeenCalledTimes(3);
   });
 
+  it('per-Stop streaming flow (FED-17): ack-stub fires only on the silent Stop, state resets between turns', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const sendAckStub = vi.fn().mockResolvedValue(undefined);
+    const turn = beginTurn('tg:123', {
+      groupName: 'unic',
+      isUserFacing: true,
+    });
+
+    let raw = '';
+    const internalRx = /<internal>[\s\S]*?<\/internal>/g;
+    type Event = { type: 'text'; text: string } | { type: 'stop' };
+    const events: Event[] = [
+      { type: 'text', text: 'Hello' },
+      { type: 'stop' },
+      { type: 'text', text: '<internal>only</internal>' },
+      { type: 'stop' },
+      { type: 'text', text: 'Sorry, here is reply' },
+      { type: 'stop' },
+    ];
+
+    for (const ev of events) {
+      if (ev.type === 'text') {
+        raw += ev.text;
+        const stripped = ev.text.replace(internalRx, '').trim();
+        if (stripped) {
+          checkClassA(turn, stripped);
+          turn.outboundCount++;
+        }
+      } else {
+        await checkClassB(turn, raw, {
+          hadError: false,
+          sendAckStub,
+        });
+        turn.outboundCount = 0;
+        raw = '';
+      }
+    }
+
+    expect(sendAckStub).toHaveBeenCalledTimes(1);
+    const [text] = sendAckStub.mock.calls[0] as [string];
+    expect(text).toContain('Юник ушёл в тишину');
+    expect(text).toContain('only');
+  });
+
   it('warns "excess silent finishes" when hourly count exceeds SILENT_FINISH_THRESHOLD_PER_HOUR', async () => {
     process.env.SILENT_FINISH_THRESHOLD_PER_HOUR = '2';
     vi.spyOn(logger, 'info').mockImplementation(() => {});

@@ -40,6 +40,7 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  turnEnd?: boolean;
 }
 
 interface SessionEntry {
@@ -741,7 +742,12 @@ async function main(): Promise<void> {
       }
 
       // Emit session update so host can track it
-      writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+      writeOutput({
+        status: 'success',
+        result: null,
+        newSessionId: sessionId,
+        turnEnd: true,
+      });
 
       log('Query ended, waiting for next IPC message...');
 
