@@ -13,6 +13,12 @@ import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { transcribe } from '../stt.js';
+import {
+  filterTasksByStatus,
+  parseTaskFilter,
+  TaskFilter,
+  taskStatusEmoji,
+} from '../tasks-filter.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import allowedReactions from './telegram-allowed-reactions.json' with { type: 'json' };
 import {
@@ -135,8 +141,16 @@ export function shortenTaskId(id: string): string {
   return suffix;
 }
 
-export function formatTasksList(tasks: ScheduledTask[], now: Date): string {
-  if (tasks.length === 0) return 'No scheduled tasks for this group.';
+export function formatTasksList(
+  tasks: ScheduledTask[],
+  now: Date,
+  filter: TaskFilter = 'all',
+): string {
+  if (tasks.length === 0) {
+    if (filter === 'active') return 'No active scheduled tasks for this group.';
+    if (filter === 'paused') return 'No paused scheduled tasks for this group.';
+    return 'No scheduled tasks for this group.';
+  }
   return tasks
     .map((t) => {
       const idShort = shortenTaskId(t.id);
@@ -144,8 +158,9 @@ export function formatTasksList(tasks: ScheduledTask[], now: Date): string {
       const next = formatTaskTimestamp(t.next_run, now);
       const last = formatTaskTimestamp(t.last_run, now);
       const prompt = escapeMarkdownV1(truncatePromptForList(t.prompt, 200));
+      const emoji = taskStatusEmoji(t.status);
       return [
-        `• #${idShort} — ${schedule} (${t.schedule_type}) — ${t.status}`,
+        `• ${emoji} #${idShort} — ${schedule} (${t.schedule_type}) — ${t.status}`,
         `  Next: ${next} · Last: ${last}`,
         `  Prompt: «${prompt}»`,
       ].join('\n');
@@ -423,9 +438,13 @@ export class TelegramChannel implements Channel {
         return;
       }
 
-      const tasks = getTasksForGroup(group.folder);
-      const text = formatTasksList(tasks, new Date());
-      ctx.reply(text, { parse_mode: 'Markdown' });
+      const { filter, unknownArg } = parseTaskFilter(ctx.match);
+      const tasks = filterTasksByStatus(getTasksForGroup(group.folder), filter);
+      const body = formatTasksList(tasks, new Date(), filter);
+      const prefix = unknownArg
+        ? `unknown filter "${unknownArg}", showing active. supported: all | paused\n\n`
+        : '';
+      ctx.reply(prefix + body, { parse_mode: 'Markdown' });
     });
 
     // Telegram bot commands handled above — skip them in the general handler

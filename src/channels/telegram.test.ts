@@ -1453,35 +1453,47 @@ describe('TelegramChannel', () => {
         };
       }
 
-      it('replies with formatted list for registered group (cron + interval)', async () => {
+      const sampleTasks = () => [
+        makeTask({
+          id: 'task-1777659847821-30z1xo',
+          schedule_type: 'cron',
+          schedule_value: '*/5 * * * *',
+          prompt: 'Check inbox and reply',
+          status: 'active',
+          next_run: null,
+          last_run: null,
+        }),
+        makeTask({
+          id: 'task-1777659847900-abc123',
+          schedule_type: 'interval',
+          schedule_value: '3600000',
+          prompt: 'Hourly heartbeat',
+          status: 'paused',
+          next_run: null,
+          last_run: null,
+        }),
+        makeTask({
+          id: 'task-1777659847999-done01',
+          schedule_type: 'once',
+          schedule_value: '2026-05-04T00:00:00.000Z',
+          prompt: 'One-shot done',
+          status: 'completed',
+          next_run: null,
+          last_run: null,
+        }),
+      ];
+
+      it('default (no arg) shows only active tasks with ✓ emoji', async () => {
         const opts = createTestOpts();
         const channel = new TelegramChannel('test-token', opts);
         await channel.connect();
 
-        vi.mocked(getTasksForGroup).mockReturnValueOnce([
-          makeTask({
-            id: 'task-1777659847821-30z1xo',
-            schedule_type: 'cron',
-            schedule_value: '*/5 * * * *',
-            prompt: 'Check inbox and reply',
-            status: 'active',
-            next_run: null,
-            last_run: null,
-          }),
-          makeTask({
-            id: 'task-1777659847900-abc123',
-            schedule_type: 'interval',
-            schedule_value: '3600000',
-            prompt: 'Hourly heartbeat',
-            status: 'paused',
-            next_run: null,
-            last_run: null,
-          }),
-        ]);
+        vi.mocked(getTasksForGroup).mockReturnValueOnce(sampleTasks());
 
         const handler = currentBot().commandHandlers.get('tasks')!;
         const ctx = {
           chat: { id: 100200300, type: 'group' as const },
+          match: '',
           reply: vi.fn(),
         };
         await handler(ctx);
@@ -1491,15 +1503,111 @@ describe('TelegramChannel', () => {
         const [text, options] = ctx.reply.mock.calls[0];
         expect(options).toEqual({ parse_mode: 'Markdown' });
         expect(text).toContain(
-          '• #30z1xo — `*/5 * * * *` (every 5 min) (cron) — active',
+          '• ✓ #30z1xo — `*/5 * * * *` (every 5 min) (cron) — active',
         );
-        expect(text).toContain('• #abc123 — every 1h (interval) — paused');
-        expect(text).toContain('Prompt: «Check inbox and reply»');
-        expect(text).toContain('Prompt: «Hourly heartbeat»');
-        expect(text).toContain('Next: — · Last: —');
+        expect(text).not.toContain('#abc123');
+        expect(text).not.toContain('#done01');
       });
 
-      it('replies with empty-list message when group has no tasks', async () => {
+      it('/tasks all shows everything with appropriate emoji per row', async () => {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        vi.mocked(getTasksForGroup).mockReturnValueOnce(sampleTasks());
+
+        const handler = currentBot().commandHandlers.get('tasks')!;
+        const ctx = {
+          chat: { id: 100200300, type: 'group' as const },
+          match: 'all',
+          reply: vi.fn(),
+        };
+        await handler(ctx);
+
+        const [text] = ctx.reply.mock.calls[0];
+        expect(text).toContain(
+          '• ✓ #30z1xo — `*/5 * * * *` (every 5 min) (cron) — active',
+        );
+        expect(text).toContain('• ⏸ #abc123 — every 1h (interval) — paused');
+        expect(text).toContain('• ✗ #done01 —');
+        expect(text).toContain('completed');
+        expect(text).toContain('Prompt: «Check inbox and reply»');
+        expect(text).toContain('Prompt: «Hourly heartbeat»');
+      });
+
+      it('/tasks paused shows only paused tasks', async () => {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        vi.mocked(getTasksForGroup).mockReturnValueOnce(sampleTasks());
+
+        const handler = currentBot().commandHandlers.get('tasks')!;
+        const ctx = {
+          chat: { id: 100200300, type: 'group' as const },
+          match: 'paused',
+          reply: vi.fn(),
+        };
+        await handler(ctx);
+
+        const [text] = ctx.reply.mock.calls[0];
+        expect(text).toContain('• ⏸ #abc123 — every 1h (interval) — paused');
+        expect(text).not.toContain('#30z1xo');
+        expect(text).not.toContain('#done01');
+      });
+
+      it('unknown filter falls back to active and prefixes a hint', async () => {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        vi.mocked(getTasksForGroup).mockReturnValueOnce(sampleTasks());
+
+        const handler = currentBot().commandHandlers.get('tasks')!;
+        const ctx = {
+          chat: { id: 100200300, type: 'group' as const },
+          match: 'failed',
+          reply: vi.fn(),
+        };
+        await handler(ctx);
+
+        const [text] = ctx.reply.mock.calls[0];
+        expect(
+          text.startsWith(
+            'unknown filter "failed", showing active. supported: all | paused',
+          ),
+        ).toBe(true);
+        expect(text).toContain('• ✓ #30z1xo');
+        expect(text).not.toContain('#abc123');
+      });
+
+      it('replies with active-empty message when no active tasks', async () => {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        vi.mocked(getTasksForGroup).mockReturnValueOnce([
+          makeTask({
+            id: 'task-paused',
+            status: 'paused',
+          }),
+        ]);
+
+        const handler = currentBot().commandHandlers.get('tasks')!;
+        const ctx = {
+          chat: { id: 100200300, type: 'group' as const },
+          match: '',
+          reply: vi.fn(),
+        };
+        await handler(ctx);
+
+        expect(ctx.reply).toHaveBeenCalledWith(
+          'No active scheduled tasks for this group.',
+          { parse_mode: 'Markdown' },
+        );
+      });
+
+      it('replies with all-empty message for /tasks all when group has no tasks', async () => {
         const opts = createTestOpts();
         const channel = new TelegramChannel('test-token', opts);
         await channel.connect();
@@ -1509,6 +1617,7 @@ describe('TelegramChannel', () => {
         const handler = currentBot().commandHandlers.get('tasks')!;
         const ctx = {
           chat: { id: 100200300, type: 'group' as const },
+          match: 'all',
           reply: vi.fn(),
         };
         await handler(ctx);
@@ -1527,6 +1636,7 @@ describe('TelegramChannel', () => {
         const handler = currentBot().commandHandlers.get('tasks')!;
         const ctx = {
           chat: { id: 999999, type: 'group' as const },
+          match: '',
           reply: vi.fn(),
         };
         await handler(ctx);

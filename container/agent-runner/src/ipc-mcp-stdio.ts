@@ -12,6 +12,11 @@ import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 import allowedReactions from './telegram-allowed-reactions.json' with { type: 'json' };
+import {
+  filterTasksByStatus,
+  TaskFilter,
+  taskStatusEmoji,
+} from './tasks-filter.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -1026,10 +1031,18 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
 
 server.tool(
   'list_tasks',
-  "List all scheduled tasks. From main: shows all tasks. From other groups: shows only that group's tasks.",
-  {},
-  async () => {
+  "List scheduled tasks. From main: shows all tasks. From other groups: shows only that group's tasks. By default returns only active (running + scheduled) tasks; pass filter to widen.",
+  {
+    filter: z
+      .enum(['active', 'paused', 'all'])
+      .optional()
+      .describe(
+        'Which tasks to return. "active" (default) — running + scheduled-not-fired. "paused" — paused only. "all" — every task including completed/expired.',
+      ),
+  },
+  async (args) => {
     const tasksFile = path.join(IPC_DIR, 'current_tasks.json');
+    const filter: TaskFilter = args.filter ?? 'active';
 
     try {
       if (!fs.existsSync(tasksFile)) {
@@ -1042,31 +1055,38 @@ server.tool(
 
       const allTasks = JSON.parse(fs.readFileSync(tasksFile, 'utf-8'));
 
-      const tasks = isMain
+      const groupScoped = isMain
         ? allTasks
         : allTasks.filter(
             (t: { groupFolder: string }) => t.groupFolder === groupFolder,
           );
 
+      const tasks = filterTasksByStatus(
+        groupScoped as Array<{ status: string }>,
+        filter,
+      ) as Array<{
+        id: string;
+        prompt: string;
+        schedule_type: string;
+        schedule_value: string;
+        status: string;
+        next_run: string | null;
+      }>;
+
       if (tasks.length === 0) {
-        return {
-          content: [
-            { type: 'text' as const, text: 'No scheduled tasks found.' },
-          ],
-        };
+        const emptyMsg =
+          filter === 'active'
+            ? 'No active scheduled tasks found.'
+            : filter === 'paused'
+              ? 'No paused scheduled tasks found.'
+              : 'No scheduled tasks found.';
+        return { content: [{ type: 'text' as const, text: emptyMsg }] };
       }
 
       const formatted = tasks
         .map(
-          (t: {
-            id: string;
-            prompt: string;
-            schedule_type: string;
-            schedule_value: string;
-            status: string;
-            next_run: string;
-          }) =>
-            `- [${t.id}] ${t.prompt.slice(0, 50)}... (${t.schedule_type}: ${t.schedule_value}) - ${t.status}, next: ${t.next_run || 'N/A'}`,
+          (t) =>
+            `- ${taskStatusEmoji(t.status)} [${t.id}] ${t.prompt.slice(0, 50)}... (${t.schedule_type}: ${t.schedule_value}) - ${t.status}, next: ${t.next_run || 'N/A'}`,
         )
         .join('\n');
 
