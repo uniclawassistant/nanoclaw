@@ -1312,6 +1312,73 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+const RESET_SESSION_TIMEOUT_MS = 10_000;
+const RESET_SESSION_POLL_INTERVAL_MS = 100;
+
+server.tool(
+  'reset_session',
+  `Reset your conversation context for THIS chat. Two modes:
+
+• \`new\` — full reset, equivalent to a Telegram /new. Stops the running container, deletes the SDK conversation JSONL, drops the cached sessionId on the host. Next user message starts a baseline conversation (cache 0% hit, 1 turns counter, ctx ~baseline).
+• \`restart\` — container restart only. Stops the container; the SDK JSONL and sessionId are preserved, so the next user message resumes mid-conversation through SDK \`resume\` (cache may still hit, turn counter > 1).
+
+USE \`new\` after closing a long debug session, finishing an incident, or whenever you want a clean slate. USE \`restart\` if you suspect the container itself is in a bad state (stuck process, weird tool failures) but you want to keep the conversation intact.
+
+ALWAYS confirm with the user before calling — context loss in mode \`new\` is irreversible. Cross-folder reset is impossible: this only affects the chat you are currently running for.
+
+The tool returns synchronously once the host has accepted the request. The actual container kill happens out-of-band, after your current turn ends — so any \`send_message\` calls earlier in this turn will deliver normally, and the next user message lands on a cold-spawned container.
+
+RETURN (JSON in tool output): { ok: true } on accepted, { ok: false, error } on host unreachable or invalid mode.`,
+  {
+    mode: z
+      .enum(['new', 'restart'])
+      .describe(
+        '`new` for a full reset (baseline ctx). `restart` for a container kill while keeping the conversation.',
+      ),
+  },
+  async (args) => {
+    const requestId = crypto.randomUUID();
+    const data: Record<string, string | undefined> = {
+      type: 'reset_session',
+      mode: args.mode,
+      requestId,
+      groupFolder,
+      chatJid,
+      timestamp: new Date().toISOString(),
+    };
+    writeIpcFile(MESSAGES_DIR, data);
+
+    const responsePath = path.join(RESPONSES_DIR, `${requestId}.json`);
+    const deadline = Date.now() + RESET_SESSION_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(responsePath)) {
+        try {
+          const resp = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+          fs.unlinkSync(responsePath);
+          const payload = resp.success
+            ? { ok: true as const }
+            : { ok: false as const, error: resp.error ?? 'unknown error' };
+          return {
+            content: [
+              { type: 'text' as const, text: JSON.stringify(payload) },
+            ],
+            ...(resp.success ? {} : { isError: true as const }),
+          };
+        } catch (err) {
+          return toolError(
+            `Failed to read reset_session response: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      await sleep(RESET_SESSION_POLL_INTERVAL_MS);
+    }
+
+    return toolError(
+      'reset_session request timed out — host did not acknowledge within 10s.',
+    );
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

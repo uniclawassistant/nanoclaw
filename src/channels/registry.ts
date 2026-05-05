@@ -9,12 +9,12 @@ export interface ChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
-  // FED-21 Bug 3: clears the host-side in-memory `sessions[folder]` map so
-  // /new actually resets the SDK conversation. Without this the next user
-  // message after /new still carries the old sessionId as `resume` until the
-  // SDK errors out and we drop it via the staleSession path — meanwhile the
-  // ctx counter shows the pre-/new value.
-  clearInMemorySession?: (folder: string) => void;
+  // FED-21 / PR #61: resets a group's session via the host's shared
+  // resetGroupSession() helper. Channels (e.g. Telegram /new) should call
+  // this rather than reproducing the kill+JSONL-delete+sessions-clear logic
+  // inline, so spawn-time and shutdown-time naming stay in lockstep.
+  // mode='new' is a full reset; mode='restart' is container-kill-only.
+  resetGroupSession?: (folder: string, mode: 'new' | 'restart') => void;
 }
 
 export type ChannelFactory = (opts: ChannelOpts) => Channel | null;

@@ -157,6 +157,12 @@ export interface IpcDeps {
   }) => Promise<
     { ok: true; message_id: string } | { ok: false; error: string }
   >;
+  // Marks `folder` for a session reset to be applied after the current turn
+  // ends. The container that called `reset_session` keeps running long enough
+  // for the tool ack to reach the agent; the actual kill happens once the
+  // turnEnd boundary is crossed (or before the next runAgent invocation,
+  // whichever comes first). See FED-21 / PR #61.
+  scheduleSessionReset?: (folder: string, mode: 'new' | 'restart') => void;
 }
 
 const RESPONSE_TTL_MS = 60_000;
@@ -1181,6 +1187,38 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       });
                     }
                   }
+                }
+              } else if (
+                data.type === 'reset_session' &&
+                typeof data.requestId === 'string' &&
+                (data.mode === 'new' || data.mode === 'restart')
+              ) {
+                const responsesDir = path.join(
+                  ipcBaseDir,
+                  sourceGroup,
+                  'responses',
+                );
+                // Authorization is implicit: a group's IPC mount maps to its
+                // own folder, so `sourceGroup` is the only folder this caller
+                // can ever target. Cross-folder reset is structurally
+                // impossible from here.
+                if (deps.scheduleSessionReset) {
+                  deps.scheduleSessionReset(
+                    sourceGroup,
+                    data.mode as 'new' | 'restart',
+                  );
+                  writeIpcResponse(responsesDir, data.requestId, {
+                    success: true,
+                  });
+                  logger.info(
+                    { sourceGroup, mode: data.mode },
+                    'IPC reset_session queued',
+                  );
+                } else {
+                  writeIpcResponse(responsesDir, data.requestId, {
+                    success: false,
+                    error: 'reset_session not wired on host',
+                  });
                 }
               } else if (
                 data.type === 'forward_message' &&
