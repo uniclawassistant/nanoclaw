@@ -27,6 +27,10 @@ import {
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
+import {
+  resetGroupSession as resetGroupSessionImpl,
+  type ResetMode,
+} from './session-reset.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import {
   cleanupOrphans,
@@ -101,6 +105,12 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+// FED-21 / PR #61: groups marked for a session reset that should fire after
+// the current turn ends, or before the next runAgent if the marker arrived
+// post-turnEnd. Keyed by group folder. Entry is the reset mode requested by
+// the agent via mcp__nanoclaw__reset_session, OR by a Telegram /new — both
+// paths funnel into resetGroupSession() below.
+const pendingResets: Record<string, ResetMode> = {};
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -525,6 +535,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
+  // FED-21 / PR #61: a previous turn (or the IPC poll right after) may have
+  // queued a reset that didn't run before turnEnd was processed. Apply it now,
+  // before runAgent reads sessions[folder] for the upcoming spawn — that way
+  // mode='new' resets the SDK conversation cleanly even on the boundary case.
+  const pendingPre = consumePendingReset(group.folder);
+  if (pendingPre) {
+    resetGroupSession(group.folder, pendingPre);
+  }
+
   const isMainGroup = group.isMain === true;
 
   const missedMessages = getMessagesSince(
@@ -652,6 +671,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         turnState.outboundCount = 0;
         rawAccumulated = '';
         turnEndProcessed = true;
+
+        // FED-21 / PR #61: agent may have called mcp__nanoclaw__reset_session
+        // during this turn. Apply post-turnEnd so the tool ack already
+        // reached the agent and the streaming output drained cleanly.
+        const pendingPost = consumePendingReset(group.folder);
+        if (pendingPost) {
+          resetGroupSession(group.folder, pendingPost);
+        }
       }
     });
 
@@ -692,6 +719,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   } finally {
     endTurn(chatJid);
   }
+}
+
+function resetGroupSession(folder: string, mode: ResetMode): void {
+  resetGroupSessionImpl(folder, mode, {
+    clearInMemorySession: (f) => {
+      delete sessions[f];
+    },
+    deleteDbSession: (f) => deleteSession(f),
+    log: (level, msg, fields) => logger[level](fields, msg),
+  });
+}
+
+function consumePendingReset(folder: string): ResetMode | undefined {
+  const mode = pendingResets[folder];
+  if (mode) delete pendingResets[folder];
+  return mode;
 }
 
 async function runAgent(
@@ -1069,9 +1112,8 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
-    clearInMemorySession: (folder: string) => {
-      delete sessions[folder];
-    },
+    resetGroupSession: (folder: string, mode: ResetMode) =>
+      resetGroupSession(folder, mode),
   };
 
   // Create and connect all registered channels.
@@ -1162,6 +1204,9 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
+    scheduleSessionReset: (folder, mode) => {
+      pendingResets[folder] = mode;
+    },
     onTasksChanged: () => {
       const tasks = getAllTasks();
       const taskRows = tasks.map((t) => ({

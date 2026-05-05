@@ -8,8 +8,7 @@ import type { ReactionType } from 'grammy/types';
 import { execSync } from 'child_process';
 
 import { ASSISTANT_NAME, DATA_DIR, TRIGGER_PATTERN } from '../config.js';
-import { containerNamePrefix } from '../container-runner.js';
-import { deleteSession, getTasksForGroup } from '../db.js';
+import { getTasksForGroup } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
@@ -158,7 +157,7 @@ export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
-  clearInMemorySession?: (folder: string) => void;
+  resetGroupSession?: (folder: string, mode: 'new' | 'restart') => void;
 }
 
 // Marker file used to notify a chat after /restart kickstart completes.
@@ -282,7 +281,10 @@ export class TelegramChannel implements Channel {
       ctx.reply(`${ASSISTANT_NAME} is online.`);
     });
 
-    // Command to reset session
+    // Command to reset session — full reset, equivalent to mode='new' on
+    // the resetGroupSession host helper. The shared helper covers container
+    // stop, SDK JSONL delete, in-memory sessions clear, and DB session row
+    // delete — see src/index.ts:resetGroupSession.
     this.bot.command('new', async (ctx) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const groups = this.opts.registeredGroups();
@@ -292,49 +294,7 @@ export class TelegramChannel implements Channel {
         return;
       }
 
-      // Stop running container for this group
-      try {
-        const list = execSync('container list 2>/dev/null', {
-          encoding: 'utf-8',
-        });
-        for (const line of list.split('\n')) {
-          if (line.includes(containerNamePrefix(group.folder))) {
-            const name = line.trim().split(/\s+/)[0];
-            if (name) {
-              execSync(`container stop ${name} 2>/dev/null`);
-              logger.info(
-                { group: group.name, container: name },
-                '/new: container stopped',
-              );
-            }
-          }
-        }
-      } catch {
-        // No container running — that's fine
-      }
-
-      // Delete session JSONL files
-      const projectDir = path.join(
-        DATA_DIR,
-        'sessions',
-        group.folder,
-        '.claude',
-        'projects',
-        '-workspace-group',
-      );
-      if (fs.existsSync(projectDir)) {
-        for (const f of fs.readdirSync(projectDir)) {
-          if (f.endsWith('.jsonl')) {
-            fs.unlinkSync(path.join(projectDir, f));
-          }
-        }
-      }
-
-      // Clear session ID from DB and from the host's in-memory sessions map.
-      // The latter survives /new without this callback — the next user message
-      // would otherwise re-resume the old sessionId until the SDK errors out.
-      deleteSession(group.folder);
-      this.opts.clearInMemorySession?.(group.folder);
+      this.opts.resetGroupSession?.(group.folder, 'new');
       logger.info({ group: group.name }, '/new: session reset');
       ctx.reply('Session reset. Next message starts fresh.');
     });

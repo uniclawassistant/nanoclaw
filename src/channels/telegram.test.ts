@@ -37,20 +37,13 @@ vi.mock('../db.js', () => ({
   getTasksForGroup: vi.fn(() => []),
 }));
 
-// child_process used by /new to enumerate and stop a group's container.
+// /restart still uses execSync (launchctl kickstart). Stub it so the
+// /restart-related tests don't shell out for real.
 const execSyncRef = vi.hoisted(() => ({
   current: vi.fn(() => Buffer.from('')) as ReturnType<typeof vi.fn>,
 }));
-const execSyncMock = execSyncRef.current;
 vi.mock('child_process', () => ({
   execSync: (...args: unknown[]) => execSyncRef.current(...args),
-}));
-
-// container-runner is dragged in only for the containerNamePrefix helper —
-// keep the import surface tiny so we don't have to mock the whole module.
-vi.mock('../container-runner.js', () => ({
-  containerNamePrefix: (folder: string) =>
-    `nanoclaw-${folder.replace(/[^a-zA-Z0-9-]/g, '-')}-`,
 }));
 
 // --- Grammy mock ---
@@ -1385,15 +1378,14 @@ describe('TelegramChannel', () => {
       );
     });
 
-    it('/new clears DB session and invokes clearInMemorySession callback', async () => {
-      const clearInMemorySession = vi.fn();
-      const opts = createTestOpts({ clearInMemorySession });
+    it("/new delegates to opts.resetGroupSession with mode='new'", async () => {
+      // PR #61: /new no longer reproduces the kill+JSONL+sessions logic
+      // inline — it funnels into the host's resetGroupSession helper, which
+      // is the single source of truth shared with mcp__nanoclaw__reset_session.
+      const resetGroupSession = vi.fn();
+      const opts = createTestOpts({ resetGroupSession });
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
-
-      // Skip the JSONL cleanup branch — execSync for `container list` is
-      // wrapped in a try/catch so the handler still proceeds.
-      vi.spyOn(fs, 'existsSync').mockReturnValue(false);
 
       const handler = currentBot().commandHandlers.get('new')!;
       const ctx = {
@@ -1401,67 +1393,18 @@ describe('TelegramChannel', () => {
         reply: vi.fn(),
       };
 
-      const { deleteSession } = await import('../db.js');
-
       await handler(ctx);
 
-      expect(deleteSession).toHaveBeenCalledWith('test-group');
-      expect(clearInMemorySession).toHaveBeenCalledWith('test-group');
+      expect(resetGroupSession).toHaveBeenCalledTimes(1);
+      expect(resetGroupSession).toHaveBeenCalledWith('test-group', 'new');
       expect(ctx.reply).toHaveBeenCalledWith(
         'Session reset. Next message starts fresh.',
       );
     });
 
-    it('/new stops the group container even when folder contains underscores (FED-21 hotfix)', async () => {
-      // Repro: spawn-time naming sanitizes `_` → `-`, so `telegram_fedor-test`
-      // becomes `nanoclaw-telegram-fedor-test-…`. Matching against the raw
-      // folder name silently misses, the container stays alive, and the SDK
-      // keeps conversation history in RAM — making /new ineffective.
-      const clearInMemorySession = vi.fn();
-      const opts = createTestOpts({
-        clearInMemorySession,
-        registeredGroups: vi.fn(() => ({
-          'tg:100200300': {
-            name: 'Test Group',
-            folder: 'telegram_fedor-test',
-            trigger: '@Andy',
-            added_at: '2024-01-01T00:00:00.000Z',
-          },
-        })),
-      });
-      const channel = new TelegramChannel('test-token', opts);
-      await channel.connect();
-
-      const containerListing =
-        'nanoclaw-telegram-fedor-test-1777936420362  nanoclaw-agent-unic:latest  running\n';
-      execSyncMock.mockReset();
-      execSyncMock.mockImplementation((cmd: string) => {
-        if (cmd.includes('container list')) return containerListing;
-        return Buffer.from('');
-      });
-      vi.spyOn(fs, 'existsSync').mockReturnValue(false);
-
-      const handler = currentBot().commandHandlers.get('new')!;
-      const ctx = {
-        chat: { id: 100200300, type: 'group' as const },
-        reply: vi.fn(),
-      };
-
-      await handler(ctx);
-
-      const stopCalls = execSyncMock.mock.calls.filter((c) =>
-        String(c[0]).includes('container stop'),
-      );
-      expect(stopCalls).toHaveLength(1);
-      expect(String(stopCalls[0]![0])).toContain(
-        'nanoclaw-telegram-fedor-test-1777936420362',
-      );
-      expect(clearInMemorySession).toHaveBeenCalledWith('telegram_fedor-test');
-    });
-
-    it('/new replies "not registered" for unknown chat (no callback)', async () => {
-      const clearInMemorySession = vi.fn();
-      const opts = createTestOpts({ clearInMemorySession });
+    it('/new replies "not registered" for unknown chat (no reset)', async () => {
+      const resetGroupSession = vi.fn();
+      const opts = createTestOpts({ resetGroupSession });
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
@@ -1473,7 +1416,7 @@ describe('TelegramChannel', () => {
 
       await handler(ctx);
 
-      expect(clearInMemorySession).not.toHaveBeenCalled();
+      expect(resetGroupSession).not.toHaveBeenCalled();
       expect(ctx.reply).toHaveBeenCalledWith('Chat not registered.');
     });
 
