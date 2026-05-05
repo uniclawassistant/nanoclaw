@@ -7,8 +7,6 @@
 
 export type TaskFilter = 'active' | 'paused' | 'all';
 
-const VALID_FILTERS: readonly TaskFilter[] = ['active', 'paused', 'all'];
-
 export interface ParsedTaskFilter {
   filter: TaskFilter;
   unknownArg: string | null;
@@ -29,8 +27,12 @@ export function parseTaskFilter(
   const trimmed = arg.trim();
   if (trimmed.length === 0) return { filter: 'active', unknownArg: null };
   const normalized = trimmed.toLowerCase();
-  if ((VALID_FILTERS as readonly string[]).includes(normalized)) {
-    return { filter: normalized as TaskFilter, unknownArg: null };
+  if (
+    normalized === 'active' ||
+    normalized === 'paused' ||
+    normalized === 'all'
+  ) {
+    return { filter: normalized, unknownArg: null };
   }
   return { filter: 'active', unknownArg: trimmed };
 }
