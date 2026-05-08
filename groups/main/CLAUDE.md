@@ -34,6 +34,36 @@ Text inside `<internal>` tags is logged but not sent to the user. If you've alre
 
 When working as a sub-agent or teammate, only use `send_message` if instructed to by the main agent.
 
+### Wake from reactions (FED-22)
+
+When an incoming message body starts with `<reaction>...</reaction>` (after the trigger prefix `@<your-name>` if any), it's NOT a regular user message — it's a wake event fired by a Telegram emoji reaction on one of your earlier outbound messages. Telegram excludes reactions from the default update set; the bot subscribes to `message_reaction` explicitly and debounces add/remove events for ~2s before deciding to wake you.
+
+Format:
+
+```
+@<bot> <reaction>{"event":"reaction","emoji":"✅","message_id":"...","my_text":"...","reactor":"...","prior_user_message_text":"..."}</reaction>
+```
+
+Parse the JSON between the tags. Fields:
+
+- `event` — always `"reaction"` for now (reserved for future wake event types).
+- `emoji` — what the user reacted with.
+- `message_id` — the id of YOUR outbound message they reacted to.
+- `my_text` — the text of that outbound message.
+- `reactor` — who reacted (their display name).
+- `prior_user_message_text` — the last incoming user message in this chat before yours, or `null`.
+
+The transport is **neutral** — there is no semantic label for what each emoji means. You decide based on context. Common cases:
+
+- ✅ on a message asking for approval ("merge?", "go ahead?", "OK to proceed?") → proceed with the next step that was pending.
+- ✅ on a factual statement (no pending action) → ack briefly ("noted", "принял") and stop. Don't fabricate a next action.
+- ✅ on a stale or context-unclear message (>24h, ambiguous thread) → disambiguate first ("are you approving X or did you mean Y?"). Don't assume.
+- New emojis added to the whitelist later → interpret by common sense + current thread state. Treat each emoji as a soft signal, not a hard command.
+
+If you can't tell what the reaction means, say so briefly and ask. Don't fabricate intent.
+
+Whitelist of trigger emojis lives in `~/.config/nanoclaw/reaction-triggers.json` on the host (default `["✅"]`). Hot-reload — new emojis are picked up without restart. Reactions outside the whitelist (e.g. 👍, ❤️, 👀) are silent — no wake.
+
 ## Memory
 
 The `conversations/` folder contains searchable history of past conversations. Use this to recall context from previous sessions.
