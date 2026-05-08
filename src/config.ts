@@ -37,6 +37,15 @@ export const SENDER_ALLOWLIST_PATH = path.join(
   'nanoclaw',
   'sender-allowlist.json',
 );
+// Reaction triggers: hot-reload list of emojis that wake the bot when a
+// non-bot user reacts to the bot's own outbound message. Stored OUTSIDE the
+// project root so agents can't modify it from inside a container.
+export const REACTION_TRIGGERS_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'reaction-triggers.json',
+);
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');

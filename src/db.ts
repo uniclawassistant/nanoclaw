@@ -1027,6 +1027,36 @@ export function getLastBotMessageTimestamp(
   return row?.ts ?? undefined;
 }
 
+/**
+ * Last incoming user message in `chatJid` whose timestamp is strictly before
+ * `beforeTimestamp`. "Incoming" excludes bot/own messages
+ * (is_from_me=0 AND is_bot_message=0). Used by the reaction-wake path to
+ * supply `prior_user_message_text` — the user message that preceded the bot
+ * message the user reacted to. Returns null when no such message exists
+ * (e.g. the bot spoke first in the chat).
+ */
+export function getLastIncomingMessageBefore(
+  chatJid: string,
+  beforeTimestamp: string,
+): { id: string; content: string; timestamp: string } | null {
+  const row = db
+    .prepare(
+      `SELECT id, content, timestamp FROM messages
+       WHERE chat_jid = ? AND is_from_me = 0 AND is_bot_message = 0
+         AND timestamp < ?
+       ORDER BY timestamp DESC LIMIT 1`,
+    )
+    .get(chatJid, beforeTimestamp) as
+    | { id: string; content: string | null; timestamp: string }
+    | undefined;
+  if (!row) return null;
+  return {
+    id: row.id,
+    content: row.content ?? '',
+    timestamp: row.timestamp,
+  };
+}
+
 export function getLastUserMessageId(chatJid: string): string | null {
   const row = db
     .prepare(
