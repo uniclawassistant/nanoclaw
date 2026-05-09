@@ -12,7 +12,6 @@ import { getTasksForGroup } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
-import { loadReactionTriggers } from '../reaction-triggers.js';
 import { transcribe } from '../stt.js';
 import {
   filterTasksByStatus,
@@ -33,35 +32,6 @@ import {
 
 const ALLOWED_REACTIONS: ReadonlySet<string> = new Set(allowedReactions);
 const REACTION_CACHE_CAP = 5000;
-
-/**
- * Extract whitelist-comparable strings from a Telegram ReactionType[].
- * Standard unicode emojis contribute their `emoji` codepoint; Telegram
- * Premium animated emojis contribute their `custom_emoji_id` (a long
- * numeric string). Paid reactions are intentionally dropped — they are
- * not a wake-on-react case. The whitelist file holds both kinds in one
- * JSON array; collisions are impossible because custom_emoji_ids are
- * >12-digit numeric strings while emoji codepoints are 1-2 characters.
- */
-export function extractEmojis(
-  reactions:
-    | { type: string; emoji?: string; custom_emoji_id?: string }[]
-    | undefined,
-): Set<string> {
-  const out = new Set<string>();
-  if (!reactions) return out;
-  for (const r of reactions) {
-    if (r.type === 'emoji' && typeof r.emoji === 'string') {
-      out.add(r.emoji);
-    } else if (
-      r.type === 'custom_emoji' &&
-      typeof r.custom_emoji_id === 'string'
-    ) {
-      out.add(r.custom_emoji_id);
-    }
-  }
-  return out;
-}
 
 /**
  * Map a Claude model id to its context window size in thousands of tokens, for
@@ -203,38 +173,6 @@ export interface TelegramChannelOpts {
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
   resetGroupSession?: (folder: string, mode: 'new' | 'restart') => void;
-  /**
-   * Looks up the bot's outbound message text and the prior inbound user
-   * message text for a reaction wake. Returns null when the message_id is
-   * not a known bot outbound — used to enforce filter "target.from.id == bot.id".
-   * `priorUserMessageText` is null when the bot spoke first in the chat.
-   */
-  getReactionWakeContext?: (
-    chatJid: string,
-    messageId: string,
-  ) => {
-    myText: string;
-    priorUserMessageText: string | null;
-  } | null;
-}
-
-/** Settle window for reaction add/remove debounce. ~2s per ticket FED-22. */
-const REACTION_SETTLE_MS = 2000;
-
-interface ReactionDebounceState {
-  // First old_reaction emojis we observed at the start of the window.
-  // Used so a "set ✅ → unset ✅" round-trip doesn't wake — only NEW emojis
-  // landing in the final new_reaction (relative to window start) count.
-  initialOld: Set<string>;
-  // Latest new_reaction emojis observed.
-  latestNew: Set<string>;
-  // Latest event date (Unix seconds) — used as wake message timestamp.
-  latestDate: number;
-  // Reactor display info captured from the latest event.
-  reactorName: string;
-  reactorId: string;
-  // Pending settle timer.
-  timer: NodeJS.Timeout;
 }
 
 // Marker file used to notify a chat after /restart kickstart completes.
@@ -270,8 +208,6 @@ export class TelegramChannel implements Channel {
   private opts: TelegramChannelOpts;
   private botToken: string;
   private lastReactions = new Map<string, string | null>();
-  // Per-(chat:message:user) debounce buckets for reaction add/remove settling.
-  private reactionDebounce = new Map<string, ReactionDebounceState>();
 
   constructor(botToken: string, opts: TelegramChannelOpts) {
     this.botToken = botToken;
@@ -791,43 +727,14 @@ export class TelegramChannel implements Channel {
     this.bot.on('message:location', (ctx) => storeMedia(ctx, '[Location]'));
     this.bot.on('message:contact', (ctx) => storeMedia(ctx, '[Contact]'));
 
-    // FED-22: wake bot when a non-bot user reacts to one of our outbound
-    // messages with a whitelisted emoji. The emoji whitelist lives in
-    // ~/.config/nanoclaw/reaction-triggers.json (hot-reload, fail-safe).
-    this.bot.on('message_reaction', (ctx) => {
-      this.handleMessageReaction(ctx);
-    });
-
     // Handle errors gracefully
     this.bot.catch((err) => {
       logger.error({ err: err.message }, 'Telegram bot error');
     });
 
-    // Start polling — returns a Promise that resolves when started.
-    //
-    // `allowed_updates` is REQUIRED for the bot to receive `message_reaction`
-    // updates: Telegram excludes them from the default set. The list below
-    // mirrors grammy's DEFAULT_UPDATE_TYPES plus `message_reaction` (FED-22).
-    // We do not subscribe to `message_reaction_count` (anonymous-aggregate
-    // reactions) or `chat_member` — neither is needed for the reaction wake.
+    // Start polling — returns a Promise that resolves when started
     return new Promise<void>((resolve) => {
       this.bot!.start({
-        allowed_updates: [
-          'message',
-          'edited_message',
-          'channel_post',
-          'edited_channel_post',
-          'inline_query',
-          'chosen_inline_result',
-          'callback_query',
-          'shipping_query',
-          'pre_checkout_query',
-          'poll',
-          'poll_answer',
-          'my_chat_member',
-          'chat_join_request',
-          'message_reaction',
-        ],
         onStart: (botInfo) => {
           logger.info(
             { username: botInfo.username, id: botInfo.id },
@@ -938,187 +845,6 @@ export class TelegramChannel implements Channel {
       logger.error({ jid, err }, 'Failed to send Telegram message');
       return undefined;
     }
-  }
-
-  /**
-   * Handle a Telegram `message_reaction` update. Buffers events for
-   * REACTION_SETTLE_MS per (chat, message_id, user_id), then on settle:
-   *  - intersects (final new_reaction − initial old_reaction) with the
-   *    whitelist loaded fresh from ~/.config/nanoclaw/reaction-triggers.json
-   *  - filters: target message is a known bot outbound; reactor is not the bot
-   *  - emits one wake per matched emoji via opts.onMessage with the FED-22
-   *    payload as a `<reaction>{...}</reaction>` envelope on the message body.
-   */
-  private handleMessageReaction(ctx: {
-    chat: { id: number };
-    messageReaction?: {
-      message_id: number;
-      old_reaction: {
-        type: string;
-        emoji?: string;
-        custom_emoji_id?: string;
-      }[];
-      new_reaction: {
-        type: string;
-        emoji?: string;
-        custom_emoji_id?: string;
-      }[];
-      user?: { id: number; first_name?: string; username?: string };
-      date: number;
-    };
-    me?: { id: number };
-  }): void {
-    const reaction = ctx.messageReaction;
-    if (!reaction) return;
-
-    // FED-23: raw payload log so an operator can read a custom_emoji_id
-    // out of the host log and add it to the whitelist without a code
-    // change. Logged at info level so it's visible in nanoclaw.log; can
-    // be filtered out later by tightening to debug.
-    logger.info(
-      {
-        chatJid: `tg:${ctx.chat.id}`,
-        messageId: reaction.message_id.toString(),
-        oldReaction: reaction.old_reaction,
-        newReaction: reaction.new_reaction,
-      },
-      'Reaction event received',
-    );
-
-    if (!reaction.user) {
-      // Anonymous reactor (actor_chat) — out of scope for FED-22 (filter
-      // condition: reactor.id != bot.id requires an identifiable reactor).
-      return;
-    }
-
-    const chatJid = `tg:${ctx.chat.id}`;
-    const messageId = reaction.message_id.toString();
-    const reactorId = reaction.user.id;
-    const botId = ctx.me?.id;
-
-    // Filter: reactor.id != bot.id — never wake on the bot's own reactions.
-    if (botId !== undefined && reactorId === botId) return;
-
-    const key = `${chatJid}:${messageId}:${reactorId}`;
-    const oldEmojis = extractEmojis(reaction.old_reaction);
-    const newEmojis = extractEmojis(reaction.new_reaction);
-    const reactorName =
-      reaction.user.first_name ||
-      reaction.user.username ||
-      reaction.user.id.toString();
-
-    const existing = this.reactionDebounce.get(key);
-    if (existing) {
-      existing.latestNew = newEmojis;
-      existing.latestDate = reaction.date;
-      existing.reactorName = reactorName;
-      clearTimeout(existing.timer);
-      existing.timer = setTimeout(
-        () => this.settleReaction(key, chatJid, messageId),
-        REACTION_SETTLE_MS,
-      );
-    } else {
-      const state: ReactionDebounceState = {
-        initialOld: oldEmojis,
-        latestNew: newEmojis,
-        latestDate: reaction.date,
-        reactorName,
-        reactorId: reactorId.toString(),
-        timer: setTimeout(
-          () => this.settleReaction(key, chatJid, messageId),
-          REACTION_SETTLE_MS,
-        ),
-      };
-      this.reactionDebounce.set(key, state);
-    }
-  }
-
-  private settleReaction(
-    key: string,
-    chatJid: string,
-    messageId: string,
-  ): void {
-    const state = this.reactionDebounce.get(key);
-    if (!state) return;
-    this.reactionDebounce.delete(key);
-
-    // Newly-added emojis = final state minus what was set when the window opened.
-    const added: string[] = [];
-    for (const e of state.latestNew) {
-      if (!state.initialOld.has(e)) added.push(e);
-    }
-    if (added.length === 0) return;
-
-    const whitelist = loadReactionTriggers();
-    const matched = added.filter((e) => whitelist.has(e));
-    if (matched.length === 0) return;
-
-    // Filter: target message must be a known bot outbound. The lookup is
-    // injected via opts so the channel doesn't reach into the DB directly.
-    const lookup = this.opts.getReactionWakeContext;
-    if (!lookup) {
-      logger.warn(
-        { chatJid, messageId },
-        'Reaction wake skipped: no getReactionWakeContext configured',
-      );
-      return;
-    }
-    const wakeCtx = lookup(chatJid, messageId);
-    if (!wakeCtx) {
-      // Not a known bot outbound — covers both "reaction on user message"
-      // and "reaction on a bot message we never stored" (e.g. before the
-      // outbound logging was wired up).
-      logger.debug(
-        { chatJid, messageId },
-        'Reaction wake skipped: target message_id is not a stored bot outbound',
-      );
-      return;
-    }
-
-    for (const emoji of matched) {
-      this.emitReactionWake(chatJid, messageId, emoji, state, wakeCtx);
-    }
-  }
-
-  private emitReactionWake(
-    chatJid: string,
-    messageId: string,
-    emoji: string,
-    state: ReactionDebounceState,
-    wakeCtx: { myText: string; priorUserMessageText: string | null },
-  ): void {
-    const payload = {
-      event: 'reaction' as const,
-      emoji,
-      message_id: messageId,
-      my_text: wakeCtx.myText,
-      reactor: state.reactorName,
-      prior_user_message_text: wakeCtx.priorUserMessageText,
-    };
-    logger.info(
-      { chatJid, payload },
-      'Telegram reaction wake — delivering synthetic message',
-    );
-
-    // Synthetic message id is unique per (target, reactor, emoji, date).
-    // Prefix `reaction:` so it can never collide with a real Telegram
-    // message_id (those are integers).
-    const syntheticId = `reaction:${messageId}:${state.reactorId}:${emoji}:${state.latestDate}`;
-
-    // Trigger prefix so groups with `requiresTrigger` still wake the agent.
-    // The body carries the FED-22 payload verbatim as a single `<reaction>`
-    // tag — neutral transport, no semantic labels (mechanism > intention).
-    const content = `@${ASSISTANT_NAME} <reaction>${JSON.stringify(payload)}</reaction>`;
-
-    this.opts.onMessage(chatJid, {
-      id: syntheticId,
-      chat_jid: chatJid,
-      sender: state.reactorId,
-      sender_name: state.reactorName,
-      content,
-      timestamp: new Date(state.latestDate * 1000).toISOString(),
-      is_from_me: false,
-    });
   }
 
   async setReaction(

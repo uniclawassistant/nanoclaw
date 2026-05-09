@@ -46,7 +46,6 @@ import {
   deleteSession,
   getAllTasks,
   getLastBotMessageTimestamp,
-  getLastIncomingMessageBefore,
   getLastIncomingThreadId,
   getLastUserMessageId,
   getMessageById,
@@ -1115,20 +1114,6 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
     resetGroupSession: (folder: string, mode: ResetMode) =>
       resetGroupSession(folder, mode),
-    // FED-22: reaction-wake context lookup. Telegram calls this when a user
-    // reacts with a whitelisted emoji on a message; we return null when the
-    // target message_id is not a stored bot outbound (which doubles as the
-    // filter "target.from.id == bot.id"), and the channel skips the wake.
-    getReactionWakeContext: (chatJid: string, messageId: string) => {
-      const target = getMessageById(messageId, chatJid);
-      if (!target || target.direction !== 'out') return null;
-      const myText = target.text ?? '';
-      const prior = getLastIncomingMessageBefore(chatJid, target.timestamp);
-      return {
-        myText,
-        priorUserMessageText: prior ? prior.content : null,
-      };
-    },
   };
 
   // Create and connect all registered channels.
