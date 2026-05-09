@@ -15,16 +15,6 @@ export interface ChannelOpts {
   // inline, so spawn-time and shutdown-time naming stay in lockstep.
   // mode='new' is a full reset; mode='restart' is container-kill-only.
   resetGroupSession?: (folder: string, mode: 'new' | 'restart') => void;
-  // FED-22: looks up the bot's outbound message text and the prior inbound
-  // user message text for a reaction wake. Returns null when message_id is
-  // not a known bot outbound (filter "target.from.id == bot.id").
-  getReactionWakeContext?: (
-    chatJid: string,
-    messageId: string,
-  ) => {
-    myText: string;
-    priorUserMessageText: string | null;
-  } | null;
 }
 
 export type ChannelFactory = (opts: ChannelOpts) => Channel | null;
