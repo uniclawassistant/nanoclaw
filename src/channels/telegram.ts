@@ -35,18 +35,29 @@ const ALLOWED_REACTIONS: ReadonlySet<string> = new Set(allowedReactions);
 const REACTION_CACHE_CAP = 5000;
 
 /**
- * Extract emoji strings from a Telegram ReactionType[]. Custom emojis and
- * paid reactions are intentionally dropped — FED-22 only wakes on standard
- * unicode-emoji whitelist matches.
+ * Extract whitelist-comparable strings from a Telegram ReactionType[].
+ * Standard unicode emojis contribute their `emoji` codepoint; Telegram
+ * Premium animated emojis contribute their `custom_emoji_id` (a long
+ * numeric string). Paid reactions are intentionally dropped — they are
+ * not a wake-on-react case. The whitelist file holds both kinds in one
+ * JSON array; collisions are impossible because custom_emoji_ids are
+ * >12-digit numeric strings while emoji codepoints are 1-2 characters.
  */
-function extractEmojis(
-  reactions: { type: string; emoji?: string }[] | undefined,
+export function extractEmojis(
+  reactions:
+    | { type: string; emoji?: string; custom_emoji_id?: string }[]
+    | undefined,
 ): Set<string> {
   const out = new Set<string>();
   if (!reactions) return out;
   for (const r of reactions) {
     if (r.type === 'emoji' && typeof r.emoji === 'string') {
       out.add(r.emoji);
+    } else if (
+      r.type === 'custom_emoji' &&
+      typeof r.custom_emoji_id === 'string'
+    ) {
+      out.add(r.custom_emoji_id);
     }
   }
   return out;
@@ -942,8 +953,16 @@ export class TelegramChannel implements Channel {
     chat: { id: number };
     messageReaction?: {
       message_id: number;
-      old_reaction: { type: string; emoji?: string }[];
-      new_reaction: { type: string; emoji?: string }[];
+      old_reaction: {
+        type: string;
+        emoji?: string;
+        custom_emoji_id?: string;
+      }[];
+      new_reaction: {
+        type: string;
+        emoji?: string;
+        custom_emoji_id?: string;
+      }[];
       user?: { id: number; first_name?: string; username?: string };
       date: number;
     };
@@ -951,6 +970,21 @@ export class TelegramChannel implements Channel {
   }): void {
     const reaction = ctx.messageReaction;
     if (!reaction) return;
+
+    // FED-23: raw payload log so an operator can read a custom_emoji_id
+    // out of the host log and add it to the whitelist without a code
+    // change. Logged at info level so it's visible in nanoclaw.log; can
+    // be filtered out later by tightening to debug.
+    logger.info(
+      {
+        chatJid: `tg:${ctx.chat.id}`,
+        messageId: reaction.message_id.toString(),
+        oldReaction: reaction.old_reaction,
+        newReaction: reaction.new_reaction,
+      },
+      'Reaction event received',
+    );
+
     if (!reaction.user) {
       // Anonymous reactor (actor_chat) — out of scope for FED-22 (filter
       // condition: reactor.id != bot.id requires an identifiable reactor).

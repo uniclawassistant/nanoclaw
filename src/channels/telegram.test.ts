@@ -112,6 +112,7 @@ import { getTasksForGroup } from '../db.js';
 import {
   TelegramChannel,
   TelegramChannelOpts,
+  extractEmojis,
   formatTasksList,
   formatTaskSchedule,
   formatTaskTimestamp,
@@ -1842,11 +1843,16 @@ describe('TelegramChannel', () => {
 
   // FED-22 — Wake bot on whitelisted reactions to its own outbound messages.
   describe('message_reaction handling', () => {
+    type ReactionItem =
+      | { type: 'emoji'; emoji: string }
+      | { type: 'custom_emoji'; custom_emoji_id: string }
+      | { type: 'paid' };
+
     function createReactionCtx(args: {
       chatId?: number;
       messageId?: number;
-      old?: string[];
-      new?: string[];
+      old?: (string | ReactionItem)[];
+      new?: (string | ReactionItem)[];
       userId?: number;
       userFirst?: string;
       userUsername?: string;
@@ -1854,18 +1860,14 @@ describe('TelegramChannel', () => {
       botId?: number;
       anonymous?: boolean;
     }) {
+      const toItem = (e: string | ReactionItem): ReactionItem =>
+        typeof e === 'string' ? { type: 'emoji', emoji: e } : e;
       return {
         chat: { id: args.chatId ?? 100200300 },
         messageReaction: {
           message_id: args.messageId ?? 6701,
-          old_reaction: (args.old ?? []).map((emoji) => ({
-            type: 'emoji',
-            emoji,
-          })),
-          new_reaction: (args.new ?? []).map((emoji) => ({
-            type: 'emoji',
-            emoji,
-          })),
+          old_reaction: (args.old ?? []).map(toItem),
+          new_reaction: (args.new ?? []).map(toItem),
           user: args.anonymous
             ? undefined
             : {
@@ -2079,6 +2081,110 @@ describe('TelegramChannel', () => {
       );
       expect(payload.prior_user_message_text).toBeNull();
       expect(payload.my_text).toBe('sent it');
+    });
+
+    // FED-23 — Telegram Premium animated emojis arrive as
+    // ReactionTypeCustomEmoji with a custom_emoji_id. The whitelist holds
+    // raw IDs (operator copies from the host log); a matching ID wakes.
+    it('wakes on whitelisted custom_emoji_id (Telegram Premium)', async () => {
+      reactionTriggersRef.current = new Set(['5380109565226595842']);
+      const opts = makeOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await fireReaction(
+        createReactionCtx({
+          new: [
+            {
+              type: 'custom_emoji',
+              custom_emoji_id: '5380109565226595842',
+            },
+          ],
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(2100);
+
+      expect(opts.onMessage).toHaveBeenCalledTimes(1);
+      const [, msg] = (opts.onMessage as any).mock.calls[0];
+      const payload = JSON.parse(
+        msg.content.match(/<reaction>(.+)<\/reaction>/)![1],
+      );
+      expect(payload.emoji).toBe('5380109565226595842');
+    });
+
+    it('does NOT wake on custom_emoji_id outside whitelist', async () => {
+      reactionTriggersRef.current = new Set(['5380109565226595842']);
+      const opts = makeOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await fireReaction(
+        createReactionCtx({
+          new: [
+            {
+              type: 'custom_emoji',
+              custom_emoji_id: '9999999999999999999',
+            },
+          ],
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(2100);
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('does NOT wake on paid reactions even if numeric ids overlap', async () => {
+      reactionTriggersRef.current = new Set(['✅', '5380109565226595842']);
+      const opts = makeOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await fireReaction(createReactionCtx({ new: [{ type: 'paid' } as any] }));
+      await vi.advanceTimersByTimeAsync(2100);
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  // FED-23 — extractEmojis pure unit tests.
+  describe('extractEmojis', () => {
+    it('extracts standard unicode emoji', () => {
+      const out = extractEmojis([{ type: 'emoji', emoji: '✅' }]);
+      expect(out).toEqual(new Set(['✅']));
+    });
+
+    it('extracts custom_emoji_id from custom_emoji entries', () => {
+      const out = extractEmojis([
+        { type: 'custom_emoji', custom_emoji_id: '5380109565226595842' },
+      ]);
+      expect(out).toEqual(new Set(['5380109565226595842']));
+    });
+
+    it('drops paid reactions', () => {
+      const out = extractEmojis([{ type: 'paid' } as any]);
+      expect(out.size).toBe(0);
+    });
+
+    it('returns the union for a mixed array', () => {
+      const out = extractEmojis([
+        { type: 'emoji', emoji: '✅' },
+        { type: 'custom_emoji', custom_emoji_id: '5380109565226595842' },
+        { type: 'paid' } as any,
+        { type: 'emoji', emoji: '👍' },
+      ]);
+      expect(out).toEqual(new Set(['✅', '5380109565226595842', '👍']));
+    });
+
+    it('drops malformed entries (missing emoji/custom_emoji_id)', () => {
+      const out = extractEmojis([
+        { type: 'emoji' } as any,
+        { type: 'custom_emoji' } as any,
+      ]);
+      expect(out.size).toBe(0);
+    });
+
+    it('returns empty set for undefined input', () => {
+      expect(extractEmojis(undefined).size).toBe(0);
     });
   });
 });
