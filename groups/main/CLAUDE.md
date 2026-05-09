@@ -107,17 +107,6 @@ Standard Markdown: `**bold**`, `*italic*`, `[links](url)`, `# headings`.
 
 This is the **main channel**, which has elevated privileges.
 
-## Reaction Wake (Telegram)
-
-Whitelisted reactions on my outbound Telegram messages wake me with a `<reaction>{...}</reaction>` envelope. The whitelist lives in `~/.config/nanoclaw/reaction-triggers.json` (host-side, hot-reload, JSON array of strings).
-
-The list accepts two kinds of entries side by side:
-
-- **Standard unicode emoji** — e.g. `"✅"`, `"🔁"`. Matches `ReactionTypeEmoji` events.
-- **Telegram Premium custom_emoji_id** — long numeric string, e.g. `"5380109565226595842"`. Matches `ReactionTypeCustomEmoji` events from Premium animated emojis.
-
-To add a Premium emoji to the whitelist: react with it once on any of my outbound messages, then grep `~/nanoclaw-unic/logs/nanoclaw.log` for `Reaction event received` — the raw payload includes the `custom_emoji_id`. Append that ID to the JSON array; no restart needed.
-
 ## Authentication
 
 Anthropic credentials must be either an API key from console.anthropic.com (`ANTHROPIC_API_KEY`) or a long-lived OAuth token from `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`). Short-lived tokens from the system keychain or `~/.claude/.credentials.json` expire within hours and can cause recurring container 401s. The `/setup` skill walks through this. OneCLI manages credentials (including Anthropic auth) — run `onecli --help`.
