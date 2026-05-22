@@ -101,6 +101,7 @@ vi.mock('child_process', async () => {
   };
 });
 
+import { spawn } from 'child_process';
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
@@ -368,5 +369,48 @@ describe('containerNamePrefix', () => {
   it('strips other special chars (defensive — folder validation lives elsewhere)', async () => {
     const { containerNamePrefix } = await import('./container-runner.js');
     expect(containerNamePrefix('a.b/c_d')).toBe('nanoclaw-a-b-c-d-');
+  });
+});
+
+describe('CAP_SYS_ADMIN for main containers', () => {
+  beforeEach(() => {
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+  });
+
+  function spawnArgs() {
+    return vi.mocked(spawn).mock.calls[0][1] as string[];
+  }
+
+  // Apple Container 0.12.0 dropped CAP_SYS_ADMIN from the default capability
+  // set, which broke the entrypoint's `mount --bind` .env shadow (exit 32).
+  // Main containers must request it explicitly; non-main containers never mount.
+  it('adds --cap-add CAP_SYS_ADMIN for main containers', async () => {
+    const resultPromise = runContainerAgent(
+      testGroup,
+      { ...testInput, isMain: true },
+      () => {},
+      vi.fn(async () => {}),
+    );
+    fakeProc.emit('close', 0);
+    await resultPromise;
+
+    const args = spawnArgs();
+    const i = args.indexOf('--cap-add');
+    expect(i).toBeGreaterThan(-1);
+    expect(args[i + 1]).toBe('CAP_SYS_ADMIN');
+  });
+
+  it('does NOT add CAP_SYS_ADMIN for non-main containers', async () => {
+    const resultPromise = runContainerAgent(
+      testGroup,
+      { ...testInput, isMain: false },
+      () => {},
+      vi.fn(async () => {}),
+    );
+    fakeProc.emit('close', 0);
+    await resultPromise;
+
+    expect(spawnArgs()).not.toContain('CAP_SYS_ADMIN');
   });
 });

@@ -306,6 +306,14 @@ function buildContainerArgs(
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
 
+  // Main containers shadow .env via `mount --bind` in the entrypoint, which
+  // requires CAP_SYS_ADMIN. Apple Container 0.12.0 dropped it from the default
+  // capability set, so request it explicitly. The entrypoint setpriv's down to
+  // the host user after mounting, so the agent process never holds it.
+  if (isMain) {
+    args.push('--cap-add', 'CAP_SYS_ADMIN');
+  }
+
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
   // or when getuid is unavailable (native Windows without WSL).
