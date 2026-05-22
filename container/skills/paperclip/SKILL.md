@@ -5,6 +5,12 @@ description: Manage Paperclip issues and agents via API. Use when creating tasks
 
 # Paperclip Task Management
 
+> **Writes → use the guarded `paperclip-write` tools, not curl.** For comments,
+> issue patches, and issue creation, use `paperclip_post_comment` /
+> `paperclip_patch_issue` / `paperclip_create_issue` (see the `paperclip-write`
+> skill). They enforce path validation + post-write verification, which raw curl
+> cannot. The curl reference below is for **read-only queries and debugging**.
+
 ## Setup
 
 `PCP_KEY` is injected by the host (from `.env`) — do not hardcode it.

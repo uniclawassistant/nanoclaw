@@ -17,6 +17,11 @@ import {
   TaskFilter,
   taskStatusEmoji,
 } from './tasks-filter.js';
+import {
+  describeViolations,
+  findContainerPaths,
+  verifyWrite,
+} from './paperclip-guards.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -142,9 +147,7 @@ RETURN (JSON in tool output): { ok: true, message_id } on success — message_id
             ? { ok: true, message_id: resp.message_id }
             : { ok: false, error: resp.error ?? 'unknown error' };
           return {
-            content: [
-              { type: 'text' as const, text: JSON.stringify(payload) },
-            ],
+            content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
             ...(resp.success ? {} : { isError: true as const }),
           };
         } catch (err) {
@@ -220,11 +223,12 @@ async function dispatchMediaTool(
         // Host already shaped `data` for the agent on success; on failure it
         // sets success=false + error and we mirror the `send_file` pattern.
         if (resp.success) {
-          const payload = resp.data ?? { ok: true, message_id: resp.message_id };
+          const payload = resp.data ?? {
+            ok: true,
+            message_id: resp.message_id,
+          };
           return {
-            content: [
-              { type: 'text' as const, text: JSON.stringify(payload) },
-            ],
+            content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
           };
         }
         return {
@@ -329,15 +333,11 @@ RETURN (JSON in tool output):
       .describe(
         'channel-native message_id of the image to edit (from generate_image success payload or get_message lookup).',
       ),
-    prompt: z
-      .string()
-      .describe('What to change about the source image.'),
+    prompt: z.string().describe('What to change about the source image.'),
     preset: z
       .array(z.string())
       .optional()
-      .describe(
-        'Optional preset tokens. Same vocabulary as generate_image.',
-      ),
+      .describe('Optional preset tokens. Same vocabulary as generate_image.'),
     caption: z
       .string()
       .optional()
@@ -427,10 +427,7 @@ RETURN (JSON in tool output):
       .describe(
         'Optional prose-style stage direction applied to the utterance (e.g. "whispered, close to mic").',
       ),
-    profile: z
-      .string()
-      .optional()
-      .describe('Optional persona/audio profile.'),
+    profile: z.string().optional().describe('Optional persona/audio profile.'),
     scene: z.string().optional().describe('Optional scene/setting context.'),
   },
   async (args) => {
@@ -664,15 +661,21 @@ RETURN SHAPE (success):
     query: z
       .string()
       .min(1)
-      .describe('Search text. Treated as substring (default) or regex (when is_regex=true).'),
+      .describe(
+        'Search text. Treated as substring (default) or regex (when is_regex=true).',
+      ),
     is_regex: z
       .boolean()
       .optional()
-      .describe('When true, query is a JavaScript regex applied case-insensitively. Default false.'),
+      .describe(
+        'When true, query is a JavaScript regex applied case-insensitively. Default false.',
+      ),
     jid: z
       .union([z.string(), z.array(z.string())])
       .optional()
-      .describe('Restrict to one or more chat JIDs. Defaults to chats the caller can read.'),
+      .describe(
+        'Restrict to one or more chat JIDs. Defaults to chats the caller can read.',
+      ),
     since: z
       .string()
       .optional()
@@ -684,7 +687,9 @@ RETURN SHAPE (success):
     sender: z
       .string()
       .optional()
-      .describe('Filter by sender display name (case-insensitive exact match).'),
+      .describe(
+        'Filter by sender display name (case-insensitive exact match).',
+      ),
     message_type: z
       .enum(['text', 'photo', 'voice', 'document', 'video', 'sticker', 'all'])
       .optional()
@@ -699,7 +704,9 @@ RETURN SHAPE (success):
       .min(0)
       .max(20)
       .optional()
-      .describe('For each hit also return up to N neighboring messages before and after. Default 0.'),
+      .describe(
+        'For each hit also return up to N neighboring messages before and after. Default 0.',
+      ),
     limit: z
       .number()
       .int()
@@ -1379,9 +1386,7 @@ RETURN (JSON in tool output): { ok: true } on accepted, { ok: false, error } on 
             ? { ok: true as const }
             : { ok: false as const, error: resp.error ?? 'unknown error' };
           return {
-            content: [
-              { type: 'text' as const, text: JSON.stringify(payload) },
-            ],
+            content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
             ...(resp.success ? {} : { isError: true as const }),
           };
         } catch (err) {
@@ -1396,6 +1401,416 @@ RETURN (JSON in tool output): { ok: true } on accepted, { ok: false, error } on 
     return toolError(
       'reset_session request timed out — host did not acknowledge within 10s.',
     );
+  },
+);
+
+// ─── Paperclip outbound guards (FED-29 Guards 1 + 2) ────────────────────────
+//
+// Direct, guarded writes to the Paperclip API from inside the container, so a
+// raw `curl` is no longer the only outbound path (mechanism > discipline).
+// Every write runs Guard 1 (path validation, pre-write) and Guard 2 (post-write
+// re-fetch + verify). Config is read from env — never hardcoded — so the same
+// tools serve every hat (Self-Mod FED-* and Crosstalk CRO-*) and instance
+// (prod :3100 / dev :3200). The host wires these in via container-runner.ts and
+// the agent-runner mcpServers env block.
+const PCP_KEY = process.env.PCP_KEY;
+const PCP_BASE = process.env.PCP_BASE; // e.g. http://192.168.64.1:3100/api
+const PCP_COMPANY = process.env.PCP_COMPANY;
+const PCP_RUN_ID = process.env.PCP_RUN_ID; // optional X-Paperclip-Run-Id audit
+
+function paperclipConfigError(): ReturnType<typeof toolError> | null {
+  const missing: string[] = [];
+  if (!PCP_KEY) missing.push('PCP_KEY');
+  if (!PCP_BASE) missing.push('PCP_BASE');
+  if (!PCP_COMPANY) missing.push('PCP_COMPANY');
+  if (missing.length === 0) return null;
+  return toolError(
+    `Paperclip wrapper not configured: missing ${missing.join(', ')} in the ` +
+      'container env. The host injects these (see container-runner.ts + .env). ' +
+      'Use the raw curl pattern from the `paperclip` skill only for debugging.',
+  );
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function previewJson(json: unknown): string {
+  const s = typeof json === 'string' ? json : JSON.stringify(json);
+  if (s == null) return 'null';
+  return s.length > 200 ? `${s.slice(0, 200)}…` : s;
+}
+
+function pickId(json: unknown): string | null {
+  if (json && typeof json === 'object' && 'id' in json) {
+    const id = (json as Record<string, unknown>).id;
+    return typeof id === 'string' ? id : null;
+  }
+  return null;
+}
+
+function asCommentArray(json: unknown): Array<Record<string, unknown>> {
+  const raw = Array.isArray(json)
+    ? json
+    : json && typeof json === 'object'
+      ? ((json as Record<string, unknown>).comments ??
+        (json as Record<string, unknown>).items ??
+        [])
+      : [];
+  return Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : [];
+}
+
+/** True if a comment with the exact (non-null) body is present in the list. */
+function commentBodyPersisted(json: unknown, expected: string): boolean {
+  return asCommentArray(json).some(
+    (c) => typeof c.body === 'string' && c.body.trim() === expected.trim(),
+  );
+}
+
+interface PcpResponse {
+  ok: boolean;
+  status: number;
+  json: unknown;
+}
+
+async function pcpFetch(
+  method: string,
+  endpoint: string,
+  body?: unknown,
+): Promise<PcpResponse> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${PCP_KEY}`,
+  };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (PCP_RUN_ID) headers['X-Paperclip-Run-Id'] = PCP_RUN_ID;
+
+  const res = await fetch(`${PCP_BASE}${endpoint}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  let json: unknown = null;
+  const text = await res.text();
+  if (text) {
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = text;
+    }
+  }
+  return { ok: res.ok, status: res.status, json };
+}
+
+function jsonResult(payload: unknown): {
+  content: Array<{ type: 'text'; text: string }>;
+} {
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
+  };
+}
+
+function verifyFailure(resource: string, id: string, problems: string[]) {
+  return toolError(
+    `${resource} write verification FAILED for ${id}:\n` +
+      problems.map((p) => `  • ${p}`).join('\n') +
+      `\nDo NOT assume the write is correct — re-check it in Paperclip.`,
+  );
+}
+
+server.tool(
+  'paperclip_post_comment',
+  `Post a comment to a Paperclip issue, with outbound guards baked in.
+
+Prefer this over a raw \`curl\` for any Paperclip comment — it cannot be bypassed
+the way discipline can. Two guards run automatically:
+• Guard 1 (pre-write): rejects container-local paths (/workspace, /tmp,
+  /home/node, /root) in the body. Comments cannot be edited (Paperclip has no
+  PATCH on comments — only delete + repost), so a leak has no clean after-the-fact
+  fix; inline the file contents (an excerpt / fenced block) instead of linking.
+• Guard 2 (post-write): re-fetches the created comment and loud-fails if it is
+  missing or its body came back null/mismatched (the silent null-body class).
+
+RETURN (JSON): { ok: true, comment_id, verified: true } on success;
+isError with a specific reason on any guard failure or API error.`,
+  {
+    issueId: z.string().describe('Paperclip issue id (UUID) to comment on.'),
+    body: z
+      .string()
+      .describe(
+        'Markdown comment body. Must not reference container-local paths — inline excerpts instead.',
+      ),
+  },
+  async (args) => {
+    const cfg = paperclipConfigError();
+    if (cfg) return cfg;
+
+    const violations = findContainerPaths({ body: args.body });
+    if (violations.length > 0) return toolError(describeViolations(violations));
+
+    let created: PcpResponse;
+    try {
+      created = await pcpFetch('POST', `/issues/${args.issueId}/comments`, {
+        body: args.body,
+      });
+    } catch (err) {
+      return toolError(`Paperclip POST comment failed: ${errMsg(err)}`);
+    }
+
+    const commentId = pickId(created.json);
+    if (!created.ok || !commentId) {
+      return toolError(
+        `Comment POST returned HTTP ${created.status} with no usable comment id ` +
+          `(response: ${previewJson(created.json)}). The comment likely did NOT post.`,
+      );
+    }
+
+    let fetched: PcpResponse;
+    try {
+      fetched = await pcpFetch(
+        'GET',
+        `/issues/${args.issueId}/comments/${commentId}`,
+      );
+    } catch (err) {
+      return toolError(
+        `Comment posted (id ${commentId}) but re-fetch failed: ${errMsg(err)}`,
+      );
+    }
+
+    const verdict = verifyWrite({
+      resource: 'comment',
+      httpOk: fetched.ok,
+      httpStatus: fetched.status,
+      fetched: fetched.json,
+      expect: { body: args.body },
+    });
+    if (!verdict.ok)
+      return verifyFailure('Comment', commentId, verdict.problems);
+
+    return jsonResult({ ok: true, comment_id: commentId, verified: true });
+  },
+);
+
+server.tool(
+  'paperclip_patch_issue',
+  `Update a Paperclip issue (status, title, assignment, …) with outbound guards.
+
+Prefer this over a raw \`curl\` PATCH. Provide only the fields you want to change.
+An optional \`comment\` is posted alongside the update (the common status-update
+pattern). Two guards run automatically:
+• Guard 1 (pre-write): rejects container-local paths in title / description /
+  comment — inline file contents instead of linking.
+• Guard 2 (post-write): re-fetches the issue and loud-fails if any field you set
+  did not persist; if a comment was sent, confirms it is stored with a non-null
+  body (the silent null-body class).
+
+RETURN (JSON): { ok: true, issue_id, verified: true } on success;
+isError with a specific reason on any guard failure or API error.`,
+  {
+    issueId: z.string().describe('Paperclip issue id (UUID) to update.'),
+    status: z
+      .string()
+      .optional()
+      .describe('New status (e.g. in_progress, done).'),
+    title: z.string().optional(),
+    description: z.string().optional(),
+    priority: z.string().optional(),
+    assigneeAgentId: z
+      .string()
+      .optional()
+      .describe('Agent id to assign (note: assigneeAgentId, not assigneeId).'),
+    projectId: z.string().optional(),
+    comment: z
+      .string()
+      .optional()
+      .describe('Optional markdown comment posted with the update.'),
+  },
+  async (args) => {
+    const cfg = paperclipConfigError();
+    if (cfg) return cfg;
+
+    const violations = findContainerPaths({
+      title: args.title,
+      description: args.description,
+      comment: args.comment,
+    });
+    if (violations.length > 0) return toolError(describeViolations(violations));
+
+    // Scalar issue fields to write and later verify (comment is handled apart).
+    const scalars: Record<string, string> = {};
+    for (const key of [
+      'status',
+      'title',
+      'description',
+      'priority',
+      'assigneeAgentId',
+      'projectId',
+    ] as const) {
+      const v = args[key];
+      if (v !== undefined) scalars[key] = v;
+    }
+    if (Object.keys(scalars).length === 0 && args.comment === undefined) {
+      return toolError(
+        'Nothing to update — provide at least one field or a comment.',
+      );
+    }
+
+    const payload: Record<string, string> = { ...scalars };
+    if (args.comment !== undefined) payload.comment = args.comment;
+
+    let patched: PcpResponse;
+    try {
+      patched = await pcpFetch('PATCH', `/issues/${args.issueId}`, payload);
+    } catch (err) {
+      return toolError(`Paperclip PATCH issue failed: ${errMsg(err)}`);
+    }
+    if (!patched.ok) {
+      return toolError(
+        `Issue PATCH returned HTTP ${patched.status} ` +
+          `(response: ${previewJson(patched.json)}). The update likely did NOT apply.`,
+      );
+    }
+
+    let fetched: PcpResponse;
+    try {
+      fetched = await pcpFetch('GET', `/issues/${args.issueId}`);
+    } catch (err) {
+      return toolError(`Issue PATCH sent but re-fetch failed: ${errMsg(err)}`);
+    }
+
+    const verdict = verifyWrite({
+      resource: 'issue',
+      httpOk: patched.ok,
+      httpStatus: patched.status,
+      fetched: fetched.json,
+      expect: scalars,
+    });
+
+    // Verify the comment persisted (order- and shape-tolerant existence check).
+    if (args.comment !== undefined) {
+      let comments: PcpResponse;
+      try {
+        comments = await pcpFetch('GET', `/issues/${args.issueId}/comments`);
+      } catch (err) {
+        verdict.problems.push(`could not re-fetch comments: ${errMsg(err)}`);
+        verdict.ok = false;
+        comments = { ok: false, status: 0, json: null };
+      }
+      if (!commentBodyPersisted(comments.json, args.comment)) {
+        verdict.problems.push(
+          'attached comment not found persisted with a matching non-null body ' +
+            '(silent null-body class — not saved)',
+        );
+        verdict.ok = false;
+      }
+    }
+
+    if (!verdict.ok) {
+      return verifyFailure('Issue', args.issueId, verdict.problems);
+    }
+    return jsonResult({ ok: true, issue_id: args.issueId, verified: true });
+  },
+);
+
+server.tool(
+  'paperclip_create_issue',
+  `Create a Paperclip issue with outbound guards.
+
+Prefer this over a raw \`curl\` POST. \`projectId\` is required — issues must
+belong to a project (no orphans). Two guards run automatically:
+• Guard 1 (pre-write): rejects container-local paths in title / description.
+• Guard 2 (post-write): re-fetches the new issue and loud-fails if it is missing
+  or its title did not persist.
+
+RETURN (JSON): { ok: true, issue_id, identifier, verified: true } on success;
+isError with a specific reason on any guard failure or API error.`,
+  {
+    title: z.string().describe('Issue title.'),
+    projectId: z
+      .string()
+      .describe('Required — the project this issue belongs to (no orphans).'),
+    description: z.string().optional(),
+    status: z
+      .string()
+      .optional()
+      .describe('Initial status (default: backlog).'),
+    assigneeAgentId: z
+      .string()
+      .optional()
+      .describe('Agent id to assign (note: assigneeAgentId, not assigneeId).'),
+    priority: z.string().optional(),
+    parentId: z.string().optional().describe('Parent issue id for subtasks.'),
+  },
+  async (args) => {
+    const cfg = paperclipConfigError();
+    if (cfg) return cfg;
+
+    const violations = findContainerPaths({
+      title: args.title,
+      description: args.description,
+    });
+    if (violations.length > 0) return toolError(describeViolations(violations));
+
+    const payload: Record<string, string> = { title: args.title };
+    for (const key of [
+      'projectId',
+      'description',
+      'status',
+      'assigneeAgentId',
+      'priority',
+      'parentId',
+    ] as const) {
+      const v = args[key];
+      if (v !== undefined) payload[key] = v;
+    }
+
+    let created: PcpResponse;
+    try {
+      created = await pcpFetch(
+        'POST',
+        `/companies/${PCP_COMPANY}/issues`,
+        payload,
+      );
+    } catch (err) {
+      return toolError(`Paperclip POST issue failed: ${errMsg(err)}`);
+    }
+
+    const issueId = pickId(created.json);
+    if (!created.ok || !issueId) {
+      return toolError(
+        `Issue POST returned HTTP ${created.status} with no usable issue id ` +
+          `(response: ${previewJson(created.json)}). The issue likely was NOT created.`,
+      );
+    }
+
+    let fetched: PcpResponse;
+    try {
+      fetched = await pcpFetch('GET', `/issues/${issueId}`);
+    } catch (err) {
+      return toolError(
+        `Issue created (id ${issueId}) but re-fetch failed: ${errMsg(err)}`,
+      );
+    }
+
+    const verdict = verifyWrite({
+      resource: 'issue',
+      httpOk: created.ok,
+      httpStatus: created.status,
+      fetched: fetched.json,
+      expect: { title: args.title },
+    });
+    if (!verdict.ok) return verifyFailure('Issue', issueId, verdict.problems);
+
+    const identifier =
+      fetched.json && typeof fetched.json === 'object'
+        ? ((fetched.json as Record<string, unknown>).identifier ?? null)
+        : null;
+    return jsonResult({
+      ok: true,
+      issue_id: issueId,
+      identifier,
+      verified: true,
+    });
   },
 );
 

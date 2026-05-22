@@ -297,10 +297,19 @@ function buildContainerArgs(
     args.push('-e', `GH_TOKEN=${ghSecrets.GH_TOKEN}`);
   }
 
-  // Pass Paperclip API key if available (for paperclip skill)
-  const pcpSecrets = readEnvFile(['PCP_KEY']);
+  // Pass Paperclip config if available. PCP_KEY drives the curl `paperclip`
+  // skill; PCP_BASE + PCP_COMPANY additionally enable the guarded paperclip_*
+  // MCP write tools (FED-29). Read from .env (no hardcode) so the same image
+  // serves every hat (FED-* / CRO-*) and instance (:3100 / :3200).
+  const pcpSecrets = readEnvFile(['PCP_KEY', 'PCP_BASE', 'PCP_COMPANY']);
   if (pcpSecrets.PCP_KEY) {
     args.push('-e', `PCP_KEY=${pcpSecrets.PCP_KEY}`);
+  }
+  if (pcpSecrets.PCP_BASE) {
+    args.push('-e', `PCP_BASE=${pcpSecrets.PCP_BASE}`);
+  }
+  if (pcpSecrets.PCP_COMPANY) {
+    args.push('-e', `PCP_COMPANY=${pcpSecrets.PCP_COMPANY}`);
   }
 
   // Runtime-specific args for host gateway resolution

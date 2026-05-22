@@ -516,6 +516,17 @@ async function runQuery(
             NANOCLAW_CHAT_JID: containerInput.chatJid,
             NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            // Paperclip outbound-guard tools (FED-29). The stdio MCP server gets
+            // an explicit env, not the full process.env, so forward the creds
+            // it needs. Omit when unset so they don't appear as "undefined".
+            ...(process.env.PCP_KEY ? { PCP_KEY: process.env.PCP_KEY } : {}),
+            ...(process.env.PCP_BASE ? { PCP_BASE: process.env.PCP_BASE } : {}),
+            ...(process.env.PCP_COMPANY
+              ? { PCP_COMPANY: process.env.PCP_COMPANY }
+              : {}),
+            ...(process.env.PCP_RUN_ID
+              ? { PCP_RUN_ID: process.env.PCP_RUN_ID }
+              : {}),
           },
         },
       },
