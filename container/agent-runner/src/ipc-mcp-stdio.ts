@@ -1414,9 +1414,9 @@ RETURN (JSON in tool output): { ok: true } on accepted, { ok: false, error } on 
 // (prod :3100 / dev :3200). The host wires these in via container-runner.ts and
 // the agent-runner mcpServers env block.
 const PCP_KEY = process.env.PCP_KEY;
-const PCP_BASE = process.env.PCP_BASE; // e.g. http://192.168.64.1:3100/api
+const PCP_BASE = process.env.PCP_BASE;
 const PCP_COMPANY = process.env.PCP_COMPANY;
-const PCP_RUN_ID = process.env.PCP_RUN_ID; // optional X-Paperclip-Run-Id audit
+const PCP_RUN_ID = process.env.PCP_RUN_ID;
 
 function paperclipConfigError(): ReturnType<typeof toolError> | null {
   const missing: string[] = [];

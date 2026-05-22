@@ -20,12 +20,13 @@
 
 /**
  * Container-local filesystem roots that must never appear in outbound text.
- * Matches an absolute path under one of these roots (root + `/` + remainder).
- * A bare root without a trailing slash is not matched — every observed leak was
- * a file path, and requiring the slash keeps false positives near zero.
+ * Matches an absolute path under one of these roots: root + `/` + at least one
+ * non-space remainder char. A bare root — with or without a trailing slash
+ * (`/tmp`, `/tmp/`) — is not matched: every observed leak was a real file path,
+ * and requiring a remainder char keeps false positives near zero.
  */
 export const CONTAINER_PATH_PATTERN =
-  /\/(?:workspace|tmp|home\/node|root)\/[^\s"'`)\]}>,]*/g;
+  /\/(?:workspace|tmp|home\/node|root)\/[^\s"'`)\]}>,]+/g;
 
 export interface PathViolation {
   /** Which outbound field the path was found in (e.g. "body", "title"). */
