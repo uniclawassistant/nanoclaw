@@ -47,7 +47,7 @@ const REACTION_CACHE_CAP = 5000;
  */
 export function contextWindowK(model: string): number {
   if (model.includes('[1m]')) return 1000;
-  if (/^claude-(opus-4-7|sonnet-4-6)$/.test(model)) return 1000;
+  if (/^claude-(opus-4-7|opus-4-8|sonnet-4-6)$/.test(model)) return 1000;
   return 200;
 }
 
