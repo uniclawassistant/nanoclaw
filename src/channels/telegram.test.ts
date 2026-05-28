@@ -1979,12 +1979,14 @@ describe('contextWindowK', () => {
   it('returns 1000 for explicit [1m] variants', async () => {
     const { contextWindowK } = await import('./telegram.js');
     expect(contextWindowK('claude-opus-4-7[1m]')).toBe(1000);
+    expect(contextWindowK('claude-opus-4-8[1m]')).toBe(1000);
     expect(contextWindowK('claude-sonnet-4-6[1m]')).toBe(1000);
   });
 
-  it('returns 1000 for bare Opus 4.7 / Sonnet 4.6 (agent-runner spawns with [1m]; Anthropic strips suffix in response)', async () => {
+  it('returns 1000 for bare Opus 4.7 / 4.8 / Sonnet 4.6 (agent-runner spawns with [1m]; Anthropic strips suffix in response)', async () => {
     const { contextWindowK } = await import('./telegram.js');
     expect(contextWindowK('claude-opus-4-7')).toBe(1000);
+    expect(contextWindowK('claude-opus-4-8')).toBe(1000);
     expect(contextWindowK('claude-sonnet-4-6')).toBe(1000);
   });
 

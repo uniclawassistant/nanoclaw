@@ -137,7 +137,7 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
           cache_creation_input_tokens: 100,
         },
         modelUsage: {
-          'claude-opus-4-7': {
+          'claude-opus-4-8': {
             inputTokens: 1500,
             outputTokens: 320,
             cacheReadInputTokens: 4000,
