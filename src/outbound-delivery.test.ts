@@ -262,7 +262,15 @@ describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
     delete process.env.SILENT_FINISH_THRESHOLD_PER_HOUR;
   });
 
-  it('ships a formatted ack-stub via sendAckStub when Class B fires', async () => {
+  // FED-31: a single neutral string is used regardless of what the silent turn
+  // contained. The earlier FED-16 design embedded the first 200 chars of the
+  // `<internal>` block payload verbatim into the user-facing stub, which
+  // leaked the agent's private reasoning into the chat. The hook now never
+  // reads the content of `<internal>` blocks for delivery purposes.
+  const NEUTRAL_STUB =
+    '[host] Юник завершил ход, не отправив сообщения в чат.';
+
+  it('ships the neutral FED-31 stub when Class B fires', async () => {
     vi.spyOn(logger, 'warn').mockImplementation(() => {});
     vi.spyOn(logger, 'info').mockImplementation(() => {});
     const sendAckStub = vi.fn().mockResolvedValue(undefined);
@@ -278,12 +286,10 @@ describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
     );
 
     expect(sendAckStub).toHaveBeenCalledTimes(1);
-    expect(sendAckStub).toHaveBeenCalledWith(
-      '[host] Юник ушёл в тишину (внутренняя записка: забыл написать в чат, виноват)',
-    );
+    expect(sendAckStub).toHaveBeenCalledWith(NEUTRAL_STUB);
   });
 
-  it('truncates internal samples longer than 200 chars and adds an ellipsis', async () => {
+  it('FED-31: never leaks <internal> content verbatim, even for a long internal block', async () => {
     vi.spyOn(logger, 'warn').mockImplementation(() => {});
     vi.spyOn(logger, 'info').mockImplementation(() => {});
     const sendAckStub = vi.fn().mockResolvedValue(undefined);
@@ -291,20 +297,20 @@ describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
       groupName: 'unic',
       isUserFacing: true,
     });
-    const long = 'я'.repeat(500);
+    const secret = 'секретная-приватная-заметка'.repeat(20);
 
-    await checkClassB(turn, `<internal>${long}</internal>`, {
+    await checkClassB(turn, `<internal>${secret}</internal>`, {
       hadError: false,
       sendAckStub,
     });
 
     const [text] = sendAckStub.mock.calls[0] as [string];
-    expect(text).toBe(
-      `[host] Юник ушёл в тишину (внутренняя записка: ${'я'.repeat(200)}…)`,
-    );
+    expect(text).toBe(NEUTRAL_STUB);
+    expect(text).not.toContain('секретная');
+    expect(text).not.toContain('внутренняя записка');
   });
 
-  it('falls back to no-internal stub when raw has no internal block', async () => {
+  it('ships the same neutral stub when raw has no internal block', async () => {
     vi.spyOn(logger, 'warn').mockImplementation(() => {});
     vi.spyOn(logger, 'info').mockImplementation(() => {});
     const sendAckStub = vi.fn().mockResolvedValue(undefined);
@@ -315,12 +321,10 @@ describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
 
     await checkClassB(turn, '', { hadError: false, sendAckStub });
 
-    expect(sendAckStub).toHaveBeenCalledWith(
-      '[host] Юник ушёл в тишину без внутренней записки.',
-    );
+    expect(sendAckStub).toHaveBeenCalledWith(NEUTRAL_STUB);
   });
 
-  it('falls back to no-internal stub when the internal block is whitespace-only', async () => {
+  it('ships the same neutral stub when the internal block is whitespace-only', async () => {
     vi.spyOn(logger, 'warn').mockImplementation(() => {});
     vi.spyOn(logger, 'info').mockImplementation(() => {});
     const sendAckStub = vi.fn().mockResolvedValue(undefined);
@@ -334,9 +338,7 @@ describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
       sendAckStub,
     });
 
-    expect(sendAckStub).toHaveBeenCalledWith(
-      '[host] Юник ушёл в тишину без внутренней записки.',
-    );
+    expect(sendAckStub).toHaveBeenCalledWith(NEUTRAL_STUB);
   });
 
   it('does not invoke sendAckStub on healthy turns (no Class B trigger)', async () => {
@@ -461,8 +463,10 @@ describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
 
     expect(sendAckStub).toHaveBeenCalledTimes(1);
     const [text] = sendAckStub.mock.calls[0] as [string];
-    expect(text).toContain('Юник ушёл в тишину');
-    expect(text).toContain('only');
+    expect(text).toBe(NEUTRAL_STUB);
+    // FED-31: even though the silent stop's raw buffer contained
+    // <internal>only</internal>, the stub must not echo any of it.
+    expect(text).not.toContain('only');
   });
 
   it('warns "excess silent finishes" when hourly count exceeds SILENT_FINISH_THRESHOLD_PER_HOUR', async () => {
@@ -490,5 +494,37 @@ describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
     const [data] = excessCalls[0] as [Record<string, unknown>, string];
     expect(data.threshold).toBe(2);
     expect(data.hourCount).toBe(3);
+  });
+
+  // FED-31: turn that streamed real (non-`<internal>`) prose at any position
+  // — including a text-before-tool-call preamble whose final `result` carries
+  // no text — must NOT trigger the silence-stub. The host wiring relies on
+  // the streaming callback bumping `outboundCount` for every non-internal
+  // chunk; with the agent-runner now emitting per-text-block (commit e781ab1),
+  // a preamble before a tool_use is reliably counted and Class B stays quiet.
+  it('FED-31: streamed real prose before a tool_use does not trigger the silence-stub', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const sendAckStub = vi.fn().mockResolvedValue(undefined);
+    const turn = beginTurn('tg:123', {
+      groupName: 'unic',
+      isUserFacing: true,
+    });
+
+    // Container streams: text chunk arrives first (preamble before a tool),
+    // host strips <internal>, sees non-empty stripped, ships it and bumps
+    // outboundCount. Then `turnEnd` arrives with no further text.
+    let raw = '';
+    const internalRx = /<internal>[\s\S]*?<\/internal>/g;
+    const preamble = 'Сейчас посмотрю логи.';
+    raw += preamble;
+    const stripped = preamble.replace(internalRx, '').trim();
+    if (stripped) {
+      checkClassA(turn, stripped);
+      turn.outboundCount++;
+    }
+    await checkClassB(turn, raw, { hadError: false, sendAckStub });
+
+    expect(sendAckStub).not.toHaveBeenCalled();
   });
 });
