@@ -22,16 +22,31 @@ async function* mockSdkStream(messages: QueryMessage[]) {
   for (const m of messages) yield m;
 }
 
+function assistant(
+  uuid: string,
+  content: Array<
+    { type: 'text'; text: string } | { type: 'tool_use'; name: string }
+  >,
+  extras: Record<string, unknown> = {},
+): QueryMessage {
+  return {
+    type: 'assistant',
+    uuid,
+    parent_tool_use_id: null,
+    message: { content, ...extras },
+  };
+}
+
 describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
   it('emits turnEnd:true exactly once per result message in a streamed sequence', async () => {
     const { emitted, state, deps } = makeHarness();
     const sequence: QueryMessage[] = [
       { type: 'system', subtype: 'init', session_id: 'sess-1' },
-      { type: 'assistant', uuid: 'u1' },
+      assistant('u1', [{ type: 'text', text: 'first' }]),
       { type: 'result', subtype: 'success', result: 'first' },
-      { type: 'assistant', uuid: 'u2' },
+      assistant('u2', [{ type: 'text', text: 'second' }]),
       { type: 'result', subtype: 'success', result: 'second' },
-      { type: 'assistant', uuid: 'u3' },
+      assistant('u3', [{ type: 'text', text: 'third' }]),
       { type: 'result', subtype: 'success', result: 'third' },
     ];
 
@@ -40,20 +55,27 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
     }
 
     expect(state.resultCount).toBe(3);
-    expect(emitted).toHaveLength(3);
-    for (const out of emitted) {
-      expect(out.turnEnd).toBe(true);
+    // Text streamed per assistant block + turnEnd per result message.
+    const turnEnds = emitted.filter((o) => o.turnEnd);
+    const textChunks = emitted.filter((o) => !o.turnEnd);
+    expect(turnEnds).toHaveLength(3);
+    for (const out of turnEnds) {
       expect(out.status).toBe('success');
+      expect(out.result).toBeNull();
       expect(out.newSessionId).toBe('sess-1');
     }
-    expect(emitted.map((o) => o.result)).toEqual(['first', 'second', 'third']);
+    expect(textChunks.map((o) => o.result)).toEqual([
+      'first',
+      'second',
+      'third',
+    ]);
   });
 
   it('does not emit turnEnd on non-result messages', async () => {
     const { emitted, state, deps } = makeHarness();
     const sequence: QueryMessage[] = [
       { type: 'system', subtype: 'init', session_id: 'sess-2' },
-      { type: 'assistant', uuid: 'u1' },
+      assistant('u1', []),
       {
         type: 'system',
         subtype: 'task_notification',
@@ -61,7 +83,7 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
         status: 'running',
         summary: 'doing work',
       },
-      { type: 'assistant', uuid: 'u2' },
+      assistant('u2', []),
     ];
 
     for await (const message of mockSdkStream(sequence)) {
@@ -115,7 +137,9 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
       {
         type: 'assistant',
         uuid: 'a1',
+        parent_tool_use_id: null,
         message: {
+          content: [{ type: 'text', text: 'ok' }],
           usage: {
             input_tokens: 1500,
             output_tokens: 320,
@@ -152,8 +176,9 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
       handleQueryMessage(message, state, deps);
     }
 
-    expect(emitted).toHaveLength(1);
-    const out = emitted[0]!;
+    const turnEnd = emitted.find((o) => o.turnEnd);
+    expect(turnEnd).toBeDefined();
+    const out = turnEnd!;
     expect(out.usage).toBeDefined();
     expect(out.usage?.inputTokens).toBe(1500);
     expect(out.usage?.outputTokens).toBe(320);
@@ -167,16 +192,14 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
 
   it('FED-21: contextUsedTokens uses last assistant per-call usage, not cumulative result.usage', async () => {
     const { emitted, state, deps } = makeHarness();
-    // Three turns inside one open query() session. The SDK's `result.usage`
-    // accumulates across all API calls in the session, while each
-    // `assistant.message.usage` is per-API-call. The host needs the per-call
-    // value to render an accurate context-size indicator.
     const sequence: QueryMessage[] = [
       { type: 'system', subtype: 'init', session_id: 'sess-multi' },
       {
         type: 'assistant',
         uuid: 'a1',
+        parent_tool_use_id: null,
         message: {
+          content: [{ type: 'text', text: 'r1' }],
           usage: {
             input_tokens: 100,
             output_tokens: 50,
@@ -200,7 +223,9 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
       {
         type: 'assistant',
         uuid: 'a2',
+        parent_tool_use_id: null,
         message: {
+          content: [{ type: 'text', text: 'r2' }],
           usage: {
             input_tokens: 200,
             output_tokens: 75,
@@ -210,7 +235,6 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
         },
       },
       {
-        // result.usage cumulative-усугублённое: input/cache from BOTH turns.
         type: 'result',
         subtype: 'success',
         result: 'r2',
@@ -225,7 +249,9 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
       {
         type: 'assistant',
         uuid: 'a3',
+        parent_tool_use_id: null,
         message: {
+          content: [{ type: 'text', text: 'r3' }],
           usage: {
             input_tokens: 400,
             output_tokens: 90,
@@ -252,22 +278,17 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
       handleQueryMessage(message, state, deps);
     }
 
-    expect(emitted).toHaveLength(3);
-    // contextUsedTokens reflects per-call context size of the assistant
-    // message that immediately preceded each result.
-    expect(emitted[0]?.usage?.contextUsedTokens).toBe(100 + 80_000 + 0);
-    expect(emitted[1]?.usage?.contextUsedTokens).toBe(200 + 90_000 + 100);
-    expect(emitted[2]?.usage?.contextUsedTokens).toBe(400 + 95_000 + 200);
-    // total_cost_usd remains the cumulative cost from result message — that
-    // is the authoritative session cost figure.
-    expect(emitted[0]?.usage?.totalCostUsd).toBeCloseTo(0.5, 6);
-    expect(emitted[1]?.usage?.totalCostUsd).toBeCloseTo(1.1, 6);
-    expect(emitted[2]?.usage?.totalCostUsd).toBeCloseTo(1.7, 6);
+    const turnEnds = emitted.filter((o) => o.turnEnd);
+    expect(turnEnds).toHaveLength(3);
+    expect(turnEnds[0]?.usage?.contextUsedTokens).toBe(100 + 80_000 + 0);
+    expect(turnEnds[1]?.usage?.contextUsedTokens).toBe(200 + 90_000 + 100);
+    expect(turnEnds[2]?.usage?.contextUsedTokens).toBe(400 + 95_000 + 200);
+    expect(turnEnds[0]?.usage?.totalCostUsd).toBeCloseTo(0.5, 6);
+    expect(turnEnds[1]?.usage?.totalCostUsd).toBeCloseTo(1.1, 6);
+    expect(turnEnds[2]?.usage?.totalCostUsd).toBeCloseTo(1.7, 6);
   });
 
   it('FED-21: falls back to result.usage for context when no assistant.usage seen', async () => {
-    // Single-turn / SDK-omits-assistant-usage case: contextUsedTokens
-    // gracefully falls back to result.usage so we never emit zero context.
     const { emitted, state, deps } = makeHarness();
     const sequence: QueryMessage[] = [
       { type: 'system', subtype: 'init', session_id: 'sess-fallback' },
@@ -331,5 +352,146 @@ describe('handleQueryMessage (FED-18 per-Stop turnEnd)', () => {
 
     expect(emitted).toHaveLength(1);
     expect(emitted[0]?.usage).toBeUndefined();
+  });
+});
+
+// FED-31: agent prose that precedes a tool_use must reach the chat. Before
+// this fix only `result.result` (the final text block of a turn) was emitted,
+// so any preamble before send_message / Bash / etc. was silently dropped and
+// the silence-stub fired even though the agent had spoken.
+describe('handleQueryMessage (FED-31 stream every text block)', () => {
+  it('text-before-tool-call: emits the preamble even when the turn ends with a tool_use', async () => {
+    const { emitted, state, deps } = makeHarness();
+    const sequence: QueryMessage[] = [
+      { type: 'system', subtype: 'init', session_id: 'sess-31a' },
+      assistant('a1', [
+        { type: 'text', text: 'Сейчас посмотрю' },
+        { type: 'tool_use', name: 'Bash' },
+      ]),
+      // No second assistant message — the SDK closed the turn after the
+      // tool result. `result.result` is empty in this shape, which is the
+      // exact failure mode reported in FED-31.
+      { type: 'result', subtype: 'success', result: '' },
+    ];
+
+    for await (const message of mockSdkStream(sequence)) {
+      handleQueryMessage(message, state, deps);
+    }
+
+    const textChunks = emitted.filter((o) => !o.turnEnd);
+    expect(textChunks.map((o) => o.result)).toEqual(['Сейчас посмотрю']);
+    const turnEnds = emitted.filter((o) => o.turnEnd);
+    expect(turnEnds).toHaveLength(1);
+    expect(turnEnds[0]?.result).toBeNull();
+  });
+
+  it('text-after-tool-call: still emits the trailing text block exactly once', async () => {
+    const { emitted, state, deps } = makeHarness();
+    const sequence: QueryMessage[] = [
+      { type: 'system', subtype: 'init', session_id: 'sess-31b' },
+      assistant('a1', [{ type: 'tool_use', name: 'Bash' }]),
+      assistant('a2', [{ type: 'text', text: 'Готово' }]),
+      { type: 'result', subtype: 'success', result: 'Готово' },
+    ];
+
+    for await (const message of mockSdkStream(sequence)) {
+      handleQueryMessage(message, state, deps);
+    }
+
+    const textChunks = emitted.filter((o) => !o.turnEnd);
+    expect(textChunks.map((o) => o.result)).toEqual(['Готово']);
+    const turnEnds = emitted.filter((o) => o.turnEnd);
+    expect(turnEnds).toHaveLength(1);
+    expect(turnEnds[0]?.result).toBeNull();
+  });
+
+  it('text + trailing <internal>: emits both blocks; host-side stripping suppresses delivery of the internal one', async () => {
+    const { emitted, state, deps } = makeHarness();
+    const sequence: QueryMessage[] = [
+      { type: 'system', subtype: 'init', session_id: 'sess-31c' },
+      assistant('a1', [
+        { type: 'text', text: 'Ответ для пользователя.' },
+        { type: 'text', text: '<internal>пометка для себя</internal>' },
+      ]),
+      { type: 'result', subtype: 'success', result: '' },
+    ];
+
+    for await (const message of mockSdkStream(sequence)) {
+      handleQueryMessage(message, state, deps);
+    }
+
+    // Both text blocks are streamed verbatim — the host's outbound path
+    // already strips <internal>...</internal> per-block in src/index.ts, so
+    // the second one collapses to empty there and never reaches the chat.
+    const textChunks = emitted.filter((o) => !o.turnEnd);
+    expect(textChunks.map((o) => o.result)).toEqual([
+      'Ответ для пользователя.',
+      '<internal>пометка для себя</internal>',
+    ]);
+  });
+
+  it('tool-call-only with no text: emits zero text chunks, just the closing turnEnd', async () => {
+    const { emitted, state, deps } = makeHarness();
+    const sequence: QueryMessage[] = [
+      { type: 'system', subtype: 'init', session_id: 'sess-31d' },
+      assistant('a1', [{ type: 'tool_use', name: 'mcp__nanoclaw__react' }]),
+      { type: 'result', subtype: 'success', result: '' },
+    ];
+
+    for await (const message of mockSdkStream(sequence)) {
+      handleQueryMessage(message, state, deps);
+    }
+
+    const textChunks = emitted.filter((o) => !o.turnEnd);
+    expect(textChunks).toHaveLength(0);
+    const turnEnds = emitted.filter((o) => o.turnEnd);
+    expect(turnEnds).toHaveLength(1);
+    expect(turnEnds[0]?.result).toBeNull();
+  });
+
+  it('subagent text (parent_tool_use_id set) is NOT surfaced to the channel', async () => {
+    const { emitted, state, deps } = makeHarness();
+    const sequence: QueryMessage[] = [
+      { type: 'system', subtype: 'init', session_id: 'sess-31e' },
+      // Subagent message from a TeamCreate/Task tool — should stay internal.
+      {
+        type: 'assistant',
+        uuid: 'sub1',
+        parent_tool_use_id: 'tool-abc',
+        message: { content: [{ type: 'text', text: 'subagent thinking' }] },
+      },
+      assistant('a1', [{ type: 'text', text: 'Готовый ответ' }]),
+      { type: 'result', subtype: 'success', result: 'Готовый ответ' },
+    ];
+
+    for await (const message of mockSdkStream(sequence)) {
+      handleQueryMessage(message, state, deps);
+    }
+
+    const textChunks = emitted.filter((o) => !o.turnEnd);
+    expect(textChunks.map((o) => o.result)).toEqual(['Готовый ответ']);
+  });
+
+  it('multiple text blocks before a tool_use all surface in order', async () => {
+    const { emitted, state, deps } = makeHarness();
+    const sequence: QueryMessage[] = [
+      { type: 'system', subtype: 'init', session_id: 'sess-31f' },
+      assistant('a1', [
+        { type: 'text', text: 'Первый кусок.' },
+        { type: 'text', text: 'Второй кусок.' },
+        { type: 'tool_use', name: 'Bash' },
+      ]),
+      { type: 'result', subtype: 'success', result: '' },
+    ];
+
+    for await (const message of mockSdkStream(sequence)) {
+      handleQueryMessage(message, state, deps);
+    }
+
+    const textChunks = emitted.filter((o) => !o.turnEnd);
+    expect(textChunks.map((o) => o.result)).toEqual([
+      'Первый кусок.',
+      'Второй кусок.',
+    ]);
   });
 });
