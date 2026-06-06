@@ -30,6 +30,11 @@ export interface QueryLoopState {
   lastAssistantUsage?: SdkResultUsage;
 }
 
+interface SdkContentBlock {
+  type?: string;
+  text?: string;
+}
+
 export interface QueryLoopDeps {
   emit: (output: AgentRunnerOutput) => void;
   log: (msg: string) => void;
@@ -53,9 +58,29 @@ export function handleQueryMessage(
     if ('uuid' in message) {
       state.lastAssistantUuid = (message as unknown as { uuid: string }).uuid;
     }
-    const inner = (message as { message?: { usage?: SdkResultUsage } }).message;
+    const inner = (
+      message as {
+        message?: { usage?: SdkResultUsage; content?: SdkContentBlock[] };
+      }
+    ).message;
     if (inner?.usage) {
       state.lastAssistantUsage = inner.usage;
+    }
+    const parentToolUseId = (
+      message as { parent_tool_use_id?: string | null }
+    ).parent_tool_use_id;
+    if (parentToolUseId == null && Array.isArray(inner?.content)) {
+      for (const block of inner.content) {
+        if (block?.type !== 'text') continue;
+        const text = typeof block.text === 'string' ? block.text : '';
+        if (!text) continue;
+        deps.emit({
+          status: 'success',
+          result: text,
+          newSessionId: state.newSessionId,
+          turnEnd: false,
+        });
+      }
     }
   }
 
@@ -83,16 +108,14 @@ export function handleQueryMessage(
 
   if (message.type === 'result') {
     state.resultCount++;
-    const textResult =
-      'result' in message ? (message as { result?: string }).result : null;
     const subtype = (message as { subtype?: string }).subtype;
     const usage = extractUsageFromResult(message, state);
     deps.log(
-      `Result #${state.resultCount}: subtype=${subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}${usage ? ` cost=${usage.totalCostUsd ?? 'null'} ctx=${usage.contextUsedTokens}/${usage.contextWindow ?? '?'}` : ''}`,
+      `Result #${state.resultCount}: subtype=${subtype}${usage ? ` cost=${usage.totalCostUsd ?? 'null'} ctx=${usage.contextUsedTokens}/${usage.contextWindow ?? '?'}` : ''}`,
     );
     deps.emit({
       status: 'success',
-      result: textResult || null,
+      result: null,
       newSessionId: state.newSessionId,
       turnEnd: true,
       usage: usage ?? undefined,

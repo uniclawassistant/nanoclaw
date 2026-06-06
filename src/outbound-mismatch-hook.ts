@@ -39,12 +39,14 @@ export interface TurnState {
 }
 
 const RAW_SAMPLE_LIMIT = 2000;
-const ACK_INTERNAL_SAMPLE_LIMIT = 200;
 const INTERNAL_RX = /<internal>[\s\S]*?<\/internal>/g;
-const INTERNAL_CONTENT_RX = /<internal>([\s\S]*?)<\/internal>/g;
 const INTERNAL_OPEN_RX = /<internal>/g;
-const ACK_PREFIX = '[host] Юник ушёл в тишину';
-const ACK_FALLBACK = `${ACK_PREFIX} без внутренней записки.`;
+// FED-31: the silence-stub must NEVER expose `<internal>` block content to the
+// chat. A single neutral string is used regardless of whether the turn was
+// truly empty or contained only internal reasoning — the agent's private notes
+// are not leakable through this surface. Per-turn diagnostics (rawLen,
+// internalBlockCount) still go to logs at `warn` for post-hoc debug.
+const ACK_STUB = '[host] Юник завершил ход, не отправив сообщения в чат.';
 const SILENT_FINISH_THRESHOLD_DEFAULT = 5;
 
 const activeTurns = new Map<string, TurnState>();
@@ -79,22 +81,6 @@ function bumpSilentFinishCounter(now: Date = new Date()): {
     hourCount: silentFinish.hourCount,
     total: silentFinish.total,
   };
-}
-
-function extractInternalSample(raw: string): string {
-  let combined = '';
-  for (const m of raw.matchAll(INTERNAL_CONTENT_RX)) combined += m[1];
-  return combined.trim();
-}
-
-function buildAckStub(raw: string): string {
-  const sample = extractInternalSample(raw);
-  if (!sample) return ACK_FALLBACK;
-  const truncated =
-    sample.length > ACK_INTERNAL_SAMPLE_LIMIT
-      ? `${sample.slice(0, ACK_INTERNAL_SAMPLE_LIMIT)}…`
-      : sample;
-  return `${ACK_PREFIX} (внутренняя записка: ${truncated})`;
 }
 
 export function beginTurn(
@@ -186,7 +172,6 @@ export async function checkClassB(
 
   if (!opts.sendAckStub) return;
 
-  const ackStub = buildAckStub(raw);
   const { hour, hourCount, total } = bumpSilentFinishCounter();
   logger.info(
     { hour, hourCount, total },
@@ -207,7 +192,7 @@ export async function checkClassB(
     );
   }
 
-  await opts.sendAckStub(ackStub);
+  await opts.sendAckStub(ACK_STUB);
 }
 
 export function _resetSilentFinishCounter(): void {
