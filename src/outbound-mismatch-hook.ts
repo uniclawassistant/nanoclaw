@@ -13,12 +13,29 @@ import { logger } from './logger.js';
 // a Class B trigger fires the hook ships a `[host] ...` message via the
 // supplied sendAckStub callback, increments an in-memory counter and warns
 // when the per-hour count exceeds SILENT_FINISH_THRESHOLD_PER_HOUR.
+//
+// FED-30 — two legitimate silent finishes must NOT trip the Class B ack-stub:
+//   (a) Scheduled-task / poller wakes. These never run through this hook at all
+//       (task-scheduler.ts drives them and never calls checkClassB); on the
+//       user-message path they surface as isUserFacing=false. The existing
+//       isUserFacing gate covers both.
+//   (b) React-as-reply. The agent can answer a user-facing message with a
+//       terminal reaction (👌 / 🫡 / 💯 …) and nothing else — that IS a reply,
+//       not a deadlock. A bare 👀 does NOT count: it is the transient "working"
+//       marker that auto-clears on turn end (see auto-clear-eye.ts), so a
+//       react(👀)+freeze must still trip the stub or we re-open the 2026-05-04
+//       silent-turn scar.
+
+const EYE_EMOJI = '👀';
 
 export interface TurnState {
   groupName: string;
   jid: string;
   outboundCount: number;
   isUserFacing: boolean;
+  // Last emoji the agent set via the react tool this turn (null = none / cleared).
+  // A non-null, non-👀 value means the turn was answered with a terminal react.
+  lastReactionEmoji: string | null;
 }
 
 const RAW_SAMPLE_LIMIT = 2000;
@@ -89,6 +106,7 @@ export function beginTurn(
     jid,
     outboundCount: 0,
     isUserFacing: opts.isUserFacing,
+    lastReactionEmoji: null,
   };
   activeTurns.set(jid, state);
   return state;
@@ -105,6 +123,22 @@ export function getActiveTurn(jid: string): TurnState | undefined {
 export function recordOutbound(jid: string): void {
   const state = activeTurns.get(jid);
   if (state) state.outboundCount++;
+}
+
+// FED-30 signal (b): record the emoji the agent set via the react tool this
+// turn. `emoji === null` is a clear (housekeeping) and resets the marker.
+export function recordReaction(jid: string, emoji: string | null): void {
+  const state = activeTurns.get(jid);
+  if (state) state.lastReactionEmoji = emoji;
+}
+
+// A turn counts as answered-by-reaction only when it ended on a terminal,
+// non-👀 reaction. A bare 👀 is the transient "working" marker (auto-cleared
+// on turn end) and must not suppress the Class B stub.
+function turnAnsweredByReaction(state: TurnState): boolean {
+  return (
+    state.lastReactionEmoji != null && state.lastReactionEmoji !== EYE_EMOJI
+  );
 }
 
 export function checkClassA(state: TurnState, text: string): void {
@@ -132,8 +166,9 @@ export async function checkClassB(
   opts: CheckClassBOpts,
 ): Promise<void> {
   if (opts.hadError) return;
-  if (!state.isUserFacing) return;
+  if (!state.isUserFacing) return; // FED-30 signal (a): scheduled-task / non-user-facing
   if (state.outboundCount > 0) return;
+  if (turnAnsweredByReaction(state)) return; // FED-30 signal (b): react-as-reply
   const stripped = raw.replace(INTERNAL_RX, '').trim();
   if (stripped.length > 0) return;
   const internalBlockCount = (raw.match(INTERNAL_OPEN_RX) || []).length;

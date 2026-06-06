@@ -72,6 +72,7 @@ import {
   checkClassB,
   endTurn,
   recordOutbound,
+  recordReaction,
 } from './outbound-mismatch-hook.js';
 import {
   checkThreshold,
@@ -1179,6 +1180,11 @@ async function main(): Promise<void> {
         }
       }
       await channel.setReaction(jid, resolvedId, emoji);
+      // FED-30: a terminal reaction (👌/🫡/💯…) is a legitimate reply to a
+      // user-facing turn; record it so Class B silent-finish detection does not
+      // mistake a react-only answer for a deadlock. A bare 👀 (working marker)
+      // is recorded too but filtered out downstream (see turnAnsweredByReaction).
+      recordReaction(jid, emoji);
       return resolvedId;
     },
     autoClearEyeReaction: async (jid) => {

@@ -10,6 +10,7 @@ import {
   checkClassB,
   endTurn,
   recordOutbound,
+  recordReaction,
 } from './outbound-mismatch-hook.js';
 import type { Channel } from './types.js';
 
@@ -153,6 +154,52 @@ describe('outbound-mismatch hook (FED-9)', () => {
     });
 
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('FED-30 signal (b): react-as-reply (👌) suppresses Class B', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const turn = beginTurn('tg:123', {
+      groupName: 'unic',
+      isUserFacing: true,
+    });
+    // Agent answered the user-facing message with a terminal reaction only.
+    recordReaction('tg:123', '👌');
+
+    checkClassB(turn, '<internal>ack via react</internal>', {
+      hadError: false,
+    });
+
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('FED-30: a bare 👀 working-marker does NOT suppress Class B (scar preserved)', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const turn = beginTurn('tg:123', {
+      groupName: 'unic',
+      isUserFacing: true,
+    });
+    // 👀 is "I picked it up" — it auto-clears on turn end, so a freeze after it
+    // still leaves the user staring at silence. Must still trip Class B.
+    recordReaction('tg:123', '👀');
+
+    checkClassB(turn, '<internal>froze after 👀</internal>', {
+      hadError: false,
+    });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('FED-30: react(null) clear is housekeeping, does NOT suppress Class B', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const turn = beginTurn('tg:123', {
+      groupName: 'unic',
+      isUserFacing: true,
+    });
+    recordReaction('tg:123', null);
+
+    checkClassB(turn, '', { hadError: false });
+
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   it('healthy paths: no warnings for send_message-only or final-text-only turns', () => {
@@ -308,6 +355,38 @@ describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
     });
 
     expect(sendAckStub).not.toHaveBeenCalled();
+  });
+
+  it('FED-30: does not ship an ack-stub when the turn was answered by a terminal react', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const sendAckStub = vi.fn().mockResolvedValue(undefined);
+    const turn = beginTurn('tg:123', {
+      groupName: 'unic',
+      isUserFacing: true,
+    });
+    recordReaction('tg:123', '🫡');
+
+    await checkClassB(turn, '', { hadError: false, sendAckStub });
+
+    expect(sendAckStub).not.toHaveBeenCalled();
+  });
+
+  it('FED-30: still ships an ack-stub after a bare 👀 + silent finish', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const sendAckStub = vi.fn().mockResolvedValue(undefined);
+    const turn = beginTurn('tg:123', {
+      groupName: 'unic',
+      isUserFacing: true,
+    });
+    recordReaction('tg:123', '👀');
+
+    await checkClassB(turn, '', { hadError: false, sendAckStub });
+
+    expect(sendAckStub).toHaveBeenCalledWith(
+      '[host] Юник ушёл в тишину без внутренней записки.',
+    );
   });
 
   it('increments silentFinishCount and logs per-hour breakdown on each trigger', async () => {
