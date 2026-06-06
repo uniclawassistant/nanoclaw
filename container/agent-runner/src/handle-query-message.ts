@@ -66,11 +66,6 @@ export function handleQueryMessage(
     if (inner?.usage) {
       state.lastAssistantUsage = inner.usage;
     }
-    // FED-31: stream every text block from the main-agent assistant message.
-    // The SDK's `result.result` only carries the FINAL text block of a turn,
-    // so any prose that precedes a tool_use (or sits between two tool_use
-    // blocks) was silently dropped before. Subagent text (parent_tool_use_id
-    // !== null) stays internal to the parent tool result and is not surfaced.
     const parentToolUseId = (
       message as { parent_tool_use_id?: string | null }
     ).parent_tool_use_id;
@@ -118,9 +113,6 @@ export function handleQueryMessage(
     deps.log(
       `Result #${state.resultCount}: subtype=${subtype}${usage ? ` cost=${usage.totalCostUsd ?? 'null'} ctx=${usage.contextUsedTokens}/${usage.contextWindow ?? '?'}` : ''}`,
     );
-    // FED-31: assistant text blocks are already streamed per `assistant`
-    // message above. `result.result` would just be a copy of the final text
-    // block — re-emitting it here would deliver the trailing prose twice.
     deps.emit({
       status: 'success',
       result: null,

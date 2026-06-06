@@ -267,8 +267,7 @@ describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
   // `<internal>` block payload verbatim into the user-facing stub, which
   // leaked the agent's private reasoning into the chat. The hook now never
   // reads the content of `<internal>` blocks for delivery purposes.
-  const NEUTRAL_STUB =
-    '[host] Юник завершил ход, не отправив сообщения в чат.';
+  const NEUTRAL_STUB = '[host] Юник завершил ход, не отправив сообщения в чат.';
 
   it('ships the neutral FED-31 stub when Class B fires', async () => {
     vi.spyOn(logger, 'warn').mockImplementation(() => {});
