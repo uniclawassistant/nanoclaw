@@ -386,7 +386,7 @@ describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
     await checkClassB(turn, '', { hadError: false, sendAckStub });
 
     expect(sendAckStub).toHaveBeenCalledWith(
-      '[host] Юник ушёл в тишину без внутренней записки.',
+      '[host] Юник завершил ход, не отправив сообщения в чат.',
     );
   });
 
