@@ -164,6 +164,10 @@ export interface ImageGenDelivery {
   message_id: string;
   file_path: string;
   message_type: 'photo' | 'document';
+  // FED-32: surfaces when the file written to disk differs from the size we
+  // asked OpenAI for. Plumbed into the MCP tool payload so the agent sees
+  // the discrepancy instead of silently accepting a 1024x1024 square.
+  size_mismatch?: { expected: string; actual: string };
 }
 
 /**
@@ -277,6 +281,9 @@ async function deliverImageOutcome(
       message_id: docResult.message_id,
       file_path: relOriginal,
       message_type: 'document',
+      ...(outcome.size_mismatch
+        ? { size_mismatch: outcome.size_mismatch }
+        : {}),
     };
   }
 
@@ -305,6 +312,7 @@ async function deliverImageOutcome(
     message_id: photoResult.message_id,
     file_path: relPreview,
     message_type: 'photo',
+    ...(outcome.size_mismatch ? { size_mismatch: outcome.size_mismatch } : {}),
   };
 }
 

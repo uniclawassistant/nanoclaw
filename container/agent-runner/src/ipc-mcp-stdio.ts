@@ -17,6 +17,7 @@ import {
   TaskFilter,
   taskStatusEmoji,
 } from './tasks-filter.js';
+import { normalizeXmlSmuggledArgs } from './tool-args-normalize.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -51,7 +52,125 @@ const server = new McpServer({
   version: '1.0.0',
 });
 
-server.tool(
+type ToolResult = {
+  content: Array<{ type: 'text'; text: string }>;
+  isError?: true;
+};
+
+/**
+ * Register a tool with one extra step: before the handler runs, repair the
+ * args if the model smuggled other parameters into a string field as raw XML
+ * (`</prompt>\n<parameter name="preset">…`). See tool-args-normalize.ts.
+ *
+ * • Recovered known params are merged into args; a stderr log line records
+ *   what was recovered so we can monitor the rate from outside.
+ * • If a smuggled boundary is detected but no tail block maps to a known
+ *   parameter, refuse the call rather than silently falling back to defaults
+ *   (FED-32: silent 1024x1024 square was the original failure mode).
+ * • For tools whose success payload is structured JSON, attach
+ *   `xml_args_normalized: [...]` so callers see the warning in-band.
+ */
+function safeTool<TShape extends z.ZodRawShape>(
+  name: string,
+  description: string,
+  shape: TShape,
+  handler: (args: {
+    [K in keyof TShape]: z.infer<TShape[K]>;
+  }) => Promise<ToolResult>,
+): void {
+  const knownParams = Object.keys(shape);
+  const stringParams = knownParams.filter((p) => isZodStringParam(shape[p]));
+  const wrapped = async (raw: Record<string, unknown>): Promise<ToolResult> => {
+    const result = normalizeXmlSmuggledArgs(raw, { knownParams, stringParams });
+    if (result.recovered.length > 0 || result.unrecognized) {
+      console.error(
+        `[mcp-shim] tool=${name} args-normalize recovered=${JSON.stringify(
+          result.recovered,
+        )} unrecognized=${result.unrecognized}`,
+      );
+    }
+    if (result.unrecognized) {
+      return toolError(
+        `tool '${name}' received args that appear to be XML-encoded but no recognizable parameter could be parsed from the smuggled tail — refusing to fall back to defaults. Retry the call with a clean JSON tool-call payload.`,
+      );
+    }
+    const handlerResult = await handler(
+      result.args as { [K in keyof TShape]: z.infer<TShape[K]> },
+    );
+    if (result.recovered.length === 0) return handlerResult;
+    return annotateNormalized(handlerResult, result.recovered);
+  };
+  // MCP SDK's BaseToolCallback union widens content to image/resource/etc;
+  // every handler in this file only ever emits `text`. Cast at the boundary
+  // so callers stay strictly typed.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  server.tool(name, description, shape, wrapped as any);
+}
+
+/**
+ * Returns true when the tool's declared parameter is (a wrapped) ZodString.
+ * Used by the XML-args normalizer to know "this slot must stay a raw string —
+ * do not JSON.parse a recovered value into an array/number".
+ *
+ * Walks through ZodOptional/ZodNullable/ZodDefault/ZodEffects wrappers, which
+ * is the full set we use in tool shapes today. An unknown wrapper just falls
+ * through to `false` (= apply the JSON-coercion heuristic), preserving the
+ * pre-existing behavior for non-string params.
+ */
+function isZodStringParam(schema: unknown): boolean {
+  if (!schema || typeof schema !== 'object') return false;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let current: any = schema;
+  for (let i = 0; i < 8 && current; i++) {
+    const def = current._def ?? current.def;
+    const name = def?.typeName ?? def?.type;
+    if (name === 'ZodString' || name === 'string') return true;
+    if (
+      name === 'ZodOptional' ||
+      name === 'ZodNullable' ||
+      name === 'ZodDefault' ||
+      name === 'optional' ||
+      name === 'nullable' ||
+      name === 'default'
+    ) {
+      current = def.innerType;
+      continue;
+    }
+    if (name === 'ZodEffects' || name === 'pipe') {
+      current = def.schema ?? def.in;
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
+function annotateNormalized(
+  result: ToolResult,
+  recovered: string[],
+): ToolResult {
+  const annotated: ToolResult = {
+    ...result,
+    content: result.content.map((entry) => {
+      if (entry.type !== 'text') return entry;
+      try {
+        const parsed = JSON.parse(entry.text);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return {
+            ...entry,
+            text: JSON.stringify({ ...parsed, xml_args_normalized: recovered }),
+          };
+        }
+      } catch {
+        // Not JSON — leave as-is; the stderr log line is the only signal.
+      }
+      return entry;
+    }),
+  };
+  return annotated;
+}
+
+safeTool(
   'send_message',
   "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times.",
   {
@@ -82,7 +201,7 @@ server.tool(
 const SEND_FILE_TIMEOUT_MS = 240_000;
 const SEND_FILE_POLL_INTERVAL_MS = 250;
 
-server.tool(
+safeTool(
   'send_file',
   `Send a local file to the current chat as a channel-native document (Telegram sendDocument: no compression, original bytes preserved).
 
@@ -142,9 +261,7 @@ RETURN (JSON in tool output): { ok: true, message_id } on success — message_id
             ? { ok: true, message_id: resp.message_id }
             : { ok: false, error: resp.error ?? 'unknown error' };
           return {
-            content: [
-              { type: 'text' as const, text: JSON.stringify(payload) },
-            ],
+            content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
             ...(resp.success ? {} : { isError: true as const }),
           };
         } catch (err) {
@@ -220,11 +337,12 @@ async function dispatchMediaTool(
         // Host already shaped `data` for the agent on success; on failure it
         // sets success=false + error and we mirror the `send_file` pattern.
         if (resp.success) {
-          const payload = resp.data ?? { ok: true, message_id: resp.message_id };
+          const payload = resp.data ?? {
+            ok: true,
+            message_id: resp.message_id,
+          };
           return {
-            content: [
-              { type: 'text' as const, text: JSON.stringify(payload) },
-            ],
+            content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
           };
         }
         return {
@@ -261,7 +379,7 @@ async function dispatchMediaTool(
   };
 }
 
-server.tool(
+safeTool(
   'generate_image',
   `Generate an image with GPT Image and ship it to the current chat as a compressed photo (Telegram sendPhoto with native preview).
 
@@ -281,8 +399,10 @@ CAPTION (optional): plain-text caption shown under the photo in chat.
 CHANNELS: image tools are Telegram-only today. On other channels the call returns \`{ ok: true, skipped: true, reason: "channel not supported" }\` and nothing is sent.
 
 RETURN (JSON in tool output):
-  • { ok: true, message_id, file_path, message_type } on success — message_id is usable with \`get_message\`, \`react\`, and \`edit_image\` (as source_message_id). file_path is the group-relative path of what shipped to chat.
-  • { ok: false, error } on failure — common reasons: "moderation: ..." (rephrase prompt), "generic: ..." (bad params), "transient: ..." (retry), "channel does not support sendPhoto".`,
+  • { ok: true, message_id, file_path, message_type, size_mismatch? } on success — message_id is usable with \`get_message\`, \`react\`, and \`edit_image\` (as source_message_id). file_path is the group-relative path of what shipped to chat. \`size_mismatch: { expected, actual }\` is present only when the file written to disk differs from the size you asked for (OpenAI sometimes silently substitutes a different size for certain prompts); when present, retry with a different preset if the size matters.
+  • { ok: false, error } on failure — common reasons: "moderation: ..." (rephrase prompt), "generic: ..." (bad params), "transient: ..." (retry), "channel does not support sendPhoto".
+
+If the response payload includes \`xml_args_normalized: [...]\`, your previous tool-call args arrived in XML-encoded form and the shim recovered the listed parameters by parsing them out — re-emit the next call as a plain JSON tool-call to avoid relying on the fallback.`,
   {
     prompt: z.string().describe('What to generate. Free-form description.'),
     preset: z
@@ -305,7 +425,7 @@ RETURN (JSON in tool output):
   },
 );
 
-server.tool(
+safeTool(
   'edit_image',
   `Edit an existing image (one we previously sent or that the user sent us) and ship the edited result to the current chat as a compressed photo.
 
@@ -321,7 +441,7 @@ PRESET / CAPTION: same vocabulary as \`generate_image\`.
 CHANNELS: Telegram-only; non-Telegram returns \`{ ok: true, skipped: true, reason: "channel not supported" }\`.
 
 RETURN (JSON in tool output):
-  • { ok: true, message_id, file_path, message_type } on success — message_id is the new edited photo's id.
+  • { ok: true, message_id, file_path, message_type, size_mismatch? } on success — message_id is the new edited photo's id. \`size_mismatch\` semantics match \`generate_image\`.
   • { ok: false, error } on failure — common reasons: "source message X not found in this chat" (wrong message_id), "source message X has no attached image" (the message is text/document), "source_missing: ..." (file rotated off disk), "moderation: ...", "generic: ..." (bad prompt).`,
   {
     source_message_id: z
@@ -329,15 +449,11 @@ RETURN (JSON in tool output):
       .describe(
         'channel-native message_id of the image to edit (from generate_image success payload or get_message lookup).',
       ),
-    prompt: z
-      .string()
-      .describe('What to change about the source image.'),
+    prompt: z.string().describe('What to change about the source image.'),
     preset: z
       .array(z.string())
       .optional()
-      .describe(
-        'Optional preset tokens. Same vocabulary as generate_image.',
-      ),
+      .describe('Optional preset tokens. Same vocabulary as generate_image.'),
     caption: z
       .string()
       .optional()
@@ -353,7 +469,7 @@ RETURN (JSON in tool output):
   },
 );
 
-server.tool(
+safeTool(
   'send_image',
   `Send a local image file to the current chat as a compressed photo (Telegram sendPhoto with native preview).
 
@@ -390,7 +506,7 @@ RETURN (JSON in tool output):
   },
 );
 
-server.tool(
+safeTool(
   'send_voice',
   `Synthesize TTS audio with Gemini 3.1 Flash and send it as a Telegram voice note.
 
@@ -427,10 +543,7 @@ RETURN (JSON in tool output):
       .describe(
         'Optional prose-style stage direction applied to the utterance (e.g. "whispered, close to mic").',
       ),
-    profile: z
-      .string()
-      .optional()
-      .describe('Optional persona/audio profile.'),
+    profile: z.string().optional().describe('Optional persona/audio profile.'),
     scene: z.string().optional().describe('Optional scene/setting context.'),
   },
   async (args) => {
@@ -444,7 +557,7 @@ RETURN (JSON in tool output):
   },
 );
 
-server.tool(
+safeTool(
   'react',
   `Set or clear an emoji reaction on a Telegram message. Useful as a lightweight signal that you've received a request and it's being processed (e.g. 👀 while working, 👌 when done), instead of sending a noisy chat message.
 
@@ -551,7 +664,7 @@ LIMITATIONS:
   },
 );
 
-server.tool(
+safeTool(
   'get_message',
   `Fetch a stored message by chat JID and message ID. Returns sender, timestamp, text, attachments, and any feature-specific metadata (e.g. the generation prompt for images we previously created).
 
@@ -628,7 +741,7 @@ Don't spam calls — query only when you actually need the referenced message's 
 const SEARCH_MESSAGES_TIMEOUT_MS = 5_000;
 const SEARCH_MESSAGES_POLL_INTERVAL_MS = 100;
 
-server.tool(
+safeTool(
   'search_messages',
   `Search stored chat history. Backed by an SQLite FTS5 index over message content, sender names, and (optionally) the prompts of images you generated.
 
@@ -664,15 +777,21 @@ RETURN SHAPE (success):
     query: z
       .string()
       .min(1)
-      .describe('Search text. Treated as substring (default) or regex (when is_regex=true).'),
+      .describe(
+        'Search text. Treated as substring (default) or regex (when is_regex=true).',
+      ),
     is_regex: z
       .boolean()
       .optional()
-      .describe('When true, query is a JavaScript regex applied case-insensitively. Default false.'),
+      .describe(
+        'When true, query is a JavaScript regex applied case-insensitively. Default false.',
+      ),
     jid: z
       .union([z.string(), z.array(z.string())])
       .optional()
-      .describe('Restrict to one or more chat JIDs. Defaults to chats the caller can read.'),
+      .describe(
+        'Restrict to one or more chat JIDs. Defaults to chats the caller can read.',
+      ),
     since: z
       .string()
       .optional()
@@ -684,7 +803,9 @@ RETURN SHAPE (success):
     sender: z
       .string()
       .optional()
-      .describe('Filter by sender display name (case-insensitive exact match).'),
+      .describe(
+        'Filter by sender display name (case-insensitive exact match).',
+      ),
     message_type: z
       .enum(['text', 'photo', 'voice', 'document', 'video', 'sticker', 'all'])
       .optional()
@@ -699,7 +820,9 @@ RETURN SHAPE (success):
       .min(0)
       .max(20)
       .optional()
-      .describe('For each hit also return up to N neighboring messages before and after. Default 0.'),
+      .describe(
+        'For each hit also return up to N neighboring messages before and after. Default 0.',
+      ),
     limit: z
       .number()
       .int()
@@ -769,7 +892,7 @@ RETURN SHAPE (success):
 const FORWARD_MESSAGE_TIMEOUT_MS = 30_000;
 const FORWARD_MESSAGE_POLL_INTERVAL_MS = 100;
 
-server.tool(
+safeTool(
   'forward_message',
   `Repost a stored message into the current chat using Telegram's native forward/copy. Pairs with \`search_messages\` and \`get_message\`: find the message id, then surface the original to the user with native preview, attachment bytes, and authorship intact.
 
@@ -881,7 +1004,7 @@ RETURN (JSON in tool output): { ok: true, new_message_id, source: { message_id, 
   },
 );
 
-server.tool(
+safeTool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
 
@@ -1029,7 +1152,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
   },
 );
 
-server.tool(
+safeTool(
   'list_tasks',
   "List scheduled tasks. From main: shows all tasks. From other groups: shows only that group's tasks. By default returns only active (running + scheduled) tasks; pass filter to widen.",
   {
@@ -1108,7 +1231,7 @@ server.tool(
   },
 );
 
-server.tool(
+safeTool(
   'pause_task',
   'Pause a scheduled task. It will not run until resumed.',
   { task_id: z.string().describe('The task ID to pause') },
@@ -1134,7 +1257,7 @@ server.tool(
   },
 );
 
-server.tool(
+safeTool(
   'resume_task',
   'Resume a paused task.',
   { task_id: z.string().describe('The task ID to resume') },
@@ -1160,7 +1283,7 @@ server.tool(
   },
 );
 
-server.tool(
+safeTool(
   'cancel_task',
   'Cancel and delete a scheduled task.',
   { task_id: z.string().describe('The task ID to cancel') },
@@ -1186,7 +1309,7 @@ server.tool(
   },
 );
 
-server.tool(
+safeTool(
   'update_task',
   'Update an existing scheduled task. Only provided fields are changed; omitted fields stay the same.',
   {
@@ -1271,7 +1394,7 @@ server.tool(
   },
 );
 
-server.tool(
+safeTool(
   'register_group',
   `Register a new chat/group so the agent can respond to messages there. Main group only.
 
@@ -1335,7 +1458,7 @@ Use available_groups.json to find the JID for a group. The folder name must be c
 const RESET_SESSION_TIMEOUT_MS = 10_000;
 const RESET_SESSION_POLL_INTERVAL_MS = 100;
 
-server.tool(
+safeTool(
   'reset_session',
   `Reset your conversation context for THIS chat. Two modes:
 
@@ -1379,9 +1502,7 @@ RETURN (JSON in tool output): { ok: true } on accepted, { ok: false, error } on 
             ? { ok: true as const }
             : { ok: false as const, error: resp.error ?? 'unknown error' };
           return {
-            content: [
-              { type: 'text' as const, text: JSON.stringify(payload) },
-            ],
+            content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
             ...(resp.success ? {} : { isError: true as const }),
           };
         } catch (err) {
