@@ -242,7 +242,16 @@ function buildVolumeMounts(
       newestMtime(agentRunnerSrc) > newestMtime(groupAgentRunnerDir);
     if (needsCopy) {
       fs.rmSync(groupAgentRunnerDir, { recursive: true, force: true });
-      fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+      // Exclude *.test.ts: the container recompiles /app/src via `tsc` on every
+      // startup (entrypoint), and test files import vitest — a host-only
+      // devDependency absent in the container. A single colocated *.test.ts in
+      // agent-runner/src would otherwise fail compilation (TS2307) and mute the
+      // agent across all groups. Tests stay colocated in src for host vitest;
+      // they just never reach the container.
+      fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, {
+        recursive: true,
+        filter: (src) => !src.endsWith('.test.ts'),
+      });
     }
   }
   mounts.push({

@@ -127,6 +127,54 @@ function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
 
+/**
+ * Snapshot the on-disk session transcript when a resume is rejected with the
+ * 400 "thinking ... blocks cannot be modified" error. The live JSONL gets
+ * overwritten by the next run, so without this the exact poisoned content
+ * block (the thinking block whose signature no longer matches) is lost. Every
+ * such 400 observed so far follows a mid-turn "Close sentinel detected during
+ * query" — the stream was cut before the interleaved thinking block finalized.
+ * Dumps to /home/node/.claude/poisoned-sessions/ (persists to host
+ * data/sessions/<group>/.claude/). No-op for any other error.
+ */
+function dumpPoisonedSession(
+  sessionId: string | undefined,
+  errorMessage: string,
+): void {
+  if (!sessionId) return;
+  if (!/thinking[\s\S]*blocks[\s\S]*cannot be modified/.test(errorMessage)) {
+    return;
+  }
+  try {
+    const projectsRoot = '/home/node/.claude/projects';
+    let src: string | undefined;
+    if (fs.existsSync(projectsRoot)) {
+      for (const slug of fs.readdirSync(projectsRoot)) {
+        const candidate = path.join(projectsRoot, slug, `${sessionId}.jsonl`);
+        if (fs.existsSync(candidate)) {
+          src = candidate;
+          break;
+        }
+      }
+    }
+    if (!src) {
+      log(`Poisoned-session dump: transcript for ${sessionId} not found`);
+      return;
+    }
+    const reqId = (errorMessage.match(/req_[a-zA-Z0-9]+/) || ['noreq'])[0];
+    const dumpDir = '/home/node/.claude/poisoned-sessions';
+    fs.mkdirSync(dumpDir, { recursive: true });
+    const dest = path.join(dumpDir, `${sessionId}-${reqId}.jsonl`);
+    fs.copyFileSync(src, dest);
+    fs.writeFileSync(`${dest}.error.txt`, errorMessage);
+    log(`Poisoned-session dump written: ${dest}`);
+  } catch (e) {
+    log(
+      `Poisoned-session dump failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
 function getSessionSummary(
   sessionId: string,
   transcriptPath: string,
@@ -724,6 +772,7 @@ async function main(): Promise<void> {
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     log(`Agent error: ${errorMessage}`);
+    dumpPoisonedSession(sessionId, errorMessage);
     writeOutput({
       status: 'error',
       result: null,
