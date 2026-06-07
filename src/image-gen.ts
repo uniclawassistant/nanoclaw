@@ -11,6 +11,11 @@ const execFileP = promisify(execFile);
 export interface ImageGenResult {
   previewPath: string; // jpeg if conversion succeeded, otherwise the original — this is what ships as photo
   originalPath: string; // full-fidelity source kept for re-send via send_image
+  // Set when the generated file's actual pixel dimensions differ from
+  // `resolved.size` — surfaced so the agent (and the operator) sees that
+  // OpenAI silently substituted a different size. FED-32 closes the "silent
+  // square" hole.
+  size_mismatch?: { expected: string; actual: string };
 }
 
 // Outcome of a generate/edit call. `null` is returned only when there's
@@ -279,6 +284,62 @@ function getApiKey(): string | undefined {
 }
 
 /**
+ * Read pixel dimensions of a generated image via macOS `sips`. Returns
+ * `null` if the probe fails (logged) so the caller treats the check as
+ * advisory rather than failing the whole call.
+ */
+export async function probeImageDimensions(
+  filePath: string,
+): Promise<{ width: number; height: number } | null> {
+  try {
+    const { stdout } = await execFileP('sips', [
+      '-g',
+      'pixelWidth',
+      '-g',
+      'pixelHeight',
+      filePath,
+    ]);
+    const widthMatch = stdout.match(/pixelWidth:\s*(\d+)/);
+    const heightMatch = stdout.match(/pixelHeight:\s*(\d+)/);
+    if (!widthMatch || !heightMatch) {
+      logger.warn(
+        { filePath, stdout: stdout.slice(0, 200) },
+        'image-gen: could not parse sips dimension output',
+      );
+      return null;
+    }
+    return {
+      width: parseInt(widthMatch[1], 10),
+      height: parseInt(heightMatch[1], 10),
+    };
+  } catch (err) {
+    logger.warn({ err, filePath }, 'image-gen: sips dimension probe failed');
+    return null;
+  }
+}
+
+/**
+ * Compare actual file dimensions to the resolved size we sent to OpenAI.
+ * Returns a mismatch descriptor when they differ, `null` otherwise (and
+ * `null` when expected size is `auto`, since the API picks dimensions).
+ */
+export function detectSizeMismatch(
+  expectedSize: string,
+  actual: { width: number; height: number },
+): { expected: string; actual: string } | null {
+  if (expectedSize === 'auto') return null;
+  const m = expectedSize.match(/^(\d+)x(\d+)$/);
+  if (!m) return null;
+  const expectedW = parseInt(m[1], 10);
+  const expectedH = parseInt(m[2], 10);
+  if (expectedW === actual.width && expectedH === actual.height) return null;
+  return {
+    expected: expectedSize,
+    actual: `${actual.width}x${actual.height}`,
+  };
+}
+
+/**
  * Convert PNG → JPEG (q=85) via macOS native sips. Returns the jpeg path on
  * success, null on failure. The png is left untouched on disk.
  */
@@ -397,6 +458,16 @@ export async function generateImage(
   const buf = Buffer.from(b64, 'base64');
   fs.writeFileSync(imagePath, buf);
 
+  // Compare the file we just wrote to the size we asked for. OpenAI can
+  // silently substitute a different size for some prompts; without this
+  // check the agent has no way to know it asked for portrait and got
+  // square. We probe the original (pre-jpeg-conversion) bytes so we don't
+  // confuse a sips re-encode for a mismatch.
+  const dims = await probeImageDimensions(imagePath);
+  const size_mismatch = dims
+    ? (detectSizeMismatch(resolved.size, dims) ?? undefined)
+    : undefined;
+
   // For PNG mode: convert to a JPEG preview so the photo upload stays small,
   // keep the PNG as the full-fidelity "original" for re-send via send_image.
   // For JPEG/WebP: the API-returned file is compact enough to ship directly —
@@ -423,10 +494,12 @@ export async function generateImage(
       resolved,
       requestId,
       timeoutMs,
+      actualDims: dims,
+      size_mismatch,
     },
     'Image generated',
   );
-  return { ok: true, previewPath, originalPath };
+  return { ok: true, previewPath, originalPath, size_mismatch };
 }
 
 function extensionForFormat(fmt: ResolvedPresets['output_format']): string {
@@ -564,6 +637,11 @@ export async function editImage(
   const buf = Buffer.from(b64, 'base64');
   fs.writeFileSync(imagePath, buf);
 
+  const dims = await probeImageDimensions(imagePath);
+  const size_mismatch = dims
+    ? (detectSizeMismatch(resolved.size, dims) ?? undefined)
+    : undefined;
+
   let previewPath: string;
   let originalPath: string;
   if (wantsPng) {
@@ -589,8 +667,10 @@ export async function editImage(
       resolved,
       requestId,
       timeoutMs,
+      actualDims: dims,
+      size_mismatch,
     },
     'Image edited',
   );
-  return { ok: true, previewPath, originalPath };
+  return { ok: true, previewPath, originalPath, size_mismatch };
 }

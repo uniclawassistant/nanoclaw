@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-import { computeApiTimeoutMs, resolvePresets } from './image-gen.js';
+import {
+  computeApiTimeoutMs,
+  detectSizeMismatch,
+  resolvePresets,
+} from './image-gen.js';
 import { logger } from './logger.js';
 
 beforeEach(() => {
@@ -310,5 +314,40 @@ describe('computeApiTimeoutMs', () => {
     const t = computeApiTimeoutMs(r, true);
     expect(t).toBeGreaterThan(400_000);
     expect(t).toBeLessThan(500_000);
+  });
+});
+
+describe('detectSizeMismatch — FED-32 post-gen verify', () => {
+  it('returns null when sizes match', () => {
+    expect(
+      detectSizeMismatch('1024x1536', { width: 1024, height: 1536 }),
+    ).toBeNull();
+    expect(
+      detectSizeMismatch('1024x1024', { width: 1024, height: 1024 }),
+    ).toBeNull();
+  });
+
+  it('flags silent square fallback (portrait asked, square delivered)', () => {
+    expect(
+      detectSizeMismatch('1024x1536', { width: 1024, height: 1024 }),
+    ).toEqual({ expected: '1024x1536', actual: '1024x1024' });
+  });
+
+  it('flags a custom WxH that OpenAI silently substituted', () => {
+    expect(
+      detectSizeMismatch('1920x1088', { width: 1024, height: 1024 }),
+    ).toEqual({ expected: '1920x1088', actual: '1024x1024' });
+  });
+
+  it('skips check for size=auto since the API picks dimensions', () => {
+    expect(
+      detectSizeMismatch('auto', { width: 1536, height: 1024 }),
+    ).toBeNull();
+  });
+
+  it('returns null when expected size is malformed (no false positives)', () => {
+    expect(
+      detectSizeMismatch('not-a-size', { width: 1024, height: 1024 }),
+    ).toBeNull();
   });
 });

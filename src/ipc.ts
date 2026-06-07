@@ -91,6 +91,7 @@ export interface IpcDeps {
         message_id: string;
         file_path: string;
         message_type: 'photo' | 'document';
+        size_mismatch?: { expected: string; actual: string };
       }
     | { ok: false; error: string }
   >;
@@ -113,6 +114,7 @@ export interface IpcDeps {
         message_id: string;
         file_path: string;
         message_type: 'photo' | 'document';
+        size_mismatch?: { expected: string; actual: string };
       }
     | { ok: false; error: string }
   >;
@@ -621,6 +623,9 @@ async function processMediaToolIpc(
             message_id: result.message_id,
             file_path: result.file_path,
             message_type: result.message_type,
+            ...(result.size_mismatch
+              ? { size_mismatch: result.size_mismatch }
+              : {}),
           },
         });
       } else {
@@ -708,6 +713,9 @@ async function processMediaToolIpc(
             message_id: result.message_id,
             file_path: result.file_path,
             message_type: result.message_type,
+            ...(result.size_mismatch
+              ? { size_mismatch: result.size_mismatch }
+              : {}),
           },
         });
       } else {
