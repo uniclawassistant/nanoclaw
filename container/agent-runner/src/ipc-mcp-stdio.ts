@@ -79,8 +79,9 @@ function safeTool<TShape extends z.ZodRawShape>(
   }) => Promise<ToolResult>,
 ): void {
   const knownParams = Object.keys(shape);
+  const stringParams = knownParams.filter((p) => isZodStringParam(shape[p]));
   const wrapped = async (raw: Record<string, unknown>): Promise<ToolResult> => {
-    const result = normalizeXmlSmuggledArgs(raw, { knownParams });
+    const result = normalizeXmlSmuggledArgs(raw, { knownParams, stringParams });
     if (result.recovered.length > 0 || result.unrecognized) {
       console.error(
         `[mcp-shim] tool=${name} args-normalize recovered=${JSON.stringify(
@@ -104,6 +105,44 @@ function safeTool<TShape extends z.ZodRawShape>(
   // so callers stay strictly typed.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   server.tool(name, description, shape, wrapped as any);
+}
+
+/**
+ * Returns true when the tool's declared parameter is (a wrapped) ZodString.
+ * Used by the XML-args normalizer to know "this slot must stay a raw string —
+ * do not JSON.parse a recovered value into an array/number".
+ *
+ * Walks through ZodOptional/ZodNullable/ZodDefault/ZodEffects wrappers, which
+ * is the full set we use in tool shapes today. An unknown wrapper just falls
+ * through to `false` (= apply the JSON-coercion heuristic), preserving the
+ * pre-existing behavior for non-string params.
+ */
+function isZodStringParam(schema: unknown): boolean {
+  if (!schema || typeof schema !== 'object') return false;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let current: any = schema;
+  for (let i = 0; i < 8 && current; i++) {
+    const def = current._def ?? current.def;
+    const name = def?.typeName ?? def?.type;
+    if (name === 'ZodString' || name === 'string') return true;
+    if (
+      name === 'ZodOptional' ||
+      name === 'ZodNullable' ||
+      name === 'ZodDefault' ||
+      name === 'optional' ||
+      name === 'nullable' ||
+      name === 'default'
+    ) {
+      current = def.innerType;
+      continue;
+    }
+    if (name === 'ZodEffects' || name === 'pipe') {
+      current = def.schema ?? def.in;
+      continue;
+    }
+    return false;
+  }
+  return false;
 }
 
 function annotateNormalized(
@@ -222,9 +261,7 @@ RETURN (JSON in tool output): { ok: true, message_id } on success — message_id
             ? { ok: true, message_id: resp.message_id }
             : { ok: false, error: resp.error ?? 'unknown error' };
           return {
-            content: [
-              { type: 'text' as const, text: JSON.stringify(payload) },
-            ],
+            content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
             ...(resp.success ? {} : { isError: true as const }),
           };
         } catch (err) {
@@ -300,11 +337,12 @@ async function dispatchMediaTool(
         // Host already shaped `data` for the agent on success; on failure it
         // sets success=false + error and we mirror the `send_file` pattern.
         if (resp.success) {
-          const payload = resp.data ?? { ok: true, message_id: resp.message_id };
+          const payload = resp.data ?? {
+            ok: true,
+            message_id: resp.message_id,
+          };
           return {
-            content: [
-              { type: 'text' as const, text: JSON.stringify(payload) },
-            ],
+            content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
           };
         }
         return {
@@ -411,15 +449,11 @@ RETURN (JSON in tool output):
       .describe(
         'channel-native message_id of the image to edit (from generate_image success payload or get_message lookup).',
       ),
-    prompt: z
-      .string()
-      .describe('What to change about the source image.'),
+    prompt: z.string().describe('What to change about the source image.'),
     preset: z
       .array(z.string())
       .optional()
-      .describe(
-        'Optional preset tokens. Same vocabulary as generate_image.',
-      ),
+      .describe('Optional preset tokens. Same vocabulary as generate_image.'),
     caption: z
       .string()
       .optional()
@@ -509,10 +543,7 @@ RETURN (JSON in tool output):
       .describe(
         'Optional prose-style stage direction applied to the utterance (e.g. "whispered, close to mic").',
       ),
-    profile: z
-      .string()
-      .optional()
-      .describe('Optional persona/audio profile.'),
+    profile: z.string().optional().describe('Optional persona/audio profile.'),
     scene: z.string().optional().describe('Optional scene/setting context.'),
   },
   async (args) => {
@@ -746,15 +777,21 @@ RETURN SHAPE (success):
     query: z
       .string()
       .min(1)
-      .describe('Search text. Treated as substring (default) or regex (when is_regex=true).'),
+      .describe(
+        'Search text. Treated as substring (default) or regex (when is_regex=true).',
+      ),
     is_regex: z
       .boolean()
       .optional()
-      .describe('When true, query is a JavaScript regex applied case-insensitively. Default false.'),
+      .describe(
+        'When true, query is a JavaScript regex applied case-insensitively. Default false.',
+      ),
     jid: z
       .union([z.string(), z.array(z.string())])
       .optional()
-      .describe('Restrict to one or more chat JIDs. Defaults to chats the caller can read.'),
+      .describe(
+        'Restrict to one or more chat JIDs. Defaults to chats the caller can read.',
+      ),
     since: z
       .string()
       .optional()
@@ -766,7 +803,9 @@ RETURN SHAPE (success):
     sender: z
       .string()
       .optional()
-      .describe('Filter by sender display name (case-insensitive exact match).'),
+      .describe(
+        'Filter by sender display name (case-insensitive exact match).',
+      ),
     message_type: z
       .enum(['text', 'photo', 'voice', 'document', 'video', 'sticker', 'all'])
       .optional()
@@ -781,7 +820,9 @@ RETURN SHAPE (success):
       .min(0)
       .max(20)
       .optional()
-      .describe('For each hit also return up to N neighboring messages before and after. Default 0.'),
+      .describe(
+        'For each hit also return up to N neighboring messages before and after. Default 0.',
+      ),
     limit: z
       .number()
       .int()
@@ -1461,9 +1502,7 @@ RETURN (JSON in tool output): { ok: true } on accepted, { ok: false, error } on 
             ? { ok: true as const }
             : { ok: false as const, error: resp.error ?? 'unknown error' };
           return {
-            content: [
-              { type: 'text' as const, text: JSON.stringify(payload) },
-            ],
+            content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
             ...(resp.success ? {} : { isError: true as const }),
           };
         } catch (err) {

@@ -130,6 +130,32 @@ describe('normalizeXmlSmuggledArgs', () => {
     expect(asAny(result.args).director).toBe('unhurried storyteller');
   });
 
+  it('preserves a string-typed param verbatim, even when value looks like JSON', () => {
+    // caption is declared as string in the tool's zod shape. A value that
+    // happens to look like a JSON array must NOT be parsed into an array —
+    // type drives coercion, not the shape of the raw text.
+    const args = {
+      prompt: 'real prompt</prompt>\n<parameter name="caption">[1,2]',
+    };
+    const result = normalizeXmlSmuggledArgs(args, {
+      knownParams: IMAGE_PARAMS,
+      stringParams: ['prompt', 'caption'],
+    });
+    expect(result.recovered).toEqual(['caption']);
+    expect(asAny(result.args).caption).toBe('[1,2]');
+    // sanity: preset (non-string) still gets coerced when present in the same call
+    const args2 = {
+      prompt:
+        'real</prompt>\n<parameter name="caption">"42"\n<parameter name="preset">["1024x1536"]',
+    };
+    const result2 = normalizeXmlSmuggledArgs(args2, {
+      knownParams: IMAGE_PARAMS,
+      stringParams: ['prompt', 'caption'],
+    });
+    expect(asAny(result2.args).caption).toBe('"42"');
+    expect(asAny(result2.args).preset).toEqual(['1024x1536']);
+  });
+
   it('leaves non-string fields and undefined entries untouched', () => {
     const args: Record<string, unknown> = {
       prompt: 'clean</prompt>\n<parameter name="preset">["square"]',

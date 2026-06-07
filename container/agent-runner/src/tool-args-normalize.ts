@@ -18,8 +18,7 @@
  * undefined, never overwriting a legitimately-passed argument.
  */
 
-const SMUGGLED_BOUNDARY =
-  /<\/[a-zA-Z_][a-zA-Z0-9_-]*>\s*<parameter\s+name="/;
+const SMUGGLED_BOUNDARY = /<\/[a-zA-Z_][a-zA-Z0-9_-]*>\s*<parameter\s+name="/;
 
 const PARAMETER_BLOCK =
   /<parameter\s+name="([^"]+)">([\s\S]*?)(?=<parameter\s+name=|<\/parameter>\s*$|<\/parameter>\s*<parameter|$)/g;
@@ -27,6 +26,14 @@ const PARAMETER_BLOCK =
 export interface NormalizeOptions {
   /** Parameter names declared in the tool's zod shape. */
   knownParams: ReadonlyArray<string>;
+  /**
+   * Subset of `knownParams` whose declared zod type is a string (after
+   * unwrapping optional/nullable/default). Recovered values for these
+   * parameters are returned verbatim — `caption="[1,2]"` stays the string
+   * `[1,2]`, never gets `JSON.parse`'d into an array. Coercion is driven by
+   * the declared type, not by the shape of the raw text.
+   */
+  stringParams?: ReadonlyArray<string>;
 }
 
 export interface NormalizationResult<T> {
@@ -48,6 +55,7 @@ export function normalizeXmlSmuggledArgs<T extends Record<string, unknown>>(
   opts: NormalizeOptions,
 ): NormalizationResult<T> {
   const knownSet = new Set(opts.knownParams);
+  const stringSet = new Set(opts.stringParams ?? []);
   const recovered = new Set<string>();
   let anyBoundary = false;
   let anyKnownParamSeen = false;
@@ -67,7 +75,9 @@ export function normalizeXmlSmuggledArgs<T extends Record<string, unknown>>(
       anyKnownParamSeen = true;
       // Never clobber a value the caller did pass through.
       if (cleaned[name] !== undefined && cleaned[name] !== '') continue;
-      cleaned[name] = coerceParameterValue(rawValue);
+      cleaned[name] = stringSet.has(name)
+        ? rawValue
+        : coerceParameterValue(rawValue);
       recovered.add(name);
     }
   }
@@ -97,6 +107,11 @@ function parseParameterBlocks(tail: string): Array<[string, string]> {
   return out;
 }
 
+/**
+ * Coerce a recovered value for a non-string-typed parameter (array, number,
+ * boolean, …). String-typed parameters bypass this and use the raw verbatim,
+ * so a caption like `"[1,2]"` is never silently turned into an array.
+ */
 function coerceParameterValue(raw: string): unknown {
   const first = raw[0];
   if (
