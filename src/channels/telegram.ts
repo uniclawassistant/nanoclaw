@@ -37,7 +37,7 @@ const REACTION_CACHE_CAP = 5000;
  * Map a Claude model id to its context window size in thousands of tokens, for
  * /status display. Two cases return 1000:
  *   1. Explicit `[1m]` suffix in the model id.
- *   2. Bare Opus 4.7 / Sonnet 4.6 family ids — the agent-runner spawns these
+ *   2. Bare Fable 5 / Opus 4.7+ / Sonnet 4.6 ids — the agent-runner spawns these
  *      with `[1m]` by default (see container/agent-runner/src/index.ts), but
  *      Anthropic strips the suffix from response.model, so jsonl never carries
  *      it. Trusting the configured default keeps /status honest for the way
@@ -47,7 +47,8 @@ const REACTION_CACHE_CAP = 5000;
  */
 export function contextWindowK(model: string): number {
   if (model.includes('[1m]')) return 1000;
-  if (/^claude-(opus-4-7|opus-4-8|sonnet-4-6)$/.test(model)) return 1000;
+  if (/^claude-(fable-5|opus-4-7|opus-4-8|sonnet-4-6)$/.test(model))
+    return 1000;
   return 200;
 }
 
