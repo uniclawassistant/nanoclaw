@@ -518,7 +518,7 @@ async function runQuery(
   for await (const message of query({
     prompt: stream,
     options: {
-      model: 'claude-opus-4-8[1m]',
+      model: 'claude-fable-5[1m]',
       maxThinkingTokens: 16000,
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
