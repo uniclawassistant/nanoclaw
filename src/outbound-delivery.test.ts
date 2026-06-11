@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+import { ASSISTANT_NAME } from './config.js';
 import { _initTestDatabase, getMessageById, storeChatMetadata } from './db.js';
 import { sendText } from './index.js';
 import { logger } from './logger.js';
@@ -267,7 +268,8 @@ describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
   // `<internal>` block payload verbatim into the user-facing stub, which
   // leaked the agent's private reasoning into the chat. The hook now never
   // reads the content of `<internal>` blocks for delivery purposes.
-  const NEUTRAL_STUB = '[host] Юник завершил ход, не отправив сообщения в чат.';
+  // The name is env-aware (ASSISTANT_NAME): «Юник» on Unic, «Шеф» on Chef.
+  const NEUTRAL_STUB = `[host] ${ASSISTANT_NAME} завершил ход, не отправив сообщения в чат.`;
 
   it('ships the neutral FED-31 stub when Class B fires', async () => {
     vi.spyOn(logger, 'warn').mockImplementation(() => {});
@@ -385,9 +387,7 @@ describe('outbound-mismatch hook — Phase 2 ack-stub (FED-16)', () => {
 
     await checkClassB(turn, '', { hadError: false, sendAckStub });
 
-    expect(sendAckStub).toHaveBeenCalledWith(
-      '[host] Юник завершил ход, не отправив сообщения в чат.',
-    );
+    expect(sendAckStub).toHaveBeenCalledWith(NEUTRAL_STUB);
   });
 
   it('increments silentFinishCount and logs per-hour breakdown on each trigger', async () => {

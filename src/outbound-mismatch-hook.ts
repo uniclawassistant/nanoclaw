@@ -1,3 +1,4 @@
+import { ASSISTANT_NAME } from './config.js';
 import { logger } from './logger.js';
 
 // FED-9 — guard against the two mirror-image outbound mismatches:
@@ -46,7 +47,7 @@ const INTERNAL_OPEN_RX = /<internal>/g;
 // truly empty or contained only internal reasoning — the agent's private notes
 // are not leakable through this surface. Per-turn diagnostics (rawLen,
 // internalBlockCount) still go to logs at `warn` for post-hoc debug.
-const ACK_STUB = '[host] Юник завершил ход, не отправив сообщения в чат.';
+const ACK_STUB = `[host] ${ASSISTANT_NAME} завершил ход, не отправив сообщения в чат.`;
 const SILENT_FINISH_THRESHOLD_DEFAULT = 5;
 
 const activeTurns = new Map<string, TurnState>();
