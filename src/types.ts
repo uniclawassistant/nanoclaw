@@ -88,6 +88,8 @@ export interface TaskRunLog {
 
 // --- Channel abstraction ---
 
+export type MessageFormat = 'markdown' | 'rich';
+
 export interface Channel {
   name: string;
   connect(): Promise<void>;
@@ -98,6 +100,7 @@ export interface Channel {
     jid: string,
     text: string,
     threadId?: string,
+    format?: MessageFormat,
   ): Promise<string | undefined>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;

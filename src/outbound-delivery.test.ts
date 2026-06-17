@@ -42,6 +42,7 @@ describe('sendText', () => {
       'tg:123',
       'hello there',
       undefined,
+      undefined,
     );
     const stored = getMessageById('m-100', 'tg:123');
     expect(stored).not.toBeNull();
@@ -59,6 +60,20 @@ describe('sendText', () => {
       'tg:123',
       'in topic 42',
       '42',
+      undefined,
+    );
+  });
+
+  it('threads the optional message format through to the channel', async () => {
+    const channel = makeMockChannel();
+
+    await sendText(channel, 'tg:123', '| A | B |', undefined, 'rich');
+
+    expect(channel.sendMessage).toHaveBeenCalledWith(
+      'tg:123',
+      '| A | B |',
+      undefined,
+      'rich',
     );
   });
 
@@ -88,6 +103,7 @@ describe('sendText', () => {
     expect(channel.sendMessage).toHaveBeenCalledWith(
       'tg:123',
       '[[image: a cat]] hello',
+      undefined,
       undefined,
     );
   });

@@ -28,6 +28,7 @@ import {
   OnInboundMessage,
   RegisteredGroup,
   ScheduledTask,
+  type MessageFormat,
 } from '../types.js';
 
 const ALLOWED_REACTIONS: ReadonlySet<string> = new Set(allowedReactions);
@@ -184,12 +185,28 @@ const RESTART_NOTIFY_FILE = path.join(DATA_DIR, 'restart-notify.json');
  * Claude's output naturally matches Telegram's Markdown v1 format:
  *   *bold*, _italic_, `code`, ```code blocks```, [links](url)
  */
+function richMessagesEnabled(): boolean {
+  return /^(1|true|yes)$/i.test(process.env.TELEGRAM_RICH_MESSAGES ?? '');
+}
+
 async function sendTelegramMessage(
-  api: { sendMessage: Api['sendMessage'] },
+  api: Pick<Api, 'sendMessage' | 'sendRichMessage'>,
   chatId: string | number,
   text: string,
   options: { message_thread_id?: number } = {},
+  format: MessageFormat = 'markdown',
 ): Promise<{ message_id: number } | undefined> {
+  if (format === 'rich' && richMessagesEnabled()) {
+    try {
+      return await api.sendRichMessage(chatId, { markdown: text }, options);
+    } catch (err) {
+      logger.debug(
+        { err },
+        'RichMessage send failed, falling back to Markdown',
+      );
+    }
+  }
+
   try {
     return await api.sendMessage(chatId, text, {
       ...options,
@@ -799,6 +816,7 @@ export class TelegramChannel implements Channel {
     jid: string,
     text: string,
     threadId?: string,
+    format: MessageFormat = 'markdown',
   ): Promise<string | undefined> {
     if (!this.bot) {
       logger.warn('Telegram bot not initialized');
@@ -822,6 +840,7 @@ export class TelegramChannel implements Channel {
           numericId,
           text,
           options,
+          format,
         );
         firstMessageId = sent?.message_id?.toString();
       } else {
@@ -831,6 +850,7 @@ export class TelegramChannel implements Channel {
             numericId,
             text.slice(i, i + MAX_LENGTH),
             options,
+            format,
           );
           if (firstMessageId === undefined) {
             firstMessageId = sent?.message_id?.toString();

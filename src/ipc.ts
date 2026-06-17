@@ -17,10 +17,14 @@ import {
 import { resolveContainerPathToHost } from './document-paths.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import { type MessageFormat, RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (
+    jid: string,
+    text: string,
+    format?: MessageFormat,
+  ) => Promise<void>;
   setReaction?: (
     jid: string,
     messageId: string | null,
@@ -891,7 +895,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  const format: MessageFormat | undefined =
+                    data.format === 'rich' || data.format === 'markdown'
+                      ? data.format
+                      : undefined;
+                  await deps.sendMessage(data.chatJid, data.text, format);
                   logger.info(
                     {
                       chatJid: data.chatJid,

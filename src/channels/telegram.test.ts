@@ -61,6 +61,7 @@ vi.mock('grammy', () => ({
 
     api = {
       sendMessage: vi.fn().mockResolvedValue(undefined),
+      sendRichMessage: vi.fn().mockResolvedValue(undefined),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
       sendVoice: vi.fn().mockResolvedValue(undefined),
       sendPhoto: vi.fn().mockResolvedValue(undefined),
@@ -234,6 +235,7 @@ const flushPromises = async () => {
 describe('TelegramChannel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.TELEGRAM_RICH_MESSAGES;
 
     // Mock fs operations used by downloadFile
     vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined);
@@ -1227,6 +1229,66 @@ describe('TelegramChannel', () => {
       await channel.sendMessage('tg:100200300', exactText);
 
       expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps default messages on the Markdown path even when rich is enabled', async () => {
+      process.env.TELEGRAM_RICH_MESSAGES = '1';
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendMessage('tg:100200300', 'Normal message');
+
+      expect(currentBot().api.sendRichMessage).not.toHaveBeenCalled();
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        'Normal message',
+        { parse_mode: 'Markdown' },
+      );
+    });
+
+    it('sends rich messages when rich format is requested and enabled', async () => {
+      process.env.TELEGRAM_RICH_MESSAGES = '1';
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendMessage(
+        'tg:100200300',
+        '# Heading\n\n| A | B |',
+        undefined,
+        'rich',
+      );
+
+      expect(currentBot().api.sendRichMessage).toHaveBeenCalledWith(
+        '100200300',
+        { markdown: '# Heading\n\n| A | B |' },
+        {},
+      );
+      expect(currentBot().api.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('falls back to Markdown when rich message send fails', async () => {
+      process.env.TELEGRAM_RICH_MESSAGES = '1';
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      currentBot().api.sendRichMessage.mockRejectedValueOnce(
+        new Error('rich unsupported'),
+      );
+
+      await channel.sendMessage('tg:100200300', 'Fallback', undefined, 'rich');
+
+      expect(currentBot().api.sendRichMessage).toHaveBeenCalledWith(
+        '100200300',
+        { markdown: 'Fallback' },
+        {},
+      );
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        'Fallback',
+        { parse_mode: 'Markdown' },
+      );
     });
 
     it('handles send failure gracefully', async () => {

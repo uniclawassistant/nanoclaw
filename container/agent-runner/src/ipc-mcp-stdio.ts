@@ -172,9 +172,15 @@ function annotateNormalized(
 
 safeTool(
   'send_message',
-  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times.",
+  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times. By default, messages use the channel's normal Markdown path. Set format='rich' only when you intentionally need Telegram RichMessage features such as native tables, headings, or collapsible details.",
   {
     text: z.string().describe('The message text to send'),
+    format: z
+      .enum(['markdown', 'rich'])
+      .optional()
+      .describe(
+        'Optional output format. Omit or use "markdown" for normal messages. Use "rich" for Telegram RichMessage formatting (native tables, headings, details) when enabled by the host.',
+      ),
     sender: z
       .string()
       .optional()
@@ -187,6 +193,7 @@ safeTool(
       type: 'message',
       chatJid,
       text: args.text,
+      format: args.format,
       sender: args.sender || undefined,
       groupFolder,
       timestamp: new Date().toISOString(),

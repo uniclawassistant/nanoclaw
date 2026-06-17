@@ -44,7 +44,7 @@ Read the allowed tools from your SDK configuration. You always have access to:
 ### 3. MCP server tools
 
 The NanoClaw MCP server exposes these tools (via `mcp__nanoclaw__*` prefix):
-- `send_message` — send a text message to the user/group
+- `send_message` — send a text message to the user/group. Default is normal Markdown. For Telegram-only rich layouts (native tables, headings, collapsible details), pass `format: "rich"`; otherwise omit `format`.
 - `send_file` — send a local file as a channel-native document (no compression, original bytes)
 - `send_image` — send a local image as a compressed photo with native preview
 - `generate_image` — generate a new image (GPT Image) and ship it as a photo, returns `message_id`

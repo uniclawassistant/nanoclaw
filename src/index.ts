@@ -95,7 +95,12 @@ import {
 } from './sender-allowlist.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import {
+  Channel,
+  type MessageFormat,
+  NewMessage,
+  RegisteredGroup,
+} from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -154,8 +159,9 @@ export async function sendText(
   jid: string,
   text: string,
   threadId?: string,
+  format?: MessageFormat,
 ): Promise<void> {
-  const msgId = await channel.sendMessage(jid, text, threadId);
+  const msgId = await channel.sendMessage(jid, text, threadId, format);
   recordOutgoing(jid, msgId, { content: text, messageType: 'text' });
 }
 
@@ -1165,11 +1171,11 @@ async function main(): Promise<void> {
     },
   });
   startIpcWatcher({
-    sendMessage: async (jid, text) => {
+    sendMessage: async (jid, text, format) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       const threadId = getLastIncomingThreadId(jid);
-      await sendText(channel, jid, text, threadId);
+      await sendText(channel, jid, text, threadId, format);
       // FED-9: record outbound for the active turn so Class A leak detection
       // and Class B silent-finish detection see this delivery.
       recordOutbound(jid);
