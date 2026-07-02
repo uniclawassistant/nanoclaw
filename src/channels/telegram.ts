@@ -20,6 +20,7 @@ import {
   taskStatusEmoji,
 } from '../tasks-filter.js';
 import { registerChannel, ChannelOpts } from './registry.js';
+import largeContextModels from '../large-context-models.json' with { type: 'json' };
 import allowedReactions from './telegram-allowed-reactions.json' with { type: 'json' };
 import {
   Channel,
@@ -34,23 +35,28 @@ import {
 const ALLOWED_REACTIONS: ReadonlySet<string> = new Set(allowedReactions);
 const REACTION_CACHE_CAP = 5000;
 
+const LARGE_CONTEXT_MODELS: ReadonlySet<string> = new Set(largeContextModels);
+
+/**
+ * True when the model id refers to a 1M-context Claude tier — either an
+ * explicit `[1m]` suffix or a bare id that ships with 1M by default (Fable 5,
+ * or Opus 4.7+/Sonnet 4.6 spawned with `[1m]` — Anthropic strips the suffix
+ * from response.model, so jsonl and SDK modelUsage only carry the bare id).
+ * Kept in sync with `container/agent-runner/src/large-context-models.json`
+ * via `large-context-models.test.ts`.
+ */
+export function isLargeContextModel(model: string): boolean {
+  if (model.includes('[1m]')) return true;
+  return LARGE_CONTEXT_MODELS.has(model);
+}
+
 /**
  * Map a Claude model id to its context window size in thousands of tokens, for
- * /status display. Two cases return 1000:
- *   1. Explicit `[1m]` suffix in the model id.
- *   2. Bare Fable 5 / Opus 4.7+ / Sonnet 4.6 ids — the agent-runner spawns these
- *      with `[1m]` by default (see container/agent-runner/src/index.ts), but
- *      Anthropic strips the suffix from response.model, so jsonl never carries
- *      it. Trusting the configured default keeps /status honest for the way
- *      we actually run.
- * Everything else (older variants, Haiku, unknown / missing model field)
- * falls back to 200K so percentages stay conservative.
+ * /status display. 1000 for 1M-tier models, otherwise 200K so percentages stay
+ * conservative for older / unknown ids.
  */
 export function contextWindowK(model: string): number {
-  if (model.includes('[1m]')) return 1000;
-  if (/^claude-(fable-5|opus-4-7|opus-4-8|sonnet-4-6)$/.test(model))
-    return 1000;
-  return 200;
+  return isLargeContextModel(model) ? 1000 : 200;
 }
 
 function pad2(n: number): string {
