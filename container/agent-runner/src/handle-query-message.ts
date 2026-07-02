@@ -3,6 +3,15 @@ import largeContextModels from './large-context-models.json' with { type: 'json'
 const LARGE_CONTEXT_MODELS: ReadonlySet<string> = new Set(largeContextModels);
 const LARGE_CONTEXT_WINDOW = 1_000_000;
 
+/**
+ * True when the model id refers to a 1M-context Claude tier. Used to floor
+ * SDK-reported `modelUsage[model].contextWindow` to 1M: the Agent SDK's
+ * model→contextWindow table lags Anthropic releases (e.g. reports 200k for
+ * claude-fable-5 whose default is 1M), and Anthropic strips `[1m]` from
+ * response.model, so trusting the SDK value verbatim underreports the window
+ * and fires early `/compact` warnings. List lives in
+ * `large-context-models.json`, mirrored on the host side.
+ */
 function isLargeContextModel(model: string): boolean {
   if (model.includes('[1m]')) return true;
   return LARGE_CONTEXT_MODELS.has(model);
@@ -194,10 +203,6 @@ function extractUsageFromResult(
   let contextWindow: number | null = null;
   if (modelUsage) {
     for (const [model, entry] of Object.entries(modelUsage)) {
-      // FED-33: SDK's model→contextWindow table lags Anthropic releases (e.g.
-      // reports 200k for claude-fable-5 even though its default is 1M). Floor
-      // the value to 1M for models we know ship with a 1M window so the
-      // agent's [host-status] line and /compact thresholds don't fire early.
       const effective =
         entry?.contextWindow && isLargeContextModel(model)
           ? Math.max(entry.contextWindow, LARGE_CONTEXT_WINDOW)
