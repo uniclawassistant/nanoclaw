@@ -518,8 +518,9 @@ async function runQuery(
   for await (const message of query({
     prompt: stream,
     options: {
-      model: 'claude-opus-4-8[1m]',
-      maxThinkingTokens: 16000,
+      // Fable 5: 1M context is the default (no [1m] suffix needed) and thinking
+      // is always-on adaptive — an explicit budget (maxThinkingTokens) is a 400.
+      model: 'claude-fable-5',
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
