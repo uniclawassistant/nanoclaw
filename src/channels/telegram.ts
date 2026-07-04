@@ -42,8 +42,8 @@ const LARGE_CONTEXT_MODELS: ReadonlySet<string> = new Set(largeContextModels);
  * explicit `[1m]` suffix or a bare id that ships with 1M by default (Fable 5,
  * or Opus 4.7+/Sonnet 4.6 spawned with `[1m]` — Anthropic strips the suffix
  * from response.model, so jsonl and SDK modelUsage only carry the bare id).
- * Kept in sync with `container/agent-runner/src/large-context-models.json`
- * via `large-context-models.test.ts`.
+ * Display heuristic for /status only — the container-side mirror was removed
+ * in FED-35 (agent-runner reports the SDK's contextWindow verbatim).
  */
 export function isLargeContextModel(model: string): boolean {
   if (model.includes('[1m]')) return true;
