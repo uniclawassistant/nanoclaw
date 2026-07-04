@@ -1,22 +1,3 @@
-import largeContextModels from './large-context-models.json' with { type: 'json' };
-
-const LARGE_CONTEXT_MODELS: ReadonlySet<string> = new Set(largeContextModels);
-const LARGE_CONTEXT_WINDOW = 1_000_000;
-
-/**
- * True when the model id refers to a 1M-context Claude tier. Used to floor
- * SDK-reported `modelUsage[model].contextWindow` to 1M: the Agent SDK's
- * model→contextWindow table lags Anthropic releases (e.g. reports 200k for
- * claude-fable-5 whose default is 1M), and Anthropic strips `[1m]` from
- * response.model, so trusting the SDK value verbatim underreports the window
- * and fires early `/compact` warnings. List lives in
- * `large-context-models.json`, mirrored on the host side.
- */
-function isLargeContextModel(model: string): boolean {
-  if (model.includes('[1m]')) return true;
-  return LARGE_CONTEXT_MODELS.has(model);
-}
-
 export interface UsageReport {
   inputTokens: number;
   outputTokens: number;
@@ -85,9 +66,8 @@ export function handleQueryMessage(
     if (inner?.usage) {
       state.lastAssistantUsage = inner.usage;
     }
-    const parentToolUseId = (
-      message as { parent_tool_use_id?: string | null }
-    ).parent_tool_use_id;
+    const parentToolUseId = (message as { parent_tool_use_id?: string | null })
+      .parent_tool_use_id;
     if (parentToolUseId == null && Array.isArray(inner?.content)) {
       for (const block of inner.content) {
         if (block?.type !== 'text') continue;
@@ -200,15 +180,15 @@ function extractUsageFromResult(
   const modelUsage = (
     message as { modelUsage?: Record<string, SdkModelUsageEntry> }
   ).modelUsage;
+  // Report the SDK's contextWindow verbatim — it is what autocompact is
+  // computed from, so massaging it (the FED-33 floor) only hides a
+  // misconfigured model. The window is fixed at the source instead: the
+  // [1m] model suffix (FED-34).
   let contextWindow: number | null = null;
   if (modelUsage) {
-    for (const [model, entry] of Object.entries(modelUsage)) {
-      const effective =
-        entry?.contextWindow && isLargeContextModel(model)
-          ? Math.max(entry.contextWindow, LARGE_CONTEXT_WINDOW)
-          : entry?.contextWindow;
-      if (effective && effective > (contextWindow ?? 0)) {
-        contextWindow = effective;
+    for (const entry of Object.values(modelUsage)) {
+      if (entry?.contextWindow && entry.contextWindow > (contextWindow ?? 0)) {
+        contextWindow = entry.contextWindow;
       }
     }
   }
