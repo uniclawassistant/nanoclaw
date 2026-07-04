@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -310,6 +310,35 @@ function buildContainerArgs(
   const pcpSecrets = readEnvFile(['PCP_KEY']);
   if (pcpSecrets.PCP_KEY) {
     args.push('-e', `PCP_KEY=${pcpSecrets.PCP_KEY}`);
+  }
+
+  // Pass App Store Connect API credentials if configured (for TestFlight automation).
+  // The .p8 key is never stored in .env: it is read from the login Keychain at
+  // container spawn and passed ephemerally as base64 env.
+  const ascConfig = readEnvFile(['ASC_KEY_ID', 'ASC_ISSUER_ID']);
+  if (ascConfig.ASC_KEY_ID && ascConfig.ASC_ISSUER_ID) {
+    try {
+      const ascKeyB64 = execFileSync(
+        '/usr/bin/security',
+        [
+          'find-generic-password',
+          '-s',
+          `AppStoreConnect API Key ${ascConfig.ASC_KEY_ID}`,
+          '-w',
+        ],
+        { encoding: 'utf8' },
+      ).trim();
+      if (ascKeyB64) {
+        args.push('-e', `ASC_KEY_ID=${ascConfig.ASC_KEY_ID}`);
+        args.push('-e', `ASC_ISSUER_ID=${ascConfig.ASC_ISSUER_ID}`);
+        args.push('-e', `ASC_KEY_P8_B64=${ascKeyB64}`);
+      }
+    } catch (err) {
+      logger.warn(
+        { err },
+        'ASC key configured but Keychain read failed; skipping ASC env',
+      );
+    }
   }
 
   // Runtime-specific args for host gateway resolution
