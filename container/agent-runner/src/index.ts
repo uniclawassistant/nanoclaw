@@ -518,11 +518,11 @@ async function runQuery(
   for await (const message of query({
     prompt: stream,
     options: {
-      // Fable 5: [1m] is redundant API-side (1M is the default) but required for
-      // the Agent SDK — without it the SDK's internal model table assumes a 200k
-      // window and auto-compacts at ~167k (FED-34). Thinking is always-on
-      // adaptive — an explicit budget (maxThinkingTokens) is a 400.
-      model: 'claude-fable-5[1m]',
+      // Keep the [1m] suffix on whatever model runs here: it is how the Agent
+      // SDK learns the 1M window — a bare id falls back to the SDK's internal
+      // table (200k for new models) and auto-compacts at ~167k (FED-34).
+      // No maxThinkingTokens: the SDK enables adaptive thinking by default.
+      model: 'claude-opus-4-8[1m]',
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
