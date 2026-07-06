@@ -294,7 +294,7 @@ describe('checkThreshold — 70/85/95% bands and anti-spam', () => {
 
 describe('formatUsageLine', () => {
   it('returns null until the first turn is recorded', () => {
-    expect(formatUsageLine('g1')).toBeNull();
+    expect(formatUsageLine('g1', null)).toBeNull();
   });
 
   it('produces a one-liner with ctx / session / today after a turn', () => {
@@ -311,10 +311,70 @@ describe('formatUsageLine', () => {
         contextWindow: 1_000_000,
       }),
     });
-    const line = formatUsageLine('g1');
+    const line = formatUsageLine('g1', 'sess-A');
     expect(line).toMatch(/^\[host-status\] ctx: 250k\/1000k \(25%\)/);
     expect(line).toMatch(/session: \$0\.42 \(1 turns\)/);
     expect(line).toMatch(/today: \$0\.42$/);
+  });
+
+  // FED-34: the first turn of a fresh session must not inherit the prior
+  // session's cached ctx (an inflated counter that would trip the agent's
+  // proactive-reset threshold and drop the tail).
+  it('reports ctx: unknown on the first turn of a new session (reset)', () => {
+    recordUsage({
+      jid: 'g1',
+      sessionId: 'sess-A',
+      origin: 'interactive',
+      usage: makeUsage({
+        contextUsedTokens: 385_000,
+        totalCostUsd: 0.42,
+        contextWindow: 1_000_000,
+      }),
+    });
+    // mode='new' cleared the cached sessionId; the next turn resumes nothing.
+    const line = formatUsageLine('g1', null);
+    expect(line).toBe(
+      '[host-status] ctx: unknown · session: $0.00 (0 turns) · today: $0.42',
+    );
+  });
+
+  it('reports ctx: unknown when a different session is about to run', () => {
+    recordUsage({
+      jid: 'g1',
+      sessionId: 'sess-A',
+      origin: 'interactive',
+      usage: makeUsage({
+        contextUsedTokens: 385_000,
+        totalCostUsd: 0.42,
+        contextWindow: 1_000_000,
+      }),
+    });
+    const line = formatUsageLine('g1', 'sess-B');
+    expect(line).toMatch(/^\[host-status\] ctx: unknown/);
+    expect(line).toMatch(/session: \$0\.00 \(0 turns\)/);
+  });
+
+  it('reports the real ctx once the new session has recorded its own turn', () => {
+    recordUsage({
+      jid: 'g1',
+      sessionId: 'sess-A',
+      origin: 'interactive',
+      usage: makeUsage({ contextUsedTokens: 385_000, totalCostUsd: 0.42 }),
+    });
+    // Second turn belongs to sess-B; recordUsage rolls the session forward.
+    recordUsage({
+      jid: 'g1',
+      sessionId: 'sess-B',
+      origin: 'interactive',
+      usage: makeUsage({
+        contextUsedTokens: 64_000,
+        totalCostUsd: 0.05,
+        contextWindow: 1_000_000,
+      }),
+    });
+    const line = formatUsageLine('g1', 'sess-B');
+    expect(line).toMatch(/^\[host-status\] ctx: 64k\/1000k \(6%\)/);
+    expect(line).toMatch(/session: \$0\.05 \(1 turns\)/);
   });
 });
 

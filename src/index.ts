@@ -584,7 +584,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const usageLine = formatUsageLine(chatJid);
+  const usageLine = formatUsageLine(chatJid, sessions[group.folder] ?? null);
   const prompt = usageLine
     ? `${usageLine}\n${formatMessages(missedMessages, TIMEZONE)}`
     : formatMessages(missedMessages, TIMEZONE);
@@ -958,7 +958,10 @@ async function startMessageLoop(): Promise<void> {
           // FED-21 Bug 2: prepend [host-status] line on the IPC-pipe path so
           // follow-up turns into a live container also see context/cost,
           // matching processGroupMessages behavior on the cold-spawn path.
-          const usageLine = formatUsageLine(chatJid);
+          const usageLine = formatUsageLine(
+            chatJid,
+            sessions[group.folder] ?? null,
+          );
           const piped = usageLine ? `${usageLine}\n${formatted}` : formatted;
 
           if (queue.sendMessage(chatJid, piped)) {

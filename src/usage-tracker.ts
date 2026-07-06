@@ -250,9 +250,36 @@ function formatThresholdMessage(
   return `[host] Context approaching limit (${pct}%) — run /compact or /new now.`;
 }
 
-export function formatUsageLine(jid: string): string | null {
+/**
+ * Build the `[host-status]` prompt prefix for `jid`.
+ *
+ * FED-34: the caller must pass the sessionId that the *upcoming* turn will run
+ * against (`sessions[folder]` on the host — `null`/`undefined` right after a
+ * cold-spawn or a `mode='new'` reset). The cached `lastTurn`/`session` totals
+ * belong to whatever session last recorded a turn; on the first turn of a fresh
+ * session they are stale. Reporting that stale `ctx` made the agent see an
+ * inflated counter (e.g. 385k when the fresh session was really ~64k), trip its
+ * proactive-reset threshold, and drop the tail. So when `currentSessionId` does
+ * not match the recorded session we report `ctx: unknown` and zeroed session
+ * totals — there is genuinely no data for this session yet. `today` (a
+ * calendar-day accumulator, not per-session) stays valid. From the second turn
+ * on, `recordUsage` has rolled the session forward and the real numbers appear.
+ */
+export function formatUsageLine(
+  jid: string,
+  currentSessionId: string | null | undefined,
+): string | null {
   const state = states.get(jid);
   if (!state || !state.lastTurn) return null;
+
+  const dayUsd = state.day.costUsd;
+
+  // First turn of a new/unknown session: don't inherit the prior session's ctx.
+  const isFreshSession =
+    state.sessionId === null || state.sessionId !== (currentSessionId ?? null);
+  if (isFreshSession) {
+    return `[host-status] ctx: unknown · session: $0.00 (0 turns) · today: $${dayUsd.toFixed(2)}`;
+  }
 
   const max = state.lastTurn.contextWindow ?? getContextMaxDefault();
   const used = state.lastTurn.contextUsedTokens;
@@ -260,7 +287,6 @@ export function formatUsageLine(jid: string): string | null {
   const ctxK = Math.round(used / 1000);
   const maxK = Math.round(max / 1000);
   const sessionUsd = state.session.costUsd;
-  const dayUsd = state.day.costUsd;
 
   return `[host-status] ctx: ${ctxK}k/${maxK}k (${pct}%) · session: $${sessionUsd.toFixed(2)} (${state.session.turns} turns) · today: $${dayUsd.toFixed(2)}`;
 }
