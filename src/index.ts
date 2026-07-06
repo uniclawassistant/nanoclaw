@@ -584,7 +584,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const usageLine = formatUsageLine(chatJid);
+  // FED-34: pass the session the upcoming turn will resume (undefined right
+  // after a cold-spawn / mode='new' reset) so a stale prior-session ctx is
+  // reported as `unknown` instead of triggering a false reset.
+  const usageLine = formatUsageLine(chatJid, sessions[group.folder] ?? null);
   const prompt = usageLine
     ? `${usageLine}\n${formatMessages(missedMessages, TIMEZONE)}`
     : formatMessages(missedMessages, TIMEZONE);
@@ -958,7 +961,13 @@ async function startMessageLoop(): Promise<void> {
           // FED-21 Bug 2: prepend [host-status] line on the IPC-pipe path so
           // follow-up turns into a live container also see context/cost,
           // matching processGroupMessages behavior on the cold-spawn path.
-          const usageLine = formatUsageLine(chatJid);
+          // FED-34: this path only fires into a live container, so the session
+          // always matches — pass it through so formatUsageLine's freshness
+          // guard stays consistent with the cold-spawn path.
+          const usageLine = formatUsageLine(
+            chatJid,
+            sessions[group.folder] ?? null,
+          );
           const piped = usageLine ? `${usageLine}\n${formatted}` : formatted;
 
           if (queue.sendMessage(chatJid, piped)) {
