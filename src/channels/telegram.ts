@@ -195,14 +195,22 @@ function richMessagesEnabled(): boolean {
   return /^(1|true|yes)$/i.test(process.env.TELEGRAM_RICH_MESSAGES ?? '');
 }
 
+type RichMessageApi = Pick<Api, 'sendMessage'> & {
+  sendRichMessage?: (
+    chatId: string | number,
+    payload: { markdown: string },
+    options?: { message_thread_id?: number },
+  ) => Promise<{ message_id: number }>;
+};
+
 async function sendTelegramMessage(
-  api: Pick<Api, 'sendMessage' | 'sendRichMessage'>,
+  api: RichMessageApi,
   chatId: string | number,
   text: string,
   options: { message_thread_id?: number } = {},
   format: MessageFormat = 'markdown',
 ): Promise<{ message_id: number } | undefined> {
-  if (format === 'rich' && richMessagesEnabled()) {
+  if (format === 'rich' && richMessagesEnabled() && api.sendRichMessage) {
     try {
       return await api.sendRichMessage(chatId, { markdown: text }, options);
     } catch (err) {
@@ -660,7 +668,7 @@ export class TelegramChannel implements Channel {
         const msgId = ctx.message.message_id.toString();
         const filename =
           opts.filename ||
-          `${placeholder.replace(/[\[\] ]/g, '').toLowerCase()}_${msgId}`;
+          `${placeholder.replace(/[[\] ]/g, '').toLowerCase()}_${msgId}`;
         this.downloadFile(opts.fileId, group.folder, filename).then(
           async (downloaded) => {
             if (!downloaded) {
