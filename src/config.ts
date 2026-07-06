@@ -80,7 +80,13 @@ function escapeRegex(str: string): string {
 }
 
 export function buildTriggerPattern(trigger: string): RegExp {
-  return new RegExp(`^${escapeRegex(trigger.trim())}(?=[\\s]|$)`, 'i');
+  // Match the trigger at the start, but only when it isn't run into another
+  // name character. A negative lookahead (rather than `\b`) is required because
+  // JS `\b` is ASCII-only — Cyrillic names like `@Аня` would never fire. The
+  // `u` flag makes `\p{L}`/`\p{N}` cover non-Latin letters too. This still lets
+  // punctuation follow the trigger (`@Andy's thing`, `@Andy, hi`) while
+  // rejecting partial names (`@Andyextra`).
+  return new RegExp(`^${escapeRegex(trigger.trim())}(?![\\p{L}\\p{N}_])`, 'iu');
 }
 
 export const DEFAULT_TRIGGER = `@${ASSISTANT_NAME}`;
