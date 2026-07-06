@@ -3,7 +3,6 @@
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
 import { execSync } from 'child_process';
-import fs from 'fs';
 import os from 'os';
 
 import { readEnvFile } from './env.js';
@@ -126,7 +125,9 @@ export function ensureContainerRuntimeRunning(): void {
       console.error(
         '╚════════════════════════════════════════════════════════════════╝\n',
       );
-      throw new Error('Container runtime is required but failed to start');
+      throw new Error('Container runtime is required but failed to start', {
+        cause: err,
+      });
     }
   }
 }
@@ -207,6 +208,7 @@ export function ensureNetworkKeepalive(): void {
     logger.error({ err }, 'Failed to ensure network keepalive container');
     throw new Error(
       'Network keepalive container is required to keep the host bridge interface up',
+      { cause: err },
     );
   }
 }
