@@ -566,10 +566,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // queued a reset that didn't run before turnEnd was processed. Apply it now,
   // before runAgent reads sessions[folder] for the upcoming spawn — that way
   // mode='new' resets the SDK conversation cleanly even on the boundary case.
-  const pendingPre = consumePendingReset(group.folder);
-  if (pendingPre) {
-    resetGroupSession(group.folder, pendingPre);
-  }
+  applyPendingResetPreTurn(group.folder);
 
   const isMainGroup = group.isMain === true;
 
@@ -700,23 +697,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         turnEndProcessed = true;
 
         // FED-21 / PR #61: agent may have called mcp__nanoclaw__reset_session
-        // during this turn. Apply post-turnEnd so the tool ack already
-        // reached the agent and the streaming output drained cleanly.
-        // Post-turnEnd resets are always agent-initiated (Telegram /new goes
-        // straight to resetGroupSession, never through pendingResets).
-        const pendingPost = consumePendingReset(group.folder);
-        if (pendingPost) {
-          resetGroupSession(group.folder, pendingPost);
-          // FED-37: a self mode=new reset with no inbound message pending would
-          // otherwise leave the poller silent — respawn with a bootstrap prompt
-          // so autonomous work continues. Applied here at the turnEnd streaming
-          // event (container is still alive). Deferring past it — e.g. to after
-          // runAgent returns — hangs the reset until the 30-min idle close,
-          // because in streaming mode runAgent only returns on container exit.
-          if (pendingPost === 'new') {
-            await maybeRespawnAfterReset(group, chatJid);
-          }
-        }
+        // during this turn. Apply at this turnEnd streaming event (container
+        // still alive → prompt kill; deferring past it hangs the reset until the
+        // 30-min idle close, since runAgent only returns on container exit).
+        // FED-37: mode=new also respawns so a self-reset with no inbound message
+        // pending doesn't leave the poller silent.
+        await applyPendingResetAtTurnEnd(group.folder);
       }
     });
 
@@ -785,6 +771,59 @@ function consumePendingReset(folder: string): ResetMode | undefined {
   const mode = pendingResets[folder];
   if (mode) delete pendingResets[folder];
   return mode;
+}
+
+/**
+ * Resolve the chat JID a group folder belongs to. The registered-groups map is
+ * keyed by JID, and folder↔JID is 1:1, so this is an exact reverse lookup.
+ */
+function findGroupByFolder(
+  folder: string,
+): { chatJid: string; group: RegisteredGroup } | undefined {
+  const entry = Object.entries(registeredGroups).find(
+    ([, g]) => g.folder === folder,
+  );
+  return entry ? { chatJid: entry[0], group: entry[1] } : undefined;
+}
+
+/**
+ * Apply a reset and, for `mode='new'`, respawn the group with a bootstrap
+ * prompt. Single entry point for every place a `mode='new'` takes effect —
+ * agent self-reset (interactive turnEnd or scheduled-task turnEnd) and the
+ * user's Telegram `/new`. Respawn is what keeps autonomous night work alive
+ * (the poller only wakes on inbound) and lets `/new` return a fresh live
+ * session without the user sending a follow-up. Group resolution failing (rare
+ * unregistered folder) still applies the reset — only respawn is skipped.
+ */
+async function resetGroupSessionWithRespawn(
+  folder: string,
+  mode: ResetMode,
+): Promise<void> {
+  resetGroupSession(folder, mode);
+  if (mode !== 'new') return;
+  const found = findGroupByFolder(folder);
+  if (found) await maybeRespawnAfterReset(found.group, found.chatJid);
+}
+
+/**
+ * Consume a queued reset before a fresh turn spawns (interactive pre-spawn /
+ * scheduled-task pre-run). No respawn: the incoming turn itself provides the
+ * fresh session, so respawning would double-spawn.
+ */
+function applyPendingResetPreTurn(folder: string): void {
+  const mode = consumePendingReset(folder);
+  if (mode) resetGroupSession(folder, mode);
+}
+
+/**
+ * Consume a queued reset at turnEnd (interactive or scheduled) and apply it
+ * with respawn. This is the path that makes an autonomous self-reset survive:
+ * the requesting turn ends, the container dies, and the respawn brings the
+ * group back to continue — no inbound message required.
+ */
+async function applyPendingResetAtTurnEnd(folder: string): Promise<void> {
+  const mode = consumePendingReset(folder);
+  if (mode) await resetGroupSessionWithRespawn(folder, mode);
 }
 
 /**
@@ -1204,8 +1243,12 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    // FED-37: Telegram /new applies immediately and respawns, so a fresh live
+    // session comes back on its own — the user need not send a follow-up to
+    // wake the agent. Bypasses the age gate (user reset is explicit). Fire and
+    // forget: the handler doesn't await respawn scheduling.
     resetGroupSession: (folder: string, mode: ResetMode) =>
-      resetGroupSession(folder, mode),
+      void resetGroupSessionWithRespawn(folder, mode),
   };
 
   // Create and connect all registered channels.
@@ -1235,6 +1278,8 @@ async function main(): Promise<void> {
     getSessions: () => sessions,
     persistGroupSession: (folder, sessionId) =>
       rememberSession(folder, sessionId),
+    applyPendingResetPreTurn: (folder) => applyPendingResetPreTurn(folder),
+    applyPendingResetAtTurnEnd: (folder) => applyPendingResetAtTurnEnd(folder),
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
