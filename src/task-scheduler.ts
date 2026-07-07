@@ -19,6 +19,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { isRespawnTask } from './reset-lifecycle.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 import { checkThreshold, getState, recordUsage } from './usage-tracker.js';
 
@@ -66,6 +67,12 @@ export function computeNextRun(task: ScheduledTask): string | null {
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
+  /**
+   * Persist a respawn task's cold-spawned session back to the group so the
+   * bootstrapped session becomes the ongoing one (FED-37). Normal scheduled
+   * tasks keep their session ephemeral; only `respawn:` tasks call this.
+   */
+  persistGroupSession?: (folder: string, sessionId: string) => void;
   queue: GroupQueue;
   onProcess: (
     groupJid: string,
@@ -187,6 +194,15 @@ async function runTask(
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
+        // FED-37: a respawn task cold-spawns a fresh session; persist it back to
+        // the group so the bootstrapped session becomes the ongoing one instead
+        // of being thrown away when the task completes.
+        if (isRespawnTask(task.id) && streamedOutput.newSessionId) {
+          deps.persistGroupSession?.(
+            task.group_folder,
+            streamedOutput.newSessionId,
+          );
+        }
         if (streamedOutput.result) {
           result = streamedOutput.result;
           // Forward result to user (sendMessage handles formatting)
@@ -219,6 +235,10 @@ async function runTask(
     );
 
     if (closeTimer) clearTimeout(closeTimer);
+
+    if (isRespawnTask(task.id) && output.newSessionId) {
+      deps.persistGroupSession?.(task.group_folder, output.newSessionId);
+    }
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';

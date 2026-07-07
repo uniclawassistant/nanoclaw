@@ -75,6 +75,27 @@ export const MAX_CONCURRENT_CONTAINERS = Math.max(
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
 );
 
+// Reset lifecycle guards (FED-37). An agent-initiated `reset_session mode:new`
+// on a session younger than this is refused — a fresh session that tries to
+// reset itself is almost always acting on a stale/unknown host-status ctx
+// reading, and honoring it would spin a refresh loop. Legit self-resets only
+// happen once real work has pushed ctx to threshold, which is far longer than
+// this floor.
+export const MIN_RESET_AGE_MS = parseInt(
+  process.env.MIN_RESET_AGE_MS || '600000',
+  10,
+); // 10 min
+// Circuit breaker: if more than MAX respawns fire within WINDOW for one group,
+// stop respawning and alert the user instead of burning credits in a loop.
+export const RESPAWN_CIRCUIT_WINDOW_MS = parseInt(
+  process.env.RESPAWN_CIRCUIT_WINDOW_MS || '1800000',
+  10,
+); // 30 min
+export const RESPAWN_CIRCUIT_MAX = Math.max(
+  1,
+  parseInt(process.env.RESPAWN_CIRCUIT_MAX || '3', 10) || 3,
+);
+
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
