@@ -100,7 +100,7 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSessionCleanup } from './session-cleanup.js';
-import { startSchedulerLoop } from './task-scheduler.js';
+import { pokeScheduler, startSchedulerLoop } from './task-scheduler.js';
 import {
   Channel,
   type MessageFormat,
@@ -861,6 +861,10 @@ async function maybeRespawnAfterReset(
   }
 
   createTask(buildRespawnTask(group.folder, chatJid, new Date().toISOString()));
+  // Fire the respawn now instead of waiting up to a full scheduler poll — the
+  // agent comes back in seconds, and the shorter window all but removes the
+  // race where a real message wakes the group before the respawn lands.
+  pokeScheduler();
   logger.info(
     { folder: group.folder, count: circuit.count },
     'Scheduled bootstrap respawn after self-reset (mode=new)',
