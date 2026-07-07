@@ -304,6 +304,31 @@ async function runTask(
 }
 
 let schedulerRunning = false;
+let schedulerDeps: SchedulerDependencies | null = null;
+
+/**
+ * Enqueue every task whose `next_run` is due. Shared by the periodic loop and
+ * the on-demand poke. `enqueueTask` dedupes by task id, so an overlapping poke
+ * and loop tick can never double-run the same task.
+ */
+function enqueueDueTasks(deps: SchedulerDependencies): void {
+  const dueTasks = getDueTasks();
+  if (dueTasks.length > 0) {
+    logger.info({ count: dueTasks.length }, 'Found due tasks');
+  }
+
+  for (const task of dueTasks) {
+    // Re-check task status in case it was paused/cancelled
+    const currentTask = getTaskById(task.id);
+    if (!currentTask || currentTask.status !== 'active') {
+      continue;
+    }
+
+    deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
+      runTask(currentTask, deps),
+    );
+  }
+}
 
 export function startSchedulerLoop(deps: SchedulerDependencies): void {
   if (schedulerRunning) {
@@ -311,26 +336,12 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
     return;
   }
   schedulerRunning = true;
+  schedulerDeps = deps;
   logger.info('Scheduler loop started');
 
   const loop = async () => {
     try {
-      const dueTasks = getDueTasks();
-      if (dueTasks.length > 0) {
-        logger.info({ count: dueTasks.length }, 'Found due tasks');
-      }
-
-      for (const task of dueTasks) {
-        // Re-check task status in case it was paused/cancelled
-        const currentTask = getTaskById(task.id);
-        if (!currentTask || currentTask.status !== 'active') {
-          continue;
-        }
-
-        deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
-          runTask(currentTask, deps),
-        );
-      }
+      enqueueDueTasks(deps);
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');
     }
@@ -341,7 +352,24 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   loop();
 }
 
+/**
+ * Run a due-task check immediately instead of waiting for the next poll tick.
+ * Used right after a respawn task is created so a self-reset / `/new` brings the
+ * agent back in seconds rather than up to a full poll interval later. Safe to
+ * call any time: no-op before the loop starts, and enqueue dedupe prevents any
+ * overlap with the periodic tick.
+ */
+export function pokeScheduler(): void {
+  if (!schedulerDeps) return;
+  try {
+    enqueueDueTasks(schedulerDeps);
+  } catch (err) {
+    logger.error({ err }, 'pokeScheduler failed');
+  }
+}
+
 /** @internal - for tests only. */
 export function _resetSchedulerLoopForTests(): void {
   schedulerRunning = false;
+  schedulerDeps = null;
 }
