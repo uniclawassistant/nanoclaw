@@ -168,7 +168,13 @@ export interface IpcDeps {
   // for the tool ack to reach the agent; the actual kill happens once the
   // turnEnd boundary is crossed (or before the next runAgent invocation,
   // whichever comes first). See FED-21 / PR #61.
-  scheduleSessionReset?: (folder: string, mode: 'new' | 'restart') => void;
+  // Returns whether the reset was accepted. A mode='new' reset from a
+  // just-woken session is refused by the host's min-session-age gate (FED-37);
+  // `reason` is relayed to the agent as the reset_session tool error.
+  scheduleSessionReset?: (
+    folder: string,
+    mode: 'new' | 'restart',
+  ) => { accepted: boolean; reason?: string };
 }
 
 const RESPONSE_TTL_MS = 60_000;
@@ -1219,17 +1225,28 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 // can ever target. Cross-folder reset is structurally
                 // impossible from here.
                 if (deps.scheduleSessionReset) {
-                  deps.scheduleSessionReset(
+                  const result = deps.scheduleSessionReset(
                     sourceGroup,
                     data.mode as 'new' | 'restart',
                   );
-                  writeIpcResponse(responsesDir, data.requestId, {
-                    success: true,
-                  });
-                  logger.info(
-                    { sourceGroup, mode: data.mode },
-                    'IPC reset_session queued',
-                  );
+                  if (result.accepted) {
+                    writeIpcResponse(responsesDir, data.requestId, {
+                      success: true,
+                    });
+                    logger.info(
+                      { sourceGroup, mode: data.mode },
+                      'IPC reset_session queued',
+                    );
+                  } else {
+                    writeIpcResponse(responsesDir, data.requestId, {
+                      success: false,
+                      error: result.reason ?? 'reset suppressed',
+                    });
+                    logger.info(
+                      { sourceGroup, mode: data.mode, reason: result.reason },
+                      'IPC reset_session suppressed',
+                    );
+                  }
                 } else {
                   writeIpcResponse(responsesDir, data.requestId, {
                     success: false,

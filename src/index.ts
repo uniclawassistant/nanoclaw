@@ -31,6 +31,12 @@ import {
   resetGroupSession as resetGroupSessionImpl,
   type ResetMode,
 } from './session-reset.js';
+import {
+  buildRespawnTask,
+  buildTailFlushPrompt,
+  evaluateRespawnCircuit,
+  evaluateResetAgeGate,
+} from './reset-lifecycle.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import {
   cleanupOrphans,
@@ -40,6 +46,7 @@ import {
   waitForHostAddress,
 } from './container-runtime.js';
 import {
+  createTask,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -117,6 +124,12 @@ let messageLoopRunning = false;
 // the agent via mcp__nanoclaw__reset_session, OR by a Telegram /new — both
 // paths funnel into resetGroupSession() below.
 const pendingResets: Record<string, ResetMode> = {};
+// FED-37: wall-clock start of each group's current session, stamped on
+// cold-spawn and cleared on mode='new' reset. Feeds the min-session-age gate
+// that refuses a self-reset from a just-woken session (stale ctx → refresh
+// loop). Per-group respawn timestamps feed the circuit breaker.
+const sessionStartedAt: Record<string, number> = {};
+const respawnHistory: Record<string, number[]> = {};
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -629,6 +642,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   });
   let rawAccumulated = '';
   let turnEndProcessed = false;
+  // FED-37: an agent-initiated `mode='new'` reset is deferred out of the
+  // streaming callback so the pre-reset tail flush can run a fresh turn
+  // without re-entering runAgent. Applied after runAgent returns below.
+  let agentSelfResetNew = false;
 
   try {
     const output = await runAgent(group, prompt, chatJid, async (result) => {
@@ -690,9 +707,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // FED-21 / PR #61: agent may have called mcp__nanoclaw__reset_session
         // during this turn. Apply post-turnEnd so the tool ack already
         // reached the agent and the streaming output drained cleanly.
+        // Post-turnEnd resets are always agent-initiated (Telegram /new goes
+        // straight to resetGroupSession, never through pendingResets).
         const pendingPost = consumePendingReset(group.folder);
-        if (pendingPost) {
-          resetGroupSession(group.folder, pendingPost);
+        if (pendingPost === 'restart') {
+          resetGroupSession(group.folder, 'restart');
+        } else if (pendingPost === 'new') {
+          // FED-37: defer the mode=new kill until after runAgent returns so the
+          // pre-reset tail flush can run its own turn (no callback re-entrancy).
+          agentSelfResetNew = true;
         }
       }
     });
@@ -708,6 +731,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           outputSentToUser = true;
         },
       });
+    }
+
+    // FED-37 Layer A+B: agent self-reset (mode=new). Flush the tail on the
+    // still-alive session, then kill + respawn. Runs here (not in the streaming
+    // callback) so the flush is a clean, non-re-entrant turn — and before the
+    // error return below so a self-reset is honored even on an errored turn.
+    if (agentSelfResetNew) {
+      await flushTailBeforeReset(group, chatJid);
+      resetGroupSession(group.folder, 'new');
+      await maybeRespawnAfterReset(group, chatJid);
     }
 
     if (output === 'error' || hadError) {
@@ -740,16 +773,97 @@ function resetGroupSession(folder: string, mode: ResetMode): void {
   resetGroupSessionImpl(folder, mode, {
     clearInMemorySession: (f) => {
       delete sessions[f];
+      delete sessionStartedAt[f];
     },
     deleteDbSession: (f) => deleteSession(f),
     log: (level, msg, fields) => logger[level](fields, msg),
   });
 }
 
+/**
+ * Record a group's live session id, stamping the session start time on the
+ * cold-spawn transition (no prior session) so the min-session-age reset gate
+ * can tell a just-woken session from one that has done real work.
+ */
+function rememberSession(folder: string, sessionId: string): void {
+  if (!sessions[folder]) sessionStartedAt[folder] = Date.now();
+  sessions[folder] = sessionId;
+  setSession(folder, sessionId);
+}
+
 function consumePendingReset(folder: string): ResetMode | undefined {
   const mode = pendingResets[folder];
   if (mode) delete pendingResets[folder];
   return mode;
+}
+
+/**
+ * FED-37 Layer A: before an agent-initiated `mode='new'` kill, run one final
+ * resumed turn asking the agent to persist its handoff tail — so a self-reset
+ * never loses context even if the agent forgot to write it. Best-effort: the
+ * reset proceeds regardless of whether this turn succeeds. Output is discarded
+ * (maintenance turn, not a chat message).
+ */
+async function flushTailBeforeReset(
+  group: RegisteredGroup,
+  chatJid: string,
+): Promise<void> {
+  try {
+    logger.info(
+      { folder: group.folder },
+      'Pre-reset tail flush: asking agent to persist tail before mode=new kill',
+    );
+    await runAgent(group, buildTailFlushPrompt(), chatJid, async () => {
+      // Discard output — the tail is written via the Write tool as a side
+      // effect; any text the agent emits here must not reach the chat.
+    });
+  } catch (err) {
+    logger.warn(
+      { folder: group.folder, err },
+      'Pre-reset tail flush failed (best effort) — proceeding with reset',
+    );
+  }
+}
+
+/**
+ * FED-37 Layer B: after an agent-initiated `mode='new'` reset, respawn the
+ * group with a bootstrap prompt so autonomous work doesn't stall in silence
+ * (the poller only wakes on inbound messages). The circuit breaker stops a
+ * runaway respawn loop and alerts the user instead.
+ */
+async function maybeRespawnAfterReset(
+  group: RegisteredGroup,
+  chatJid: string,
+): Promise<void> {
+  const now = Date.now();
+  const circuit = evaluateRespawnCircuit(
+    respawnHistory[group.folder] ?? [],
+    now,
+  );
+  respawnHistory[group.folder] = circuit.history;
+
+  if (!circuit.allowed) {
+    logger.warn(
+      { folder: group.folder, count: circuit.count },
+      'Respawn circuit breaker tripped — not respawning',
+    );
+    const channel = findChannel(channels, chatJid);
+    if (channel) {
+      await sendText(
+        channel,
+        chatJid,
+        `⚠️ Session refresh loop detected (${circuit.count} respawns in a short window). Auto-respawn is paused for this chat — send me a message to wake me back up.`,
+        getLastIncomingThreadId(chatJid),
+      );
+    }
+    return;
+  }
+
+  createTask(buildRespawnTask(group.folder, chatJid, new Date().toISOString()));
+  logger.info(
+    { folder: group.folder, count: circuit.count },
+    'Scheduled bootstrap respawn after self-reset (mode=new)',
+  );
 }
 
 async function runAgent(
@@ -817,8 +931,7 @@ async function runAgent(
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          rememberSession(group.folder, output.newSessionId);
         }
         await onOutput(output);
       }
@@ -841,8 +954,7 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      rememberSession(group.folder, output.newSessionId);
     }
 
     if (output.status === 'error') {
@@ -1159,6 +1271,8 @@ async function main(): Promise<void> {
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
+    persistGroupSession: (folder, sessionId) =>
+      rememberSession(folder, sessionId),
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
@@ -1228,7 +1342,22 @@ async function main(): Promise<void> {
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
     scheduleSessionReset: (folder, mode) => {
+      // FED-37 Guard #1: refuse a mode='new' reset from a just-woken session —
+      // it is almost certainly reacting to a stale/unknown post-wake ctx figure
+      // and would spin a refresh loop. The agent sees the reason via the
+      // reset_session tool error and keeps its current session.
+      if (mode === 'new') {
+        const gate = evaluateResetAgeGate(sessionStartedAt[folder], Date.now());
+        if (!gate.accepted) {
+          logger.info(
+            { folder, reason: gate.reason },
+            'reset_session mode=new suppressed by min-session-age gate',
+          );
+          return { accepted: false, reason: gate.reason };
+        }
+      }
       pendingResets[folder] = mode;
+      return { accepted: true };
     },
     onTasksChanged: () => {
       const tasks = getAllTasks();
