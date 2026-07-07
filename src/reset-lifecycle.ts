@@ -100,9 +100,9 @@ export function buildTailFlushPrompt(): string {
   return [
     '[auto-tail] Your session is about to be reset (you requested reset_session mode:new) and the container will stop right after this turn.',
     '',
-    'Before it does, write your handoff tail to /workspace/group/tail.md now — what was happening, what is done, what is next, and anything non-obvious your next session will need. Overwrite any stale tail; do not append blindly.',
+    'Before it does, use the Write tool to save your handoff tail to /workspace/group/tail.md now — what was happening, what is done, what is next, and anything non-obvious your next session will need. Overwrite any stale tail; do not append blindly.',
     '',
-    'Just write the file. Do not send any chat message and do not call any other tool.',
+    'Writing that file is the only action this turn: send no chat message and call no tools other than Write.',
   ].join('\n');
 }
 
