@@ -211,6 +211,14 @@ describe('TRIGGER_PATTERN', () => {
     expect(TRIGGER_PATTERN.test(`@${name}'s thing`)).toBe(true);
   });
 
+  it('matches a Cyrillic trigger followed by whitespace', () => {
+    // JS `\b` is ASCII-only, so a lookahead-based boundary must still fire for
+    // non-Latin names. Guards the regression that broke apostrophe matching.
+    const pattern = getTriggerPattern('@Аня');
+    expect(pattern.test('@Аня привет')).toBe(true);
+    expect(pattern.test('@Аняпривет')).toBe(false);
+  });
+
   it('matches @name alone (end of string is a word boundary)', () => {
     expect(TRIGGER_PATTERN.test(`@${name}`)).toBe(true);
   });

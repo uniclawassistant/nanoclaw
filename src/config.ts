@@ -79,8 +79,16 @@ function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * Builds an anchored, case-insensitive matcher for a trigger prefix.
+ *
+ * Uses a Unicode-aware negative lookahead `(?![\p{L}\p{N}_])` (with the `u`
+ * flag) rather than `\b`: JS `\b` is ASCII-only, so Cyrillic names like `@Аня`
+ * would never fire. The lookahead lets punctuation follow the trigger
+ * (`@Andy's thing`, `@Andy, hi`) while rejecting partial names (`@Andyextra`).
+ */
 export function buildTriggerPattern(trigger: string): RegExp {
-  return new RegExp(`^${escapeRegex(trigger.trim())}(?=[\\s]|$)`, 'i');
+  return new RegExp(`^${escapeRegex(trigger.trim())}(?![\\p{L}\\p{N}_])`, 'iu');
 }
 
 export const DEFAULT_TRIGGER = `@${ASSISTANT_NAME}`;
