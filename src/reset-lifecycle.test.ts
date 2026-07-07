@@ -3,7 +3,6 @@ import { describe, it, expect } from 'vitest';
 import {
   buildBootstrapPrompt,
   buildRespawnTask,
-  buildTailFlushPrompt,
   evaluateRespawnCircuit,
   evaluateResetAgeGate,
   isRespawnTask,
@@ -96,15 +95,6 @@ describe('isRespawnTask', () => {
 });
 
 describe('prompts', () => {
-  it('tail flush prompt directs the Write tool and forbids chat output', () => {
-    const p = buildTailFlushPrompt();
-    expect(p).toMatch(/\/workspace\/group\/tail\.md/);
-    // Must clearly call for the Write tool — otherwise the agent may read
-    // "call no tools" as "don't write either" and Layer A silently no-ops.
-    expect(p).toMatch(/use the Write tool/i);
-    expect(p).toMatch(/send no chat message/i);
-  });
-
   it('bootstrap prompt restores from tail and forbids re-reset', () => {
     const p = buildBootstrapPrompt();
     expect(p).toMatch(/\/workspace\/group\/tail\.md/);

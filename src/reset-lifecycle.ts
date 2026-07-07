@@ -90,23 +90,6 @@ export function evaluateRespawnCircuit(
 }
 
 /**
- * Layer A — pre-reset tail flush prompt. Run as one final resumed turn on the
- * still-alive session right before a self-`mode:new` kill, so the handoff tail
- * is guaranteed fresh even if the agent forgot to write it. The agent has full
- * context here; it just needs to persist it to disk. Output is suppressed by
- * the caller — this is a maintenance turn, not a chat message.
- */
-export function buildTailFlushPrompt(): string {
-  return [
-    '[auto-tail] Your session is about to be reset (you requested reset_session mode:new) and the container will stop right after this turn.',
-    '',
-    'Before it does, use the Write tool to save your handoff tail to /workspace/group/tail.md now — what was happening, what is done, what is next, and anything non-obvious your next session will need. Overwrite any stale tail; do not append blindly.',
-    '',
-    'Writing that file is the only action this turn: send no chat message and call no tools other than Write.',
-  ].join('\n');
-}
-
-/**
  * Bootstrap prompt for a respawned session. Tells the fresh agent it woke
  * itself, to restore from its tail and continue pending work — and, crucially,
  * not to reset again on an early ctx reading (discipline layer on top of the
