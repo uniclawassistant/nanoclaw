@@ -73,6 +73,18 @@ export interface SchedulerDependencies {
    * tasks keep their session ephemeral; only `respawn:` tasks call this.
    */
   persistGroupSession?: (folder: string, sessionId: string) => void;
+  /**
+   * FED-37: apply a queued session reset before a task spawns, so a task that
+   * would otherwise resume a to-be-reset session cold-spawns fresh instead.
+   */
+  applyPendingResetPreTurn?: (folder: string) => void;
+  /**
+   * FED-37: apply a queued reset after a task turn ends, with respawn. This is
+   * what makes an autonomous self-reset (agent calls reset_session from inside a
+   * scheduled-task turn — the primary night use case) actually take effect and
+   * bring the group back, instead of hanging until the next inbound message.
+   */
+  applyPendingResetAtTurnEnd?: (folder: string) => Promise<void>;
   queue: GroupQueue;
   onProcess: (
     groupJid: string,
@@ -157,6 +169,11 @@ async function runTask(
 
   let result: string | null = null;
   let error: string | null = null;
+
+  // FED-37: apply any reset queued in a prior turn before this task reads the
+  // session, so a group-context task cold-spawns fresh instead of resuming a
+  // session that was meant to be reset.
+  deps.applyPendingResetPreTurn?.(task.group_folder);
 
   // For group context mode, use the group's current session
   const sessions = deps.getSessions();
@@ -255,6 +272,15 @@ async function runTask(
     if (closeTimer) clearTimeout(closeTimer);
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
+  }
+
+  // FED-37: if the agent called reset_session during this scheduled-task turn
+  // (the primary autonomous / night use case), apply it now the turn is over —
+  // kill the session and respawn with a bootstrap prompt so the work continues.
+  // Runs regardless of task error: a requested self-reset should still take.
+  // Respawn tasks are exempt so a fresh bootstrap can't immediately re-reset.
+  if (!isRespawnTask(task.id)) {
+    await deps.applyPendingResetAtTurnEnd?.(task.group_folder);
   }
 
   const durationMs = Date.now() - startTime;
