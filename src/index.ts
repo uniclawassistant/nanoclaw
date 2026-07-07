@@ -33,7 +33,6 @@ import {
 } from './session-reset.js';
 import {
   buildRespawnTask,
-  buildTailFlushPrompt,
   evaluateRespawnCircuit,
   evaluateResetAgeGate,
 } from './reset-lifecycle.js';
@@ -642,10 +641,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   });
   let rawAccumulated = '';
   let turnEndProcessed = false;
-  // FED-37: an agent-initiated `mode='new'` reset is deferred out of the
-  // streaming callback so the pre-reset tail flush can run a fresh turn
-  // without re-entering runAgent. Applied after runAgent returns below.
-  let agentSelfResetNew = false;
 
   try {
     const output = await runAgent(group, prompt, chatJid, async (result) => {
@@ -710,12 +705,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // Post-turnEnd resets are always agent-initiated (Telegram /new goes
         // straight to resetGroupSession, never through pendingResets).
         const pendingPost = consumePendingReset(group.folder);
-        if (pendingPost === 'restart') {
-          resetGroupSession(group.folder, 'restart');
-        } else if (pendingPost === 'new') {
-          // FED-37: defer the mode=new kill until after runAgent returns so the
-          // pre-reset tail flush can run its own turn (no callback re-entrancy).
-          agentSelfResetNew = true;
+        if (pendingPost) {
+          resetGroupSession(group.folder, pendingPost);
+          // FED-37: a self mode=new reset with no inbound message pending would
+          // otherwise leave the poller silent — respawn with a bootstrap prompt
+          // so autonomous work continues. Applied here at the turnEnd streaming
+          // event (container is still alive). Deferring past it — e.g. to after
+          // runAgent returns — hangs the reset until the 30-min idle close,
+          // because in streaming mode runAgent only returns on container exit.
+          if (pendingPost === 'new') {
+            await maybeRespawnAfterReset(group, chatJid);
+          }
         }
       }
     });
@@ -731,16 +731,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           outputSentToUser = true;
         },
       });
-    }
-
-    // FED-37 Layer A+B: agent self-reset (mode=new). Flush the tail on the
-    // still-alive session, then kill + respawn. Runs here (not in the streaming
-    // callback) so the flush is a clean, non-re-entrant turn — and before the
-    // error return below so a self-reset is honored even on an errored turn.
-    if (agentSelfResetNew) {
-      await flushTailBeforeReset(group, chatJid);
-      resetGroupSession(group.folder, 'new');
-      await maybeRespawnAfterReset(group, chatJid);
     }
 
     if (output === 'error' || hadError) {
@@ -795,34 +785,6 @@ function consumePendingReset(folder: string): ResetMode | undefined {
   const mode = pendingResets[folder];
   if (mode) delete pendingResets[folder];
   return mode;
-}
-
-/**
- * FED-37 Layer A: before an agent-initiated `mode='new'` kill, run one final
- * resumed turn asking the agent to persist its handoff tail — so a self-reset
- * never loses context even if the agent forgot to write it. Best-effort: the
- * reset proceeds regardless of whether this turn succeeds. Output is discarded
- * (maintenance turn, not a chat message).
- */
-async function flushTailBeforeReset(
-  group: RegisteredGroup,
-  chatJid: string,
-): Promise<void> {
-  try {
-    logger.info(
-      { folder: group.folder },
-      'Pre-reset tail flush: asking agent to persist tail before mode=new kill',
-    );
-    await runAgent(group, buildTailFlushPrompt(), chatJid, async () => {
-      // Discard output — the tail is written via the Write tool as a side
-      // effect; any text the agent emits here must not reach the chat.
-    });
-  } catch (err) {
-    logger.warn(
-      { folder: group.folder, err },
-      'Pre-reset tail flush failed (best effort) — proceeding with reset',
-    );
-  }
 }
 
 /**
