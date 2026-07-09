@@ -37,6 +37,12 @@ export interface TurnState {
   // Last emoji the agent set via the react tool this turn (null = none / cleared).
   // A non-null, non-👀 value means the turn was answered with a terminal react.
   lastReactionEmoji: string | null;
+  // FED-37: the message that triggered this turn, snapshotted at turn start.
+  // react() without an explicit message_id binds to this id, so a reaction lands
+  // on the message that actually woke the agent — deterministically, regardless
+  // of newer messages that arrive while the turn runs. null when the turn had no
+  // resolvable trigger message (should not happen on the user-facing path).
+  triggerMessageId: string | null;
 }
 
 const RAW_SAMPLE_LIMIT = 2000;
@@ -86,7 +92,11 @@ function bumpSilentFinishCounter(now: Date = new Date()): {
 
 export function beginTurn(
   jid: string,
-  opts: { groupName: string; isUserFacing: boolean },
+  opts: {
+    groupName: string;
+    isUserFacing: boolean;
+    triggerMessageId?: string | null;
+  },
 ): TurnState {
   const state: TurnState = {
     groupName: opts.groupName,
@@ -94,6 +104,7 @@ export function beginTurn(
     outboundCount: 0,
     isUserFacing: opts.isUserFacing,
     lastReactionEmoji: null,
+    triggerMessageId: opts.triggerMessageId ?? null,
   };
   activeTurns.set(jid, state);
   return state;

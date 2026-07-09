@@ -577,9 +577,10 @@ DONE-EMOJI HINT: ✅ is NOT in the Telegram-bot-allowed list. For "done" use one
 
 LIFECYCLE (important):
 • Use react within a single turn: \`react(👀)\` at the start, replace or \`react(null)\` before finishing the same response.
-• The \`message_id\` fallback resolves to the most recent incoming user message on the host side. If the user sent another message between your 👀 and your clear/replace, a cross-turn call without explicit \`message_id\` will hit the NEW message, leaving the old 👀 orphaned. For any cross-turn use, pass \`message_id\` explicitly (the tool returns it in the success response so you can persist it).
+• With no \`message_id\`, the reaction binds to the message that triggered THIS turn (snapshotted on the host at turn start). This is stable for the whole turn: a 👀 at the start and a 👌/null later both land on the same triggering message, even if new messages arrive while you work.
+• Persisting a marker ACROSS turns is different: each turn has its own trigger message, so to touch a reaction you set in an earlier turn you must pass its \`message_id\` explicitly (the tool returns it in the success response so you can persist it).
 
-GROUP CHATS: you MUST pass \`message_id\` explicitly in group chats. Without it the fallback picks the most recent non-bot message, which may be from someone else while you were working. In 1-on-1 DMs the fallback is safe.
+GROUP CHATS: without \`message_id\` the reaction targets the trigger message that woke the agent this turn — not an arbitrary recent message. Pass \`message_id\` explicitly only to react to a different message.
 
 LIMITATIONS:
 • Telegram only. Other channels will return an error.
@@ -597,7 +598,7 @@ LIMITATIONS:
       .string()
       .optional()
       .describe(
-        'Telegram message_id to react to. Required in group chats. In DMs, defaults to the last incoming user message.',
+        'Telegram message_id to react to. Optional override — when omitted, defaults to the message that triggered the current turn (the one that woke the agent), in both DMs and group chats.',
       ),
   },
   async (args) => {
@@ -612,14 +613,11 @@ LIMITATIONS:
       );
     }
 
-    const numericChat = chatJid.slice(3);
-    const isGroupChat = numericChat.startsWith('-');
-    if (isGroupChat && !args.message_id) {
-      return toolError(
-        'In group chats you must pass message_id explicitly — the last-message fallback is unreliable because other participants may have written while you were working.',
-      );
-    }
-
+    // FED-37: no group-chat guard on a missing message_id anymore. The host
+    // defaults to the message that triggered this turn (snapshotted at turn
+    // start), which is deterministic in groups too — not the old "latest
+    // non-bot at exec time" fallback that could grab another participant's
+    // message. Pass message_id explicitly only to override that default.
     const requestId = crypto.randomUUID();
     const data: Record<string, string | null | undefined> = {
       type: 'reaction',

@@ -77,6 +77,7 @@ import {
   checkClassA,
   checkClassB,
   endTurn,
+  getActiveTurn,
   recordOutbound,
   recordReaction,
 } from './outbound-mismatch-hook.js';
@@ -581,16 +582,32 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const replyThreadId = missedMessages[missedMessages.length - 1].thread_id;
 
+  // FED-37: snapshot the message that triggered this turn. react() without an
+  // explicit message_id binds to this id (see setReaction below), so a reaction
+  // lands on the message that actually woke the agent — deterministically,
+  // independent of newer messages that arrive while the turn runs. Default: the
+  // last incoming message in the batch (DMs, main group, no-trigger groups).
+  // Trigger-required groups narrow it to the trigger-matching message below.
+  let triggerMessageId: string | null =
+    missedMessages.length > 0
+      ? missedMessages[missedMessages.length - 1].id
+      : null;
+
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
     const triggerPattern = getTriggerPattern(group.trigger);
     const allowlistCfg = loadSenderAllowlist();
-    const hasTrigger = missedMessages.some(
-      (m) =>
-        triggerPattern.test(m.content.trim()) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-    );
-    if (!hasTrigger) return true;
+    // Last trigger-matching message from an allowed sender is what woke the
+    // agent; finding it also serves as the trigger-present gate.
+    const triggerMsg = [...missedMessages]
+      .reverse()
+      .find(
+        (m) =>
+          triggerPattern.test(m.content.trim()) &&
+          (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+      );
+    if (!triggerMsg) return true;
+    triggerMessageId = triggerMsg.id;
   }
 
   const usageLine = formatUsageLine(chatJid, sessions[group.folder] ?? null);
@@ -635,6 +652,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const turnState = beginTurn(chatJid, {
     groupName: group.name,
     isUserFacing: true,
+    triggerMessageId,
   });
   let rawAccumulated = '';
   let turnEndProcessed = false;
@@ -1316,7 +1334,13 @@ async function main(): Promise<void> {
       }
       let resolvedId = messageId;
       if (!resolvedId) {
-        resolvedId = getLastUserMessageId(jid);
+        // FED-37: default to the message that triggered the active turn
+        // (snapshotted at turn start), not "latest incoming at exec time".
+        // getLastUserMessageId is the last-resort fallback only for out-of-band
+        // paths with no active turn (it re-reads the newest incoming row and so
+        // can drift onto a message that arrived mid-turn or from someone else).
+        resolvedId =
+          getActiveTurn(jid)?.triggerMessageId ?? getLastUserMessageId(jid);
         if (!resolvedId) {
           throw new Error('no recent user message to react to');
         }
@@ -1331,9 +1355,14 @@ async function main(): Promise<void> {
     },
     autoClearEyeReaction: async (jid) => {
       const channel = findChannel(channels, jid);
+      // FED-37: clear the 👀 from the message react() set it on — the active
+      // turn's trigger message — not "latest incoming at exec time". The 👀 is
+      // cached per message_id, so resolving to a newer message here would miss
+      // the cached marker and leave it orphaned. Falls back to the last user
+      // message only when no turn is active.
       const cleared = await autoClearEyeIfSet(
         channel,
-        getLastUserMessageId,
+        (j) => getActiveTurn(j)?.triggerMessageId ?? getLastUserMessageId(j),
         jid,
       );
       if (cleared) {
