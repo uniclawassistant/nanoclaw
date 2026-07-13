@@ -68,6 +68,8 @@ const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 // and halting the loop immediately while keeping the SDK session resumable. The
 // file body, when non-empty, is the re-sync message to run as the next turn.
 const IPC_INPUT_INTERRUPT_SENTINEL = path.join(IPC_INPUT_DIR, '_interrupt');
+const INTERRUPT_FALLBACK_RESYNC =
+  '⏹ Текущий ход остановлен человеком. Не продолжай и не повторяй прежнее действие. Остановись и дождись дальнейших указаний.';
 const IPC_POLL_MS = 500;
 
 /**
@@ -412,6 +414,10 @@ function consumeInterrupt(): string | null {
   return body;
 }
 
+function interruptResync(body: string | undefined): string {
+  return body?.trim() || INTERRUPT_FALLBACK_RESYNC;
+}
+
 /**
  * Drain all pending IPC input messages.
  * Returns messages found, or empty array.
@@ -451,25 +457,37 @@ function drainIpcInput(): string[] {
   }
 }
 
+interface PendingInput {
+  text: string;
+  stopResync: boolean;
+}
+
 /**
  * Wait for a new IPC message or _close sentinel.
- * Returns the messages as a single string, or null if _close.
+ * Returns the next prompt with whether it must run as an isolated stop re-sync,
+ * or null if _close.
  */
-function waitForIpcMessage(): Promise<string | null> {
+function waitForIpcMessage(): Promise<PendingInput | null> {
   return new Promise((resolve) => {
     const poll = () => {
       if (shouldClose()) {
         resolve(null);
         return;
       }
-      // FED-38: a `_interrupt` that lands between turns has nothing in-flight
-      // to interrupt — discard it so it can't fire against an unrelated future
-      // turn. The host only writes it while a run is genuinely busy, so this is
-      // just belt-and-suspenders against a race with the turn boundary.
-      consumeInterrupt();
+      // FED-38: an interrupt wins the between-turn race. Deliver its re-sync
+      // before touching queued user messages so a just-stopped action cannot be
+      // relaunched by the next message; those messages remain for the next turn.
+      const interruptBody = consumeInterrupt();
+      if (interruptBody !== null) {
+        log(
+          'Interrupt sentinel detected between queries, prioritizing re-sync',
+        );
+        resolve({ text: interruptResync(interruptBody), stopResync: true });
+        return;
+      }
       const messages = drainIpcInput();
       if (messages.length > 0) {
-        resolve(messages.join('\n'));
+        resolve({ text: messages.join('\n'), stopResync: false });
         return;
       }
       setTimeout(poll, IPC_POLL_MS);
@@ -491,9 +509,10 @@ async function runQuery(
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
+  stopResyncTurn = false,
 ): Promise<{
   newSessionId?: string;
-  lastAssistantUuid?: string;
+  lastCompletedAssistantUuid?: string;
   closedDuringQuery: boolean;
   interrupted: boolean;
   resyncText?: string;
@@ -524,21 +543,26 @@ async function runQuery(
       interrupted = true;
       resyncText = interruptBody;
       ipcPolling = false;
-      // interrupt() resolves the query generator, so the for-await below exits
-      // cleanly. Fire-and-log: a failed interrupt must not crash the runner.
+      stream.end();
+      // In streaming-input mode interrupt() only stops the active turn; it does
+      // not close the Query generator. Close it after the control request is
+      // acknowledged so queued prompts cannot start another turn.
       void agentQuery
         .interrupt()
         .catch((err) =>
           log(
             `interrupt() failed: ${err instanceof Error ? err.message : String(err)}`,
           ),
-        );
+        )
+        .finally(() => agentQuery.close());
       return;
     }
-    const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
+    if (!stopResyncTurn) {
+      const messages = drainIpcInput();
+      for (const text of messages) {
+        log(`Piping IPC message into active query (${text.length} chars)`);
+        stream.push(text);
+      }
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
@@ -641,23 +665,25 @@ async function runQuery(
   });
 
   for await (const message of agentQuery) {
-    handleQueryMessage(
-      message as { type: string } & Record<string, unknown>,
-      state,
-      {
-        emit: writeOutput,
-        log,
-      },
-    );
+    const queryMessage = message as { type: string } & Record<string, unknown>;
+    handleQueryMessage(queryMessage, state, {
+      emit: writeOutput,
+      log,
+    });
+    if (stopResyncTurn && queryMessage.type === 'result') {
+      log('Stop re-sync turn completed, ending isolated query');
+      ipcPolling = false;
+      stream.end();
+    }
   }
 
   ipcPolling = false;
   log(
-    `Query done. Messages: ${state.messageCount}, results: ${state.resultCount}, lastAssistantUuid: ${state.lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, interrupted: ${interrupted}`,
+    `Query done. Messages: ${state.messageCount}, results: ${state.resultCount}, lastCompletedAssistantUuid: ${state.lastCompletedAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, interrupted: ${interrupted}`,
   );
   return {
     newSessionId: state.newSessionId,
-    lastAssistantUuid: state.lastAssistantUuid,
+    lastCompletedAssistantUuid: state.lastCompletedAssistantUuid,
     closedDuringQuery,
     interrupted,
     resyncText,
@@ -801,6 +827,7 @@ async function main(): Promise<void> {
 
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;
+  let stopResyncTurn = false;
   try {
     while (true) {
       log(
@@ -814,12 +841,14 @@ async function main(): Promise<void> {
         containerInput,
         sdkEnv,
         resumeAt,
+        stopResyncTurn,
       );
+      stopResyncTurn = false;
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
-      if (queryResult.lastAssistantUuid) {
-        resumeAt = queryResult.lastAssistantUuid;
+      if (queryResult.lastCompletedAssistantUuid) {
+        resumeAt = queryResult.lastCompletedAssistantUuid;
       }
 
       // If _close was consumed during the query, exit immediately.
@@ -830,18 +859,13 @@ async function main(): Promise<void> {
         break;
       }
 
-      // FED-38: host `/stop` interrupted the in-flight run. The session is kept
-      // (resume: sessionId, above) — we do NOT reset. If the host supplied a
-      // re-sync message, run it right away as the next turn on the same
-      // session; otherwise fall through and wait for the user like any turn end.
+      // FED-38: host `/stop` interrupted the in-flight run. Keep the session,
+      // then run one isolated re-sync turn before any queued user messages.
       if (queryResult.interrupted) {
-        const resync = queryResult.resyncText?.trim();
-        if (resync) {
-          log('Interrupted with re-sync text, starting new query immediately');
-          prompt = queryResult.resyncText!;
-          continue;
-        }
-        log('Interrupted with no re-sync text, waiting for next IPC message');
+        log('Interrupted, starting isolated re-sync query immediately');
+        prompt = interruptResync(queryResult.resyncText);
+        stopResyncTurn = true;
+        continue;
       }
 
       log('Query ended, waiting for next IPC message...');
@@ -853,8 +877,11 @@ async function main(): Promise<void> {
         break;
       }
 
-      log(`Got new message (${nextMessage.length} chars), starting new query`);
-      prompt = nextMessage;
+      log(
+        `Got ${nextMessage.stopResync ? 'stop re-sync' : 'new message'} (${nextMessage.text.length} chars), starting new query`,
+      );
+      prompt = nextMessage.text;
+      stopResyncTurn = nextMessage.stopResync;
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);

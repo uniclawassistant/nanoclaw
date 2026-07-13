@@ -28,6 +28,25 @@ function runResult(modelUsage: Record<string, { contextWindow?: number }>) {
   return emitted;
 }
 
+describe('completed resume pointer (FED-38)', () => {
+  it('keeps the last successful assistant UUID across an interrupted result', () => {
+    const state: QueryLoopState = { messageCount: 0, resultCount: 0 };
+    const deps = { emit: () => {}, log: () => {} };
+
+    handleQueryMessage({ type: 'assistant', uuid: 'completed-a' }, state, deps);
+    handleQueryMessage({ type: 'result', subtype: 'success' }, state, deps);
+    handleQueryMessage({ type: 'assistant', uuid: 'partial-b' }, state, deps);
+    handleQueryMessage(
+      { type: 'result', subtype: 'error_during_execution' },
+      state,
+      deps,
+    );
+
+    expect(state.lastAssistantUuid).toBe('partial-b');
+    expect(state.lastCompletedAssistantUuid).toBe('completed-a');
+  });
+});
+
 describe('extractUsageFromResult contextWindow (FED-35: verbatim, no floor)', () => {
   it('reports the SDK contextWindow as-is — it is what autocompact runs on', () => {
     const emitted = runResult({

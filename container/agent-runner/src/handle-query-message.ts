@@ -23,6 +23,7 @@ export interface QueryLoopState {
   resultCount: number;
   newSessionId?: string;
   lastAssistantUuid?: string;
+  lastCompletedAssistantUuid?: string;
   // FED-21: usage from the latest `assistant` message in the SDK stream.
   // `result.usage` is cumulative across all internal API calls inside a
   // single query() session; `assistant.message.usage` is per-API-call and
@@ -108,6 +109,9 @@ export function handleQueryMessage(
   if (message.type === 'result') {
     state.resultCount++;
     const subtype = (message as { subtype?: string }).subtype;
+    if (subtype === 'success' && state.lastAssistantUuid) {
+      state.lastCompletedAssistantUuid = state.lastAssistantUuid;
+    }
     const usage = extractUsageFromResult(message, state);
     deps.log(
       `Result #${state.resultCount}: subtype=${subtype}${usage ? ` cost=${usage.totalCostUsd ?? 'null'} ctx=${usage.contextUsedTokens}/${usage.contextWindow ?? '?'}` : ''}`,

@@ -488,6 +488,8 @@ Sessions enable conversation continuity - Claude remembers what you talked about
 2. Session ID is passed to Claude Agent SDK's `resume` option
 3. Claude continues the conversation with full context
 4. Session transcripts are stored as JSONL files in `data/sessions/{group}/.claude/`
+5. Resume pointers advance only after completed turns; an interrupted turn's partial assistant node is never used as a resume target
+6. A `/stop` re-sync always takes priority over queued user messages, including when the interrupt arrives between turns
 
 ---
 
