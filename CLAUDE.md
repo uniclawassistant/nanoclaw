@@ -77,4 +77,4 @@ systemctl --user restart nanoclaw
 
 ## Container Build Cache
 
-The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild, prune the builder then re-run `./container/build.sh`.
+The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. After a successful Apple Container build, `./container/build.sh` prunes dangling images automatically and deletes the builder cache when free disk space is below 40 GiB. Set `NANOCLAW_BUILD_CLEANUP=0` to retain all caches for diagnostics. To force a clean rebuild manually, run `container builder stop`, then `container builder delete`, then `./container/build.sh`.

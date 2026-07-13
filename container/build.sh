@@ -25,10 +25,49 @@ cd "$SCRIPT_DIR"
 IMAGE="${1:-${CONTAINER_IMAGE:-nanoclaw-agent:latest}}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-container}"
 
+cleanup_apple_container_build_cache() {
+  # Other runtimes have different prune semantics. Keep this cleanup scoped to
+  # Apple's `container` CLI, where image snapshots and the builder VM otherwise
+  # grow after every rebuild.
+  [ "${CONTAINER_RUNTIME##*/}" = "container" ] || return 0
+  [ "${NANOCLAW_BUILD_CLEANUP:-1}" != "0" ] || return 0
+
+  echo "Pruning dangling Apple Container images..."
+  if ! "${CONTAINER_RUNTIME}" image prune; then
+    echo "Warning: dangling image prune failed; the completed image is still usable." >&2
+  fi
+
+  # Retain the warm BuildKit cache while disk space is healthy. Under pressure,
+  # discard the builder VM after a successful build; Apple Container recreates
+  # it on the next build. Never stop it while another build is in progress.
+  local cleanup_water_gb="${NANOCLAW_BUILDER_CLEANUP_WATER_GB:-40}"
+  local free_kb
+  free_kb=$(df -k / | awk 'NR == 2 { print $4 }')
+  if [ "${free_kb:-0}" -ge "$((cleanup_water_gb * 1024 * 1024))" ]; then
+    echo "Keeping warm builder cache (${free_kb} KiB free; threshold ${cleanup_water_gb} GiB)."
+    return 0
+  fi
+
+  if pgrep -f '(^|/)container([[:space:]]+--debug)?[[:space:]]+build([[:space:]]|$)' >/dev/null 2>&1; then
+    echo "Warning: another Apple Container build is active; keeping builder cache." >&2
+    return 0
+  fi
+
+  echo "Disk space is below ${cleanup_water_gb} GiB; removing the BuildKit cache..."
+  "${CONTAINER_RUNTIME}" builder stop >/dev/null 2>&1 || true
+  if "${CONTAINER_RUNTIME}" builder delete >/dev/null 2>&1; then
+    echo "BuildKit cache removed. It will be recreated on the next build."
+  else
+    echo "Warning: BuildKit cache removal failed; the completed image is still usable." >&2
+  fi
+}
+
 echo "Building NanoClaw agent container image..."
 echo "Image: ${IMAGE}"
 
 ${CONTAINER_RUNTIME} build -t "${IMAGE}" .
+
+cleanup_apple_container_build_cache
 
 echo ""
 echo "Build complete!"
