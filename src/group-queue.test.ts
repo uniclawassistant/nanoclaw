@@ -601,4 +601,114 @@ describe('GroupQueue', () => {
     resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
   });
+
+  // --- Interrupt in-flight run (FED-38 /stop) ---
+
+  it('interruptActiveRun returns "none" when no container is active', () => {
+    expect(queue.interruptActiveRun('group1@g.us', 'resync')).toBe('none');
+  });
+
+  it('interruptActiveRun writes the _interrupt sentinel (with re-sync body) for a busy container', async () => {
+    const fs = await import('fs');
+    let resolveProcess: () => void;
+
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveProcess = resolve;
+      });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      {} as any,
+      'container-1',
+      'test-group',
+    );
+
+    const writeFileSync = vi.mocked(fs.default.writeFileSync);
+    const renameSync = vi.mocked(fs.default.renameSync);
+    writeFileSync.mockClear();
+    renameSync.mockClear();
+
+    const result = queue.interruptActiveRun('group1@g.us', 'RE-SYNC BODY');
+    expect(result).toBe('interrupted');
+
+    // Body is written to a temp file, then atomically renamed to _interrupt.
+    const tmpWrite = writeFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === 'string' && call[0].endsWith('_interrupt.tmp'),
+    );
+    expect(tmpWrite).toBeDefined();
+    expect(tmpWrite![1]).toBe('RE-SYNC BODY');
+    const rename = renameSync.mock.calls.find(
+      (call) => typeof call[1] === 'string' && call[1].endsWith('_interrupt'),
+    );
+    expect(rename).toBeDefined();
+
+    resolveProcess!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('interruptActiveRun returns "idle" and writes nothing when the container is between turns', async () => {
+    const fs = await import('fs');
+    let resolveProcess: () => void;
+
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveProcess = resolve;
+      });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      {} as any,
+      'container-1',
+      'test-group',
+    );
+    queue.notifyIdle('group1@g.us');
+
+    const writeFileSync = vi.mocked(fs.default.writeFileSync);
+    writeFileSync.mockClear();
+
+    expect(queue.interruptActiveRun('group1@g.us', 'resync')).toBe('idle');
+    const interruptWrites = writeFileSync.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('_interrupt'),
+    );
+    expect(interruptWrites).toHaveLength(0);
+
+    resolveProcess!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('interruptActiveRun returns "none" for task containers (scheduled work, not a DM catch)', async () => {
+    let resolveTask: () => void;
+
+    const taskFn = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveTask = resolve;
+      });
+    });
+
+    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      {} as any,
+      'container-1',
+      'test-group',
+    );
+
+    expect(queue.interruptActiveRun('group1@g.us', 'resync')).toBe('none');
+
+    resolveTask!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
 });

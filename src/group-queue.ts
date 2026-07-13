@@ -186,6 +186,46 @@ export class GroupQueue {
   }
 
   /**
+   * FED-38: interrupt the in-flight run for a group (Telegram `/stop`). Drops
+   * the `_interrupt` IPC sentinel — carrying `resyncText` as its body — which
+   * the live container turns into `query.interrupt()`, aborting the current
+   * tool call and halting the loop WITHOUT resetting the session. The kept
+   * session then resumes on the re-sync message the sentinel carries.
+   *
+   * Returns what happened, so the caller can tell the user:
+   *   - `'interrupted'` — sentinel written to a busy interactive container
+   *   - `'idle'`        — a container is up but between turns (nothing in-flight)
+   *   - `'none'`        — no active interactive container for this group
+   *
+   * Task containers are never interrupted here (scheduled work, not a DM
+   * human-catch); they report `'none'`.
+   */
+  interruptActiveRun(
+    groupJid: string,
+    resyncText: string,
+  ): 'interrupted' | 'idle' | 'none' {
+    const state = this.getGroup(groupJid);
+    if (!state.active || !state.groupFolder || state.isTaskContainer) {
+      return 'none';
+    }
+    // Between turns there is no in-flight tool call to abort; writing the
+    // sentinel now would fire against the next (possibly unrelated) turn.
+    if (state.idleWaiting) return 'idle';
+
+    const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
+    try {
+      fs.mkdirSync(inputDir, { recursive: true });
+      const filepath = path.join(inputDir, '_interrupt');
+      const tempPath = `${filepath}.tmp`;
+      fs.writeFileSync(tempPath, resyncText);
+      fs.renameSync(tempPath, filepath);
+      return 'interrupted';
+    } catch {
+      return 'none';
+    }
+  }
+
+  /**
    * Signal the active container to wind down by writing a close sentinel.
    */
   closeStdin(groupJid: string): void {

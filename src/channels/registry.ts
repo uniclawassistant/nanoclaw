@@ -15,6 +15,10 @@ export interface ChannelOpts {
   // inline, so spawn-time and shutdown-time naming stay in lockstep.
   // mode='new' is a full reset; mode='restart' is container-kill-only.
   resetGroupSession?: (folder: string, mode: 'new' | 'restart') => void;
+  // FED-38: interrupt a group's in-flight run (`/stop`) without touching the
+  // session. Returns 'interrupted' when a busy run was signalled, 'idle' when a
+  // container is up but between turns, 'none' when nothing is running.
+  stopGroupRun?: (folder: string) => 'interrupted' | 'idle' | 'none';
 }
 
 export type ChannelFactory = (opts: ChannelOpts) => Channel | null;

@@ -181,6 +181,7 @@ export interface TelegramChannelOpts {
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
   resetGroupSession?: (folder: string, mode: 'new' | 'restart') => void;
+  stopGroupRun?: (folder: string) => 'interrupted' | 'idle' | 'none';
 }
 
 // Marker file used to notify a chat after /restart kickstart completes.
@@ -346,6 +347,29 @@ export class TelegramChannel implements Channel {
       ctx.reply('Session reset. Next message starts fresh.');
     });
 
+    // Command to interrupt the in-flight run WITHOUT resetting the session
+    // (FED-38). Unlike /new, the conversation/context is preserved — the agent
+    // is aborted mid-turn and then re-oriented by a host-injected re-sync
+    // message. The heavy lifting (query.interrupt() + re-sync) is host-side;
+    // here we only resolve the group and relay the outcome.
+    this.bot.command('stop', (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const groups = this.opts.registeredGroups();
+      const group = groups[chatJid];
+      if (!group) {
+        ctx.reply('Chat not registered.');
+        return;
+      }
+
+      const result = this.opts.stopGroupRun?.(group.folder) ?? 'none';
+      logger.info({ group: group.name, result }, '/stop: interrupt requested');
+      if (result === 'interrupted') {
+        ctx.reply('⏹ Interrupting — session kept.');
+      } else {
+        ctx.reply('Nothing to interrupt right now.');
+      }
+    });
+
     // Command to restart NanoClaw (kickstart via launchd)
     this.bot.command('restart', async (ctx) => {
       const chatJid = `tg:${ctx.chat.id}`;
@@ -488,6 +512,7 @@ export class TelegramChannel implements Channel {
       'status',
       'restart',
       'tasks',
+      'stop',
     ]);
 
     this.bot.on('message:text', async (ctx) => {
@@ -772,13 +797,16 @@ export class TelegramChannel implements Channel {
             { username: botInfo.username, id: botInfo.id },
             'Telegram bot connected',
           );
+          // FED-38 menu order: first (/status) and last (/stop) fixed, the rest
+          // alphabetical between them.
           this.bot!.api.setMyCommands([
-            { command: 'new', description: 'Reset session' },
             { command: 'status', description: 'Show context usage' },
-            { command: 'tasks', description: 'List scheduled tasks' },
             { command: 'chatid', description: 'Show chat ID' },
+            { command: 'new', description: 'Reset session' },
             { command: 'ping', description: 'Check if bot is online' },
             { command: 'restart', description: 'Restart NanoClaw' },
+            { command: 'tasks', description: 'List scheduled tasks' },
+            { command: 'stop', description: 'Interrupt agent now' },
           ]).catch((err) => logger.warn({ err }, 'Failed to set bot commands'));
           console.log(`\n  Telegram bot: @${botInfo.username}`);
           console.log(
