@@ -140,9 +140,9 @@ const queue = new GroupQueue();
 // sentinel body handed to the container, which runs it as the next turn on the
 // (preserved) session.
 const STOP_RESYNC_MESSAGE =
-  '⏹ Тебя перебил человек. То, что ты сейчас делаешь — не то, что от него ' +
-  'ожидается. Остановись, не продолжай и не повторяй прежнее действие. ' +
-  'Осознай рассинхрон и спроси, что не так.';
+  '⏹ The user interrupted you. Stop the current action. Do not continue or ' +
+  'repeat it. Recognize that you may be out of sync and ask what went wrong ' +
+  'or what they want instead.';
 
 function recordOutgoing(
   jid: string,

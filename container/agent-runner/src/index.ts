@@ -69,7 +69,7 @@ const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 // file body, when non-empty, is the re-sync message to run as the next turn.
 const IPC_INPUT_INTERRUPT_SENTINEL = path.join(IPC_INPUT_DIR, '_interrupt');
 const INTERRUPT_FALLBACK_RESYNC =
-  '⏹ Текущий ход остановлен человеком. Не продолжай и не повторяй прежнее действие. Остановись и дождись дальнейших указаний.';
+  '⏹ The user interrupted you. Stop the current action. Do not continue or repeat it. Recognize that you may be out of sync and ask what went wrong or what they want instead.';
 const IPC_POLL_MS = 500;
 
 /**
