@@ -62,6 +62,12 @@ interface SDKUserMessage {
 
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
+// FED-38: host-side `/stop` drops this sentinel to interrupt an in-flight run.
+// Unlike `_close` (graceful, ends the input stream at the next turn boundary),
+// this triggers `query.interrupt()` mid-turn — aborting the current tool call
+// and halting the loop immediately while keeping the SDK session resumable. The
+// file body, when non-empty, is the re-sync message to run as the next turn.
+const IPC_INPUT_INTERRUPT_SENTINEL = path.join(IPC_INPUT_DIR, '_interrupt');
 const IPC_POLL_MS = 500;
 
 /**
@@ -385,6 +391,28 @@ function shouldClose(): boolean {
 }
 
 /**
+ * FED-38: consume the `_interrupt` sentinel dropped by host-side `/stop`.
+ * Returns the sentinel body (the re-sync message to run next, possibly empty)
+ * when present, or null when no interrupt is pending. Always removes the file
+ * so the same sentinel can't fire twice.
+ */
+function consumeInterrupt(): string | null {
+  if (!fs.existsSync(IPC_INPUT_INTERRUPT_SENTINEL)) return null;
+  let body = '';
+  try {
+    body = fs.readFileSync(IPC_INPUT_INTERRUPT_SENTINEL, 'utf-8');
+  } catch {
+    /* ignore — treat as an empty-body interrupt */
+  }
+  try {
+    fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL);
+  } catch {
+    /* ignore */
+  }
+  return body;
+}
+
+/**
  * Drain all pending IPC input messages.
  * Returns messages found, or empty array.
  */
@@ -434,6 +462,11 @@ function waitForIpcMessage(): Promise<string | null> {
         resolve(null);
         return;
       }
+      // FED-38: a `_interrupt` that lands between turns has nothing in-flight
+      // to interrupt — discard it so it can't fire against an unrelated future
+      // turn. The host only writes it while a run is genuinely busy, so this is
+      // just belt-and-suspenders against a race with the turn boundary.
+      consumeInterrupt();
       const messages = drainIpcInput();
       if (messages.length > 0) {
         resolve(messages.join('\n'));
@@ -462,13 +495,20 @@ async function runQuery(
   newSessionId?: string;
   lastAssistantUuid?: string;
   closedDuringQuery: boolean;
+  interrupted: boolean;
+  resyncText?: string;
 }> {
   const stream = new MessageStream();
   stream.push(prompt);
 
-  // Poll IPC for follow-up messages and _close sentinel during the query
+  // Poll IPC for follow-up messages, the _close sentinel, and the _interrupt
+  // sentinel during the query. `agentQuery` (the Query handle) is created below
+  // once the SDK options are assembled; the poller only dereferences it after
+  // the first IPC_POLL_MS tick, by which point synchronous setup has run.
   let ipcPolling = true;
   let closedDuringQuery = false;
+  let interrupted = false;
+  let resyncText: string | undefined;
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
     if (shouldClose()) {
@@ -476,6 +516,23 @@ async function runQuery(
       closedDuringQuery = true;
       stream.end();
       ipcPolling = false;
+      return;
+    }
+    const interruptBody = consumeInterrupt();
+    if (interruptBody !== null) {
+      log('Interrupt sentinel detected during query, interrupting agent');
+      interrupted = true;
+      resyncText = interruptBody;
+      ipcPolling = false;
+      // interrupt() resolves the query generator, so the for-await below exits
+      // cleanly. Fire-and-log: a failed interrupt must not crash the runner.
+      void agentQuery
+        .interrupt()
+        .catch((err) =>
+          log(
+            `interrupt() failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
       return;
     }
     const messages = drainIpcInput();
@@ -515,7 +572,11 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
-  for await (const message of query({
+  // FED-38: the Query handle exposes interrupt() (a streaming-mode control
+  // request) — the SDK's Ctrl+C primitive. It aborts the in-flight tool call
+  // (killing bash children / fetch / MCP requests) and returns control while
+  // leaving the on-disk session coherent and resumable, unlike a hard kill.
+  const agentQuery = query({
     prompt: stream,
     options: {
       // Keep the [1m] suffix on whatever model runs here: it is how the Agent
@@ -577,7 +638,9 @@ async function runQuery(
         Stop: [{ hooks: [createAutoClearEyeHook(containerInput)] }],
       },
     },
-  })) {
+  });
+
+  for await (const message of agentQuery) {
     handleQueryMessage(
       message as { type: string } & Record<string, unknown>,
       state,
@@ -590,12 +653,14 @@ async function runQuery(
 
   ipcPolling = false;
   log(
-    `Query done. Messages: ${state.messageCount}, results: ${state.resultCount}, lastAssistantUuid: ${state.lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
+    `Query done. Messages: ${state.messageCount}, results: ${state.resultCount}, lastAssistantUuid: ${state.lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, interrupted: ${interrupted}`,
   );
   return {
     newSessionId: state.newSessionId,
     lastAssistantUuid: state.lastAssistantUuid,
     closedDuringQuery,
+    interrupted,
+    resyncText,
   };
 }
 
@@ -689,9 +754,14 @@ async function main(): Promise<void> {
   let sessionId = containerInput.sessionId;
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
 
-  // Clean up stale _close sentinel from previous container runs
+  // Clean up stale _close / _interrupt sentinels from previous container runs
   try {
     fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL);
+  } catch {
+    /* ignore */
+  }
+  try {
+    fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL);
   } catch {
     /* ignore */
   }
@@ -758,6 +828,20 @@ async function main(): Promise<void> {
       if (queryResult.closedDuringQuery) {
         log('Close sentinel consumed during query, exiting');
         break;
+      }
+
+      // FED-38: host `/stop` interrupted the in-flight run. The session is kept
+      // (resume: sessionId, above) — we do NOT reset. If the host supplied a
+      // re-sync message, run it right away as the next turn on the same
+      // session; otherwise fall through and wait for the user like any turn end.
+      if (queryResult.interrupted) {
+        const resync = queryResult.resyncText?.trim();
+        if (resync) {
+          log('Interrupted with re-sync text, starting new query immediately');
+          prompt = queryResult.resyncText!;
+          continue;
+        }
+        log('Interrupted with no re-sync text, waiting for next IPC message');
       }
 
       log('Query ended, waiting for next IPC message...');

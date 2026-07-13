@@ -134,6 +134,16 @@ const respawnHistory: Record<string, number[]> = {};
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
+// FED-38: persona-neutral re-sync message injected after a `/stop`. The agent
+// reads it as ordinary human input in its own voice — no bot-specific wording,
+// so it reads identically for every assistant (Unic, Chef, …). Kept as the
+// sentinel body handed to the container, which runs it as the next turn on the
+// (preserved) session.
+const STOP_RESYNC_MESSAGE =
+  '⏹ Тебя перебил человек. То, что ты сейчас делаешь — не то, что от него ' +
+  'ожидается. Остановись, не продолжай и не повторяй прежнее действие. ' +
+  'Осознай рассинхрон и спроси, что не так.';
+
 function recordOutgoing(
   jid: string,
   messageId: string | undefined,
@@ -763,6 +773,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 }
 
+/**
+ * FED-38: interrupt a group's in-flight run (Telegram `/stop`) WITHOUT touching
+ * session state. This is a deliberately separate path from resetGroupSession /
+ * `/new`: it never clears `sessions`, never deletes the SDK JSONL or the DB
+ * row, and never queues a reset — the container's `query.interrupt()` aborts
+ * the current tool call and the kept session resumes on the injected re-sync
+ * message. Returns the queue's outcome for the caller to relay to the user.
+ */
+function stopGroupRun(folder: string): 'interrupted' | 'idle' | 'none' {
+  const found = findGroupByFolder(folder);
+  if (!found) return 'none';
+  return queue.interruptActiveRun(found.chatJid, STOP_RESYNC_MESSAGE);
+}
+
 function resetGroupSession(folder: string, mode: ResetMode): void {
   resetGroupSessionImpl(folder, mode, {
     clearInMemorySession: (f) => {
@@ -1271,6 +1295,8 @@ async function main(): Promise<void> {
     // forget: the handler doesn't await respawn scheduling.
     resetGroupSession: (folder: string, mode: ResetMode) =>
       void resetGroupSessionWithRespawn(folder, mode),
+    // FED-38: `/stop` — interrupt the in-flight run, keep the session.
+    stopGroupRun: (folder: string) => stopGroupRun(folder),
   };
 
   // Create and connect all registered channels.
