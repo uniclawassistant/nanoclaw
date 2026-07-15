@@ -101,6 +101,7 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSessionCleanup } from './session-cleanup.js';
+import { SessionInvalidationFence } from './session-invalidation.js';
 import { pokeScheduler, startSchedulerLoop } from './task-scheduler.js';
 import {
   Channel,
@@ -130,6 +131,7 @@ const pendingResets: Record<string, ResetMode> = {};
 // loop). Per-group respawn timestamps feed the circuit breaker.
 const sessionStartedAt: Record<string, number> = {};
 const respawnHistory: Record<string, number[]> = {};
+const sessionInvalidationFence = new SessionInvalidationFence();
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -790,6 +792,7 @@ function stopGroupRun(folder: string): 'interrupted' | 'idle' | 'none' {
 function resetGroupSession(folder: string, mode: ResetMode): void {
   resetGroupSessionImpl(folder, mode, {
     clearInMemorySession: (f) => {
+      sessionInvalidationFence.invalidate(sessions[f]);
       delete sessions[f];
       delete sessionStartedAt[f];
     },
@@ -804,6 +807,13 @@ function resetGroupSession(folder: string, mode: ResetMode): void {
  * can tell a just-woken session from one that has done real work.
  */
 function rememberSession(folder: string, sessionId: string): void {
+  if (!sessionInvalidationFence.canPersist(sessionId)) {
+    logger.info(
+      { folder, sessionId },
+      'Ignoring late persistence of session invalidated by reset',
+    );
+    return;
+  }
   if (!sessions[folder]) sessionStartedAt[folder] = Date.now();
   sessions[folder] = sessionId;
   setSession(folder, sessionId);
