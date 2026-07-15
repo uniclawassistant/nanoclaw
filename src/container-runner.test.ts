@@ -10,6 +10,7 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 vi.mock('./config.js', () => ({
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
+  CONTAINER_NAME_PREFIX: 'nanoclaw-unic--',
   CONTAINER_TIMEOUT: 1800000, // 30min
   CREDENTIAL_PROXY_PORT: 3001,
   DATA_DIR: '/tmp/nanoclaw-test-data',
@@ -356,19 +357,21 @@ describe('containerNamePrefix', () => {
     // FED-21 hotfix root cause: spawn uses sanitized name, /new used the raw
     // folder. With this folder the two diverged and /new silently missed.
     expect(containerNamePrefix('telegram_fedor-unic-test')).toBe(
-      'nanoclaw-telegram-fedor-unic-test-',
+      'nanoclaw-unic--telegram-fedor-unic-test-',
     );
   });
 
   it('passes through dash-only folder names unchanged', async () => {
     const { containerNamePrefix } = await import('./container-runner.js');
-    expect(containerNamePrefix('main')).toBe('nanoclaw-main-');
-    expect(containerNamePrefix('test-group')).toBe('nanoclaw-test-group-');
+    expect(containerNamePrefix('main')).toBe('nanoclaw-unic--main-');
+    expect(containerNamePrefix('test-group')).toBe(
+      'nanoclaw-unic--test-group-',
+    );
   });
 
   it('strips other special chars (defensive — folder validation lives elsewhere)', async () => {
     const { containerNamePrefix } = await import('./container-runner.js');
-    expect(containerNamePrefix('a.b/c_d')).toBe('nanoclaw-a-b-c-d-');
+    expect(containerNamePrefix('a.b/c_d')).toBe('nanoclaw-unic--a-b-c-d-');
   });
 });
 

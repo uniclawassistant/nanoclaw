@@ -7,7 +7,7 @@ import { resetGroupSession } from './session-reset.js';
 // instead of pulling in the full module. The mock mirrors the real sanitizer.
 vi.mock('./container-runner.js', () => ({
   containerNamePrefix: (folder: string) =>
-    `nanoclaw-${folder.replace(/[^a-zA-Z0-9-]/g, '-')}-`,
+    `nanoclaw-unic--${folder.replace(/[^a-zA-Z0-9-]/g, '-')}-`,
 }));
 
 vi.mock('./config.js', () => ({
@@ -33,8 +33,9 @@ describe('resetGroupSession', () => {
     // The container list intentionally includes a non-matching line and the
     // real (sanitized) name to prove the prefix match works for underscores.
     const containerListing =
-      'nanoclaw-other-group-1700000000000  nanoclaw-agent:latest  running\n' +
-      'nanoclaw-telegram-fedor-test-1777936420362  nanoclaw-agent-unic:latest  running\n';
+      'nanoclaw-unic--other-group-1700000000000  nanoclaw-agent-unic:latest  running\n' +
+      'nanoclaw-chef--telegram-fedor-test-1777936420361  nanoclaw-agent-chef:latest  running\n' +
+      'nanoclaw-unic--telegram-fedor-test-1777936420362  nanoclaw-agent-unic:latest  running\n';
     const exec = vi.fn((cmd: string) =>
       cmd.includes('container list') ? containerListing : '',
     );
@@ -53,9 +54,12 @@ describe('resetGroupSession', () => {
     );
     expect(stopCalls).toHaveLength(1);
     expect(String(stopCalls[0]![0])).toContain(
-      'nanoclaw-telegram-fedor-test-1777936420362',
+      'nanoclaw-unic--telegram-fedor-test-1777936420362',
     );
-    expect(String(stopCalls[0]![0])).not.toContain('nanoclaw-other-group-');
+    expect(String(stopCalls[0]![0])).not.toContain(
+      'nanoclaw-unic--other-group-',
+    );
+    expect(String(stopCalls[0]![0])).not.toContain('nanoclaw-chef--');
 
     expect(clearInMemorySession).toHaveBeenCalledWith('telegram_fedor-test');
     expect(deleteDbSession).toHaveBeenCalledWith('telegram_fedor-test');
@@ -87,7 +91,7 @@ describe('resetGroupSession', () => {
 
   it("mode='restart' stops the container but preserves session state", () => {
     const containerListing =
-      'nanoclaw-main-1777936420362  nanoclaw-agent:latest  running\n';
+      'nanoclaw-unic--main-1777936420362  nanoclaw-agent-unic:latest  running\n';
     const exec = vi.fn((cmd: string) =>
       cmd.includes('container list') ? containerListing : '',
     );

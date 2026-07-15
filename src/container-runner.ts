@@ -9,6 +9,7 @@ import path from 'path';
 import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
+  CONTAINER_NAME_PREFIX,
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
@@ -386,14 +387,13 @@ function buildContainerArgs(
  * Map a group folder to the prefix that container names actually use. Apple
  * Container only accepts `[a-zA-Z0-9-]` in container names, so underscores in
  * the folder become dashes (e.g. `telegram_fedor-unic-test` → prefix
- * `nanoclaw-telegram-fedor-unic-test-`). Anything that wants to find a
- * group's container by name MUST go through here, otherwise the match silently
- * misses on any folder with an underscore — the FED-21 /new bug was exactly
- * this divergence between spawn-time naming and shutdown-time matching.
+ * `nanoclaw-unic--telegram-fedor-unic-test-` when the instance namespace is
+ * `unic`). Anything that wants to find a group's container by name MUST go
+ * through here, otherwise reset and cleanup can target the wrong container.
  */
 export function containerNamePrefix(groupFolder: string): string {
   const safeName = groupFolder.replace(/[^a-zA-Z0-9-]/g, '-');
-  return `nanoclaw-${safeName}-`;
+  return `${CONTAINER_NAME_PREFIX}${safeName}-`;
 }
 
 export async function runContainerAgent(

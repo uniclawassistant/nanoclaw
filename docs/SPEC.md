@@ -355,15 +355,20 @@ export const TRIGGER_PATTERN = new RegExp(`^@${ASSISTANT_NAME}\\b`, 'i');
 
 **Note:** Paths must be absolute for container volume mounts to work correctly.
 
-### Per-bot image tags
+### Per-bot image tags and container namespaces
 
 When you run multiple NanoClaw instances on the same host (e.g. one bot per
 fork branch with different Dockerfiles), each instance must build and run
 its own image — otherwise the shared `nanoclaw-agent:latest` tag flip-flops
 between definitions and whichever rebuild ran last wins.
 
-Set `CONTAINER_IMAGE` per bot in the launchd plist (`EnvironmentVariables`)
-or systemd unit (`Environment=`):
+Each instance sharing a container runtime must also have a unique
+`CONTAINER_NAMESPACE`. Container creation, startup orphan cleanup, and
+session reset are scoped to `nanoclaw-{namespace}--*`, so restarting one bot
+cannot stop another bot's active containers.
+
+Set both values per bot in the launchd plist (`EnvironmentVariables`) or
+systemd unit (`Environment=`):
 
 ```xml
 <!-- ~/Library/LaunchAgents/com.nanoclaw-unic.plist -->
@@ -371,12 +376,15 @@ or systemd unit (`Environment=`):
 <dict>
   <key>CONTAINER_IMAGE</key>
   <string>nanoclaw-agent-unic:latest</string>
+  <key>CONTAINER_NAMESPACE</key>
+  <string>unic</string>
 </dict>
 ```
 
-`container/build.sh` reads the same env var, so `CONTAINER_IMAGE=… ./container/build.sh`
-builds the right tag automatically. Single-bot installs keep working unchanged
-on the legacy `nanoclaw-agent:latest` default.
+`container/build.sh` reads the image env var, so `CONTAINER_IMAGE=… ./container/build.sh`
+builds the right tag automatically. Namespace values must be 1–32 lowercase
+letters, digits, or non-consecutive hyphens. Single-bot installs keep working
+unchanged when `CONTAINER_NAMESPACE` is omitted.
 
 ### Container Configuration
 

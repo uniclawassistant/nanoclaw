@@ -5,6 +5,7 @@
 import { execSync } from 'child_process';
 import os from 'os';
 
+import { CONTAINER_NAME_PREFIX } from './config.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
@@ -132,7 +133,7 @@ export function ensureContainerRuntimeRunning(): void {
   }
 }
 
-/** Kill orphaned NanoClaw containers from previous runs. */
+/** Kill orphaned containers owned by this NanoClaw instance. */
 export function cleanupOrphans(): void {
   try {
     const output = execSync(`${CONTAINER_RUNTIME_BIN} ls --format json`, {
@@ -145,7 +146,7 @@ export function cleanupOrphans(): void {
       .filter(
         (c) =>
           c.status === 'running' &&
-          c.configuration.id.startsWith('nanoclaw-') &&
+          c.configuration.id.startsWith(CONTAINER_NAME_PREFIX) &&
           c.configuration.id !== NETWORK_KEEPALIVE_NAME,
       )
       .map((c) => c.configuration.id);

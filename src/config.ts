@@ -10,6 +10,7 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'ONECLI_URL',
   'TZ',
+  'CONTAINER_NAMESPACE',
 ]);
 
 export const ASSISTANT_NAME =
@@ -43,6 +44,22 @@ export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
+
+const rawContainerNamespace =
+  process.env.CONTAINER_NAMESPACE || envConfig.CONTAINER_NAMESPACE || '';
+if (
+  rawContainerNamespace &&
+  (!/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(rawContainerNamespace) ||
+    rawContainerNamespace.includes('--'))
+) {
+  throw new Error(
+    'CONTAINER_NAMESPACE must be 1-32 lowercase letters, digits, or single hyphens',
+  );
+}
+export const CONTAINER_NAMESPACE = rawContainerNamespace;
+export const CONTAINER_NAME_PREFIX = CONTAINER_NAMESPACE
+  ? `nanoclaw-${CONTAINER_NAMESPACE}--`
+  : 'nanoclaw-';
 export const CONTAINER_TIMEOUT = parseInt(
   process.env.CONTAINER_TIMEOUT || '1800000',
   10,

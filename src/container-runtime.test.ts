@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock logger
+vi.mock('./config.js', () => ({
+  CONTAINER_NAME_PREFIX: 'nanoclaw-unic--',
+}));
+
 vi.mock('./logger.js', () => ({
   logger: {
     debug: vi.fn(),
@@ -117,9 +121,26 @@ describe('cleanupOrphans', () => {
   it('stops orphaned nanoclaw containers from JSON output', () => {
     // Apple Container ls returns JSON
     const lsOutput = JSON.stringify([
-      { status: 'running', configuration: { id: 'nanoclaw-group1-111' } },
-      { status: 'stopped', configuration: { id: 'nanoclaw-group2-222' } },
-      { status: 'running', configuration: { id: 'nanoclaw-group3-333' } },
+      {
+        status: 'running',
+        configuration: { id: 'nanoclaw-unic--group1-111' },
+      },
+      {
+        status: 'stopped',
+        configuration: { id: 'nanoclaw-unic--group2-222' },
+      },
+      {
+        status: 'running',
+        configuration: { id: 'nanoclaw-unic--group3-333' },
+      },
+      {
+        status: 'running',
+        configuration: { id: 'nanoclaw-chef--group1-111' },
+      },
+      {
+        status: 'running',
+        configuration: { id: 'nanoclaw-unic-extra--group1-111' },
+      },
       { status: 'running', configuration: { id: 'other-container' } },
     ]);
     mockExecSync.mockReturnValueOnce(lsOutput);
@@ -128,20 +149,23 @@ describe('cleanupOrphans', () => {
 
     cleanupOrphans();
 
-    // ls + 2 stop calls (only running nanoclaw- containers)
+    // ls + 2 stop calls (only this instance's running containers)
     expect(mockExecSync).toHaveBeenCalledTimes(3);
     expect(mockExecSync).toHaveBeenNthCalledWith(
       2,
-      `${CONTAINER_RUNTIME_BIN} stop nanoclaw-group1-111`,
+      `${CONTAINER_RUNTIME_BIN} stop nanoclaw-unic--group1-111`,
       { stdio: 'pipe' },
     );
     expect(mockExecSync).toHaveBeenNthCalledWith(
       3,
-      `${CONTAINER_RUNTIME_BIN} stop nanoclaw-group3-333`,
+      `${CONTAINER_RUNTIME_BIN} stop nanoclaw-unic--group3-333`,
       { stdio: 'pipe' },
     );
     expect(logger.info).toHaveBeenCalledWith(
-      { count: 2, names: ['nanoclaw-group1-111', 'nanoclaw-group3-333'] },
+      {
+        count: 2,
+        names: ['nanoclaw-unic--group1-111', 'nanoclaw-unic--group3-333'],
+      },
       'Stopped orphaned containers',
     );
   });
@@ -170,8 +194,8 @@ describe('cleanupOrphans', () => {
 
   it('continues stopping remaining containers when one stop fails', () => {
     const lsOutput = JSON.stringify([
-      { status: 'running', configuration: { id: 'nanoclaw-a-1' } },
-      { status: 'running', configuration: { id: 'nanoclaw-b-2' } },
+      { status: 'running', configuration: { id: 'nanoclaw-unic--a-1' } },
+      { status: 'running', configuration: { id: 'nanoclaw-unic--b-2' } },
     ]);
     mockExecSync.mockReturnValueOnce(lsOutput);
     // First stop fails
@@ -185,7 +209,7 @@ describe('cleanupOrphans', () => {
 
     expect(mockExecSync).toHaveBeenCalledTimes(3);
     expect(logger.info).toHaveBeenCalledWith(
-      { count: 2, names: ['nanoclaw-a-1', 'nanoclaw-b-2'] },
+      { count: 2, names: ['nanoclaw-unic--a-1', 'nanoclaw-unic--b-2'] },
       'Stopped orphaned containers',
     );
   });
