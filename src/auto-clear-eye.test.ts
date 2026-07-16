@@ -12,108 +12,82 @@ function makeChannel(overrides: Partial<Channel> = {}): Channel {
     ownsJid: (jid) => jid.startsWith('tg:'),
     disconnect: vi.fn(),
     setReaction: vi.fn(),
-    getCachedReaction: vi.fn(() => undefined),
+    getCachedEyeMessageIds: vi.fn(() => []),
     ...overrides,
   };
 }
 
 describe('autoClearEyeIfSet', () => {
-  it('clears reaction when cache shows 👀', async () => {
+  it('clears the 👀 on every message the cache reports', async () => {
     const setReaction = vi.fn();
     const channel = makeChannel({
       setReaction,
-      getCachedReaction: () => '👀',
+      getCachedEyeMessageIds: () => ['msg-1', 'msg-2'],
     });
 
-    const cleared = await autoClearEyeIfSet(channel, () => 'msg-42', 'tg:123');
+    const cleared = await autoClearEyeIfSet(channel, 'tg:123');
 
-    expect(cleared).toBe(true);
-    expect(setReaction).toHaveBeenCalledWith('tg:123', 'msg-42', null);
+    expect(cleared).toBe(2);
+    expect(setReaction).toHaveBeenCalledWith('tg:123', 'msg-1', null);
+    expect(setReaction).toHaveBeenCalledWith('tg:123', 'msg-2', null);
   });
 
-  it('skips when cache shows a different emoji', async () => {
+  it('does nothing when no 👀 is cached', async () => {
     const setReaction = vi.fn();
     const channel = makeChannel({
       setReaction,
-      getCachedReaction: () => '👌',
+      getCachedEyeMessageIds: () => [],
     });
 
-    const cleared = await autoClearEyeIfSet(channel, () => 'msg-42', 'tg:123');
+    const cleared = await autoClearEyeIfSet(channel, 'tg:123');
 
-    expect(cleared).toBe(false);
+    expect(cleared).toBe(0);
     expect(setReaction).not.toHaveBeenCalled();
   });
 
-  it('skips when cache shows null (previously cleared)', async () => {
-    const setReaction = vi.fn();
+  it('continues clearing after one message fails', async () => {
+    const setReaction = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('telegram 400'))
+      .mockResolvedValueOnce(undefined);
     const channel = makeChannel({
       setReaction,
-      getCachedReaction: () => null,
+      getCachedEyeMessageIds: () => ['bad', 'good'],
     });
 
-    const cleared = await autoClearEyeIfSet(channel, () => 'msg-42', 'tg:123');
+    const cleared = await autoClearEyeIfSet(channel, 'tg:123');
 
-    expect(cleared).toBe(false);
-    expect(setReaction).not.toHaveBeenCalled();
+    expect(cleared).toBe(1);
+    expect(setReaction).toHaveBeenCalledWith('tg:123', 'good', null);
   });
 
-  it('skips when cache is undefined (no state recorded)', async () => {
-    const setReaction = vi.fn();
-    const channel = makeChannel({
-      setReaction,
-      getCachedReaction: () => undefined,
-    });
-
-    const cleared = await autoClearEyeIfSet(channel, () => 'msg-42', 'tg:123');
-
-    expect(cleared).toBe(false);
-    expect(setReaction).not.toHaveBeenCalled();
-  });
-
-  it('skips when there is no recent user message', async () => {
-    const setReaction = vi.fn();
-    const channel = makeChannel({
-      setReaction,
-      getCachedReaction: () => '👀',
-    });
-
-    const cleared = await autoClearEyeIfSet(channel, () => null, 'tg:123');
-
-    expect(cleared).toBe(false);
-    expect(setReaction).not.toHaveBeenCalled();
-  });
-
-  it('skips when channel lacks setReaction', async () => {
+  it('returns 0 when channel lacks setReaction', async () => {
     const channel = makeChannel({
       setReaction: undefined,
-      getCachedReaction: () => '👀',
+      getCachedEyeMessageIds: () => ['msg-1'],
     });
 
-    const cleared = await autoClearEyeIfSet(channel, () => 'msg-42', 'tg:123');
+    const cleared = await autoClearEyeIfSet(channel, 'tg:123');
 
-    expect(cleared).toBe(false);
+    expect(cleared).toBe(0);
   });
 
-  it('skips when channel lacks getCachedReaction', async () => {
+  it('returns 0 when channel lacks getCachedEyeMessageIds', async () => {
     const setReaction = vi.fn();
     const channel = makeChannel({
       setReaction,
-      getCachedReaction: undefined,
+      getCachedEyeMessageIds: undefined,
     });
 
-    const cleared = await autoClearEyeIfSet(channel, () => 'msg-42', 'tg:123');
+    const cleared = await autoClearEyeIfSet(channel, 'tg:123');
 
-    expect(cleared).toBe(false);
+    expect(cleared).toBe(0);
     expect(setReaction).not.toHaveBeenCalled();
   });
 
-  it('returns false when channel is undefined', async () => {
-    const cleared = await autoClearEyeIfSet(
-      undefined,
-      () => 'msg-42',
-      'tg:123',
-    );
+  it('returns 0 when channel is undefined', async () => {
+    const cleared = await autoClearEyeIfSet(undefined, 'tg:123');
 
-    expect(cleared).toBe(false);
+    expect(cleared).toBe(0);
   });
 });

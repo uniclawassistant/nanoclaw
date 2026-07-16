@@ -1157,6 +1157,11 @@ async function startMessageLoop(): Promise<void> {
           );
           const piped = usageLine ? `${usageLine}\n${formatted}` : formatted;
 
+          // FED-40: only a pipe into an idle container starts a NEW turn; a pipe
+          // into a busy one is a mid-turn arrival. Capture this before
+          // sendMessage flips the idle flag, so we can keep the turn trigger
+          // stable across mid-turn arrivals (below).
+          const startsNewTurn = queue.isIdleWaiting(chatJid);
           if (queue.sendMessage(chatJid, piped)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
@@ -1166,14 +1171,20 @@ async function startMessageLoop(): Promise<void> {
             // turns never call beginTurn, so without this the turn's
             // triggerMessageId stays frozen at the cold-spawn message and react()
             // without an explicit message_id binds to the wrong (spawn) message.
-            const refreshedTrigger = resolveTriggerMessageId(
-              messagesToSend,
-              group,
-              chatJid,
-              isMainGroup,
-            );
-            if (refreshedTrigger) {
-              updateTurnTrigger(chatJid, refreshedTrigger);
+            // FED-40: only refresh at a turn boundary (a pipe that starts a new
+            // turn). Refreshing on a mid-turn arrival would drift the trigger onto
+            // a message the agent isn't answering, breaking react()'s documented
+            // "stable for the whole turn" contract.
+            if (startsNewTurn) {
+              const refreshedTrigger = resolveTriggerMessageId(
+                messagesToSend,
+                group,
+                chatJid,
+                isMainGroup,
+              );
+              if (refreshedTrigger) {
+                updateTurnTrigger(chatJid, refreshedTrigger);
+              }
             }
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
@@ -1428,18 +1439,17 @@ async function main(): Promise<void> {
     },
     autoClearEyeReaction: async (jid) => {
       const channel = findChannel(channels, jid);
-      // FED-37: clear the 👀 from the message react() set it on — the active
-      // turn's trigger message — not "latest incoming at exec time". The 👀 is
-      // cached per message_id, so resolving to a newer message here would miss
-      // the cached marker and leave it orphaned. Falls back to the last user
-      // message only when no turn is active.
-      const cleared = await autoClearEyeIfSet(
-        channel,
-        (j) => getActiveTurn(j)?.triggerMessageId ?? getLastUserMessageId(j),
-        jid,
-      );
-      if (cleared) {
-        logger.info({ jid }, 'Auto-cleared 👀 reaction on turn end');
+      // FED-40: clear every 👀 working marker set in this chat, reading the
+      // target messages straight from the channel's reaction cache. Clearing
+      // where the 👀 was actually set — not a re-resolved turn-end target —
+      // survives trigger drift when messages arrive mid-turn, which previously
+      // left the 👀 orphaned. Non-👀 done-signals (👌 …) are left as-is.
+      const cleared = await autoClearEyeIfSet(channel, jid);
+      if (cleared > 0) {
+        logger.info(
+          { jid, cleared },
+          'Auto-cleared 👀 reaction(s) on turn end',
+        );
       }
     },
     registeredGroups: () => registeredGroups,

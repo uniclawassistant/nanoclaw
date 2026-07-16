@@ -1890,6 +1890,48 @@ describe('TelegramChannel', () => {
       expect(channel.getCachedReaction('tg:999', '42')).toBeUndefined();
     });
   });
+
+  // --- getCachedEyeMessageIds (FED-40) ---
+
+  describe('getCachedEyeMessageIds', () => {
+    it('returns an empty array when nothing is cached', () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      expect(channel.getCachedEyeMessageIds('tg:100200300')).toEqual([]);
+    });
+
+    it('returns every message id currently holding a 👀', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      await channel.setReaction('tg:100200300', '42', '👀');
+      await channel.setReaction('tg:100200300', '43', '👀');
+
+      expect(channel.getCachedEyeMessageIds('tg:100200300').sort()).toEqual([
+        '42',
+        '43',
+      ]);
+    });
+
+    it('excludes non-👀 done-signals and cleared markers', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      await channel.setReaction('tg:100200300', '42', '👀');
+      await channel.setReaction('tg:100200300', '43', '👌');
+      await channel.setReaction('tg:100200300', '44', '👀');
+      await channel.setReaction('tg:100200300', '44', null);
+
+      expect(channel.getCachedEyeMessageIds('tg:100200300')).toEqual(['42']);
+    });
+
+    it('is scoped to the given jid', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      await channel.setReaction('tg:100200300', '42', '👀');
+      await channel.setReaction('tg:999', '77', '👀');
+
+      expect(channel.getCachedEyeMessageIds('tg:100200300')).toEqual(['42']);
+      expect(channel.getCachedEyeMessageIds('tg:999')).toEqual(['77']);
+    });
+  });
 });
 
 describe('formatTaskSchedule', () => {
