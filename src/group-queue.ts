@@ -162,6 +162,17 @@ export class GroupQueue {
   }
 
   /**
+   * FED-40: whether the group's container is idle between turns (finished its
+   * previous turn, waiting for input). A pipe into an idle container starts a
+   * new turn; a pipe into a busy one is a mid-turn arrival. Read this BEFORE
+   * sendMessage, which flips the flag to false. Returns false when no container
+   * exists yet.
+   */
+  isIdleWaiting(groupJid: string): boolean {
+    return this.groups.get(groupJid)?.idleWaiting ?? false;
+  }
+
+  /**
    * Send a follow-up message to the active container via IPC file.
    * Returns true if the message was written, false if no active container.
    */

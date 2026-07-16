@@ -157,6 +157,10 @@ export interface Channel {
   // Returns `undefined` if no state has been recorded (never set by this process),
   // `null` if explicitly cleared, or the emoji string if currently set.
   getCachedReaction?(jid: string, messageId: string): string | null | undefined;
+  // Optional: message ids in this chat that currently hold a cached 👀 working
+  // marker. The turn-end auto-clear reads these to clear the 👀 from wherever it
+  // was actually set, instead of re-resolving a single (possibly drifted) target.
+  getCachedEyeMessageIds?(jid: string): string[];
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
 }

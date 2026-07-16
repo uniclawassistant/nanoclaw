@@ -968,6 +968,17 @@ export class TelegramChannel implements Channel {
     return this.lastReactions.get(`${jid}:${messageId}`);
   }
 
+  getCachedEyeMessageIds(jid: string): string[] {
+    const prefix = `${jid}:`;
+    const ids: string[] = [];
+    for (const [key, value] of this.lastReactions) {
+      if (value === '👀' && key.startsWith(prefix)) {
+        ids.push(key.slice(prefix.length));
+      }
+    }
+    return ids;
+  }
+
   isConnected(): boolean {
     return this.bot !== null;
   }
