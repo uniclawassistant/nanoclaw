@@ -114,6 +114,16 @@ export function endTurn(jid: string): void {
   activeTurns.delete(jid);
 }
 
+// FED-39: refresh the active turn's trigger message for a piped follow-up turn.
+// Follow-up messages are piped into a live container without a fresh beginTurn,
+// so without this the turn's triggerMessageId stays frozen at the cold-spawn
+// message and react() without an explicit message_id (see setReaction) binds to
+// the wrong (spawn-time) message. No-op when no turn is active for the jid.
+export function updateTurnTrigger(jid: string, triggerMessageId: string): void {
+  const state = activeTurns.get(jid);
+  if (state) state.triggerMessageId = triggerMessageId;
+}
+
 export function getActiveTurn(jid: string): TurnState | undefined {
   return activeTurns.get(jid);
 }

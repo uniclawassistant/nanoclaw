@@ -80,6 +80,7 @@ import {
   getActiveTurn,
   recordOutbound,
   recordReaction,
+  updateTurnTrigger,
 } from './outbound-mismatch-hook.js';
 import {
   checkThreshold,
@@ -562,6 +563,36 @@ export function _setRegisteredGroups(
 }
 
 /**
+ * Resolve the message that triggered a turn from a batch of pending messages.
+ * For main / no-trigger groups it is the last message in the batch; for
+ * trigger-required groups it is the last trigger-matching message from an
+ * allowed sender (returns null when the batch has none). Shared by the
+ * cold-spawn path (processGroupMessages) and the piping path (startMessageLoop)
+ * so react() without an explicit message_id binds to the same message on both.
+ */
+export function resolveTriggerMessageId(
+  messages: NewMessage[],
+  group: RegisteredGroup,
+  chatJid: string,
+  isMainGroup: boolean,
+): string | null {
+  if (messages.length === 0) return null;
+  if (isMainGroup || group.requiresTrigger === false) {
+    return messages[messages.length - 1].id;
+  }
+  const triggerPattern = getTriggerPattern(group.trigger);
+  const allowlistCfg = loadSenderAllowlist();
+  const triggerMsg = [...messages]
+    .reverse()
+    .find(
+      (m) =>
+        triggerPattern.test(m.content.trim()) &&
+        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+    );
+  return triggerMsg ? triggerMsg.id : null;
+}
+
+/**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
  */
@@ -597,29 +628,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // FED-37: snapshot the message that triggered this turn. react() without an
   // explicit message_id binds to this id (see setReaction below), so a reaction
   // lands on the message that actually woke the agent — deterministically,
-  // independent of newer messages that arrive while the turn runs. Default: the
-  // last incoming message in the batch (DMs, main group, no-trigger groups).
-  // Trigger-required groups narrow it to the trigger-matching message below.
-  let triggerMessageId: string | null =
-    missedMessages.length > 0
-      ? missedMessages[missedMessages.length - 1].id
-      : null;
+  // independent of newer messages that arrive while the turn runs.
+  const triggerMessageId = resolveTriggerMessageId(
+    missedMessages,
+    group,
+    chatJid,
+    isMainGroup,
+  );
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
-    const triggerPattern = getTriggerPattern(group.trigger);
-    const allowlistCfg = loadSenderAllowlist();
-    // Last trigger-matching message from an allowed sender is what woke the
-    // agent; finding it also serves as the trigger-present gate.
-    const triggerMsg = [...missedMessages]
-      .reverse()
-      .find(
-        (m) =>
-          triggerPattern.test(m.content.trim()) &&
-          (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-      );
-    if (!triggerMsg) return true;
-    triggerMessageId = triggerMsg.id;
+  // For non-main trigger-required groups, a null result means no trigger-matching
+  // message from an allowed sender is present — nothing woke the agent, skip.
+  if (
+    !isMainGroup &&
+    group.requiresTrigger !== false &&
+    triggerMessageId === null
+  ) {
+    return true;
   }
 
   const usageLine = formatUsageLine(chatJid, sessions[group.folder] ?? null);
@@ -1138,6 +1162,19 @@ async function startMessageLoop(): Promise<void> {
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
             );
+            // FED-39: refresh the active turn's trigger message. Piped follow-up
+            // turns never call beginTurn, so without this the turn's
+            // triggerMessageId stays frozen at the cold-spawn message and react()
+            // without an explicit message_id binds to the wrong (spawn) message.
+            const refreshedTrigger = resolveTriggerMessageId(
+              messagesToSend,
+              group,
+              chatJid,
+              isMainGroup,
+            );
+            if (refreshedTrigger) {
+              updateTurnTrigger(chatJid, refreshedTrigger);
+            }
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
