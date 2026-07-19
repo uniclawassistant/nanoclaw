@@ -72,6 +72,11 @@ describe('formatMessages', () => {
     expect(result).toContain('Jan 1, 2024');
   });
 
+  it('exposes the message id so the agent can react on the exact message', () => {
+    const result = formatMessages([makeMsg({ id: '18134' })], TZ);
+    expect(result).toContain('id="18134"');
+  });
+
   it('formats multiple messages', () => {
     const msgs = [
       makeMsg({

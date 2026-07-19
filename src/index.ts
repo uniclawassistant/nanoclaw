@@ -53,7 +53,6 @@ import {
   getAllTasks,
   getLastBotMessageTimestamp,
   getLastIncomingThreadId,
-  getLastUserMessageId,
   getMessageById,
   getMessagesAroundTimestamp,
   getMessagesSince,
@@ -77,10 +76,8 @@ import {
   checkClassA,
   checkClassB,
   endTurn,
-  getActiveTurn,
   recordOutbound,
   recordReaction,
-  updateTurnTrigger,
 } from './outbound-mismatch-hook.js';
 import {
   checkThreshold,
@@ -625,23 +622,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const replyThreadId = missedMessages[missedMessages.length - 1].thread_id;
 
-  // FED-37: snapshot the message that triggered this turn. react() without an
-  // explicit message_id binds to this id (see setReaction below), so a reaction
-  // lands on the message that actually woke the agent — deterministically,
-  // independent of newer messages that arrive while the turn runs.
-  const triggerMessageId = resolveTriggerMessageId(
+  // For non-main trigger-required groups, resolve whether an allowed sender's
+  // trigger-matching message is present. A null result means nothing woke the
+  // agent — skip. (react() targets are chosen by the agent via an explicit
+  // message_id, so this is only a gate, not a reaction snapshot.)
+  const wakeTriggerId = resolveTriggerMessageId(
     missedMessages,
     group,
     chatJid,
     isMainGroup,
   );
-
-  // For non-main trigger-required groups, a null result means no trigger-matching
-  // message from an allowed sender is present — nothing woke the agent, skip.
   if (
     !isMainGroup &&
     group.requiresTrigger !== false &&
-    triggerMessageId === null
+    wakeTriggerId === null
   ) {
     return true;
   }
@@ -688,7 +682,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const turnState = beginTurn(chatJid, {
     groupName: group.name,
     isUserFacing: true,
-    triggerMessageId,
   });
   let rawAccumulated = '';
   let turnEndProcessed = false;
@@ -1157,35 +1150,11 @@ async function startMessageLoop(): Promise<void> {
           );
           const piped = usageLine ? `${usageLine}\n${formatted}` : formatted;
 
-          // FED-40: only a pipe into an idle container starts a NEW turn; a pipe
-          // into a busy one is a mid-turn arrival. Capture this before
-          // sendMessage flips the idle flag, so we can keep the turn trigger
-          // stable across mid-turn arrivals (below).
-          const startsNewTurn = queue.isIdleWaiting(chatJid);
           if (queue.sendMessage(chatJid, piped)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
             );
-            // FED-39: refresh the active turn's trigger message. Piped follow-up
-            // turns never call beginTurn, so without this the turn's
-            // triggerMessageId stays frozen at the cold-spawn message and react()
-            // without an explicit message_id binds to the wrong (spawn) message.
-            // FED-40: only refresh at a turn boundary (a pipe that starts a new
-            // turn). Refreshing on a mid-turn arrival would drift the trigger onto
-            // a message the agent isn't answering, breaking react()'s documented
-            // "stable for the whole turn" contract.
-            if (startsNewTurn) {
-              const refreshedTrigger = resolveTriggerMessageId(
-                messagesToSend,
-                group,
-                chatJid,
-                isMainGroup,
-              );
-              if (refreshedTrigger) {
-                updateTurnTrigger(chatJid, refreshedTrigger);
-              }
-            }
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
@@ -1416,26 +1385,19 @@ async function main(): Promise<void> {
       if (!channel.setReaction) {
         throw new Error('reactions not supported in this channel');
       }
-      let resolvedId = messageId;
-      if (!resolvedId) {
-        // FED-37: default to the message that triggered the active turn
-        // (snapshotted at turn start), not "latest incoming at exec time".
-        // getLastUserMessageId is the last-resort fallback only for out-of-band
-        // paths with no active turn (it re-reads the newest incoming row and so
-        // can drift onto a message that arrived mid-turn or from someone else).
-        resolvedId =
-          getActiveTurn(jid)?.triggerMessageId ?? getLastUserMessageId(jid);
-        if (!resolvedId) {
-          throw new Error('no recent user message to react to');
-        }
+      // The react tool requires an explicit message_id (the id="..." attribute
+      // of the target <message> in the agent's prompt). The agent picks the
+      // exact message, so there is no host-side trigger snapshot to fall back on.
+      if (!messageId) {
+        throw new Error('react requires an explicit message_id');
       }
-      await channel.setReaction(jid, resolvedId, emoji);
+      await channel.setReaction(jid, messageId, emoji);
       // FED-30: a terminal reaction (👌/🫡/💯…) is a legitimate reply to a
       // user-facing turn; record it so Class B silent-finish detection does not
       // mistake a react-only answer for a deadlock. A bare 👀 (working marker)
       // is recorded too but filtered out downstream (see turnAnsweredByReaction).
       recordReaction(jid, emoji);
-      return resolvedId;
+      return messageId;
     },
     autoClearEyeReaction: async (jid) => {
       const channel = findChannel(channels, jid);

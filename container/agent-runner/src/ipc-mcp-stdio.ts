@@ -566,21 +566,16 @@ RETURN (JSON in tool output):
 
 safeTool(
   'react',
-  `Set or clear an emoji reaction on a Telegram message. Useful as a lightweight signal that you've received a request and it's being processed (e.g. 👀 while working, 👌 when done), instead of sending a noisy chat message.
+  `Set or clear an emoji reaction on a specific Telegram message. Lightweight signal that you've received a request and are working on it (👀 while working, 👌 when done), instead of sending a noisy chat message.
 
 WHEN TO USE:
-• Task will take more than a couple of seconds — react with 👀 so the user sees you've picked it up.
+• Task will take more than a couple of seconds — react with 👀 on the message you're answering.
 • Replace with a different emoji to signal state changes (👀 → 👌 for done, 👀 → 💔 for failure, 👀 → 🤔 to ask for clarification).
 • Pass \`emoji: null\` (JSON null, or empty string "") to remove the reaction entirely when no follow-up signal is needed. Any other value is validated against the allowlist.
 
+TARGET MESSAGE: \`message_id\` is REQUIRED. Every incoming \`<message>\` in your prompt carries an \`id="..."\` attribute — pass the id of the exact message you want to react to. You choose the target deterministically; there is no host-side guessing. To set 👀 then later 👌 on the same message, pass the same id both times.
+
 DONE-EMOJI HINT: ✅ is NOT in the Telegram-bot-allowed list. For "done" use one of: 👌 (got it) / 🫡 (on it) / 💯 (solid) / ❤ (warm ack) / 🔥 (great).
-
-LIFECYCLE (important):
-• Use react within a single turn: \`react(👀)\` at the start, replace or \`react(null)\` before finishing the same response.
-• With no \`message_id\`, the reaction binds to the message that triggered THIS turn (snapshotted on the host at turn start). This is stable for the whole turn: a 👀 at the start and a 👌/null later both land on the same triggering message, even if new messages arrive while you work.
-• Persisting a marker ACROSS turns is different: each turn has its own trigger message, so to touch a reaction you set in an earlier turn you must pass its \`message_id\` explicitly (the tool returns it in the success response so you can persist it).
-
-GROUP CHATS: without \`message_id\` the reaction targets the trigger message that woke the agent this turn — not an arbitrary recent message. Pass \`message_id\` explicitly only to react to a different message.
 
 LIMITATIONS:
 • Telegram only. Other channels will return an error.
@@ -596,9 +591,8 @@ LIMITATIONS:
       ),
     message_id: z
       .string()
-      .optional()
       .describe(
-        'Telegram message_id to react to. Optional override — when omitted, defaults to the message that triggered the current turn (the one that woke the agent), in both DMs and group chats.',
+        'Telegram message_id to react to — the id="..." attribute of the target <message> in your prompt. Required.',
       ),
   },
   async (args) => {
@@ -613,17 +607,12 @@ LIMITATIONS:
       );
     }
 
-    // FED-37: no group-chat guard on a missing message_id anymore. The host
-    // defaults to the message that triggered this turn (snapshotted at turn
-    // start), which is deterministic in groups too — not the old "latest
-    // non-bot at exec time" fallback that could grab another participant's
-    // message. Pass message_id explicitly only to override that default.
     const requestId = crypto.randomUUID();
     const data: Record<string, string | null | undefined> = {
       type: 'reaction',
       chatJid,
       emoji,
-      message_id: args.message_id ?? null,
+      message_id: args.message_id,
       requestId,
       groupFolder,
       timestamp: new Date().toISOString(),

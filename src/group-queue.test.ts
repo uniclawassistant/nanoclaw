@@ -407,48 +407,6 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 
-  // FED-40: the piping path reads isIdleWaiting to decide whether a pipe starts
-  // a new turn (refresh the react() trigger) or is a mid-turn arrival (keep it
-  // stable). It must reflect the container lifecycle and be read BEFORE
-  // sendMessage flips the flag.
-  it('isIdleWaiting tracks the container turn lifecycle', async () => {
-    let resolveProcess: () => void;
-    const processMessages = vi.fn(async () => {
-      await new Promise<void>((resolve) => {
-        resolveProcess = resolve;
-      });
-      return true;
-    });
-
-    queue.setProcessMessagesFn(processMessages);
-
-    // No container yet.
-    expect(queue.isIdleWaiting('group1@g.us')).toBe(false);
-
-    queue.enqueueMessageCheck('group1@g.us');
-    await vi.advanceTimersByTimeAsync(10);
-    queue.registerProcess(
-      'group1@g.us',
-      {} as any,
-      'container-1',
-      'test-group',
-    );
-
-    // Container spawned and mid-turn — not idle.
-    expect(queue.isIdleWaiting('group1@g.us')).toBe(false);
-
-    // Turn ends → idle-waiting.
-    queue.notifyIdle('group1@g.us');
-    expect(queue.isIdleWaiting('group1@g.us')).toBe(true);
-
-    // A pipe starts a new turn and clears the idle flag.
-    queue.sendMessage('group1@g.us', 'hello');
-    expect(queue.isIdleWaiting('group1@g.us')).toBe(false);
-
-    resolveProcess!();
-    await vi.advanceTimersByTimeAsync(10);
-  });
-
   it('sendMessage returns false for task containers so user messages queue up', async () => {
     let resolveTask: () => void;
 
