@@ -536,6 +536,7 @@ export class TelegramChannel implements Channel {
       const replyTo = ctx.message.reply_to_message;
       const replyToMessageId = replyTo?.message_id?.toString();
       const replyToContent = replyTo?.text || replyTo?.caption;
+      const replyToQuotedText = ctx.message.quote?.text;
       const replyToSenderName = replyTo
         ? replyTo.from?.first_name ||
           replyTo.from?.username ||
@@ -612,6 +613,7 @@ export class TelegramChannel implements Channel {
         reply_to_message_id: replyToMessageId,
         reply_to_message_content: replyToContent,
         reply_to_sender_name: replyToSenderName,
+        reply_to_quoted_text: replyToQuotedText,
       });
 
       logger.info(

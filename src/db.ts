@@ -160,6 +160,15 @@ function createSchema(database: Database.Database): void {
     /* columns already exist */
   }
 
+  // Add quoted-fragment column separately: on DBs where the reply_to_* columns
+  // already exist, the block above throws on its first ALTER and never reaches
+  // this one, so it needs its own try/catch to run.
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN reply_to_quoted_text TEXT`);
+  } catch {
+    /* column already exists */
+  }
+
   // Add pull-based recall columns (get_message tool): per-message type,
   // attachment path, and feature-specific metadata like image-gen prompts.
   try {
@@ -361,7 +370,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name, message_type, file_path, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name, reply_to_quoted_text, message_type, file_path, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -374,6 +383,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.reply_to_message_id ?? null,
     msg.reply_to_message_content ?? null,
     msg.reply_to_sender_name ?? null,
+    msg.reply_to_quoted_text ?? null,
     msg.message_type ?? 'text',
     msg.file_path ?? null,
     msg.thread_id ?? null,
@@ -965,7 +975,7 @@ export function getNewMessages(
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
              reply_to_message_id, reply_to_message_content, reply_to_sender_name,
-             thread_id
+             reply_to_quoted_text, thread_id
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -1000,7 +1010,7 @@ export function getMessagesSince(
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
              reply_to_message_id, reply_to_message_content, reply_to_sender_name,
-             thread_id
+             reply_to_quoted_text, thread_id
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?
