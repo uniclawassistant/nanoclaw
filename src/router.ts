@@ -19,9 +19,12 @@ export function formatMessages(
     const replyAttr = m.reply_to_message_id
       ? ` reply_to="${escapeXml(m.reply_to_message_id)}"`
       : '';
+    const quotedAttr = m.reply_to_quoted_text
+      ? ` quoted="${escapeXml(m.reply_to_quoted_text)}"`
+      : '';
     const replySnippet =
       m.reply_to_message_content && m.reply_to_sender_name
-        ? `\n  <quoted_message from="${escapeXml(m.reply_to_sender_name)}">${escapeXml(m.reply_to_message_content)}</quoted_message>`
+        ? `\n  <quoted_message from="${escapeXml(m.reply_to_sender_name)}"${quotedAttr}>${escapeXml(m.reply_to_message_content)}</quoted_message>`
         : '';
     return `<message sender="${escapeXml(m.sender_name)}" time="${escapeXml(displayTime)}" id="${escapeXml(m.id)}"${replyAttr}>${replySnippet}${escapeXml(m.content)}</message>`;
   });

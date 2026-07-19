@@ -139,6 +139,38 @@ describe('formatMessages', () => {
     expect(result).toContain('Yes, on my way!</message>');
   });
 
+  it('renders the highlighted fragment as a quoted attribute, escaped', () => {
+    const result = formatMessages(
+      [
+        makeMsg({
+          content: 'That part specifically',
+          reply_to_message_id: '42',
+          reply_to_message_content: 'A long message with many "parts" & bits',
+          reply_to_sender_name: 'Bob',
+          reply_to_quoted_text: 'many "parts" & bits',
+        }),
+      ],
+      TZ,
+    );
+    expect(result).toContain(
+      '<quoted_message from="Bob" quoted="many &quot;parts&quot; &amp; bits">',
+    );
+  });
+
+  it('omits quoted attribute when no fragment was highlighted', () => {
+    const result = formatMessages(
+      [
+        makeMsg({
+          reply_to_message_id: '42',
+          reply_to_message_content: 'Are you coming tonight?',
+          reply_to_sender_name: 'Bob',
+        }),
+      ],
+      TZ,
+    );
+    expect(result).not.toContain('quoted=');
+  });
+
   it('omits reply attributes when no reply context', () => {
     const result = formatMessages([makeMsg()], TZ);
     expect(result).not.toContain('reply_to');

@@ -55,6 +55,7 @@ export interface NewMessage {
   reply_to_message_id?: string;
   reply_to_message_content?: string;
   reply_to_sender_name?: string;
+  reply_to_quoted_text?: string;
   // Optional media metadata — set by channels that deliver attachments.
   // Used by get_message to return attachment paths without parsing content.
   message_type?: 'text' | 'photo' | 'document' | 'voice' | 'video' | 'sticker';
