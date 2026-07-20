@@ -10,11 +10,11 @@ You are a host-side operator for NanoClaw-Unic. An agent inside the container tr
    ```
    If pull fails (merge conflict, etc.) — abort and write failure result.
 
-3. **Build host TypeScript** (the `node dist/index.js` process restarted in step 5 reads `dist/`, not `src/` — without this step host-side changes silently never run):
+3. **Install host deps + build host TypeScript** (the `node dist/index.js` process restarted in step 5 reads `dist/`, not `src/` — without the build step host-side changes silently never run. `npm install` picks up any new/updated dependency from the merged PR; it is a no-op when nothing changed. Note: a PR that adds a browser-backed dep such as `@mermaid-js/mermaid-cli` downloads Chromium here on first install, which can take up to a minute):
    ```bash
-   cd ~/nanoclaw-unic && npm run build 2>&1 | tail -20
+   cd ~/nanoclaw-unic && npm install 2>&1 | tail -10 && npm run build 2>&1 | tail -20
    ```
-   If build fails — read the error, try to fix. If unfixable — `git revert HEAD --no-edit && npm run build`.
+   If build fails — read the error, try to fix. If unfixable — `git revert HEAD --no-edit && npm install && npm run build`.
 
 4. **Build container:**
    ```bash

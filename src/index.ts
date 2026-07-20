@@ -85,6 +85,12 @@ import {
   recordUsage,
 } from './usage-tracker.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  cleanupMermaidPng,
+  mermaidEnabled,
+  renderMermaidOutbound,
+  renderMermaidToPng,
+} from './mermaid.js';
 import { editImage, generateImage } from './image-gen.js';
 import { buildVoiceDirective, synthesize } from './tts.js';
 import {
@@ -184,6 +190,29 @@ export async function sendText(
   threadId?: string,
   format?: MessageFormat,
 ): Promise<void> {
+  // Render ```mermaid fences to PNGs and ship them as photos, then send the
+  // remaining prose. A fence is only stripped from the text once its photo is
+  // confirmed sent — if the render or the send fails, the fence survives and
+  // degrades to a normal code block, so a diagram can never silently vanish.
+  if (channel.sendPhoto && mermaidEnabled() && text.includes('```mermaid')) {
+    const sendPhoto = channel.sendPhoto.bind(channel);
+    const { text: body } = await renderMermaidOutbound(text, {
+      render: renderMermaidToPng,
+      sendPhoto: (png) => sendPhoto(jid, png, undefined, threadId),
+      onPhotoSent: (messageId) =>
+        recordOutgoing(jid, messageId, {
+          content: '[Mermaid diagram]',
+          messageType: 'photo',
+        }),
+      cleanup: cleanupMermaidPng,
+    });
+    if (body) {
+      const msgId = await channel.sendMessage(jid, body, threadId, format);
+      recordOutgoing(jid, msgId, { content: body, messageType: 'text' });
+    }
+    return;
+  }
+
   const msgId = await channel.sendMessage(jid, text, threadId, format);
   recordOutgoing(jid, msgId, { content: text, messageType: 'text' });
 }
