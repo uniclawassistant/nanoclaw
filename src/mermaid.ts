@@ -3,9 +3,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { logger } from './logger.js';
 
-// Matches a fenced ```mermaid block and captures the diagram source. The info
+// Matches a top-level fenced ```mermaid block and captures the diagram source.
+// The opening and closing fences must each start a line (m flag + `^`), so an
+// inline ``` inside prose can't be mistaken for a fence boundary. The info
 // string may carry trailing spaces before the newline.
-const MERMAID_FENCE = /```mermaid[ \t]*\r?\n([\s\S]*?)```/g;
+const MERMAID_FENCE = /^```mermaid[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/gm;
 const RENDER_TIMEOUT_MS = 30_000;
 
 // Kill switch: rendering spawns a headless browser, so allow disabling it at
@@ -31,25 +33,27 @@ export function extractMermaidBlocks(text: string): MermaidBlock[] {
 // Renders one diagram to a PNG inside a fresh temp dir. Returns the PNG path on
 // success, or null on any failure (missing dependency, chromium launch error,
 // invalid diagram) so callers can fall back to leaving the fenced block as a
-// plain code block. mermaid-cli is imported dynamically so a missing/broken
-// install disables this feature instead of crashing the host at boot.
+// plain code block. Dependencies are imported dynamically so a missing/broken
+// install disables the feature instead of crashing the host at boot. The
+// browser is launched and closed here so a render timeout can't orphan a
+// chromium process — closing the browser in `finally` aborts an in-flight
+// render.
 export async function renderMermaidToPng(code: string): Promise<string | null> {
   let dir: string | undefined;
+  let browser: { close: () => Promise<void> } | undefined;
   try {
-    const { run } = await import('@mermaid-js/mermaid-cli');
-    dir = await mkdtemp(join(tmpdir(), 'mermaid-'));
-    const input = join(dir, 'diagram.mmd');
-    const output = join(dir, 'diagram.png');
-    await writeFile(input, code, 'utf8');
-    await withTimeout(
-      run(input, output as `${string}.png`, {
-        quiet: true,
-        outputFormat: 'png',
-        puppeteerConfig: { args: ['--no-sandbox'] },
-        parseMMDOptions: { backgroundColor: 'white' },
+    const { renderMermaid } = await import('@mermaid-js/mermaid-cli');
+    const { default: puppeteer } = await import('puppeteer');
+    browser = await puppeteer.launch({ args: ['--no-sandbox'] });
+    const { data } = await withTimeout(
+      renderMermaid(browser as never, code, 'png', {
+        backgroundColor: 'white',
       }),
       RENDER_TIMEOUT_MS,
     );
+    dir = await mkdtemp(join(tmpdir(), 'mermaid-'));
+    const output = join(dir, 'diagram.png');
+    await writeFile(output, data);
     return output;
   } catch (err) {
     logger.debug(
@@ -58,6 +62,8 @@ export async function renderMermaidToPng(code: string): Promise<string | null> {
     );
     if (dir) await cleanupMermaidPng(join(dir, 'diagram.png'));
     return null;
+  } finally {
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
@@ -70,33 +76,51 @@ export async function cleanupMermaidPng(pngPath: string): Promise<void> {
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error('mermaid render timeout')), ms),
-    ),
-  ]);
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('mermaid render timeout')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-// Renders each ```mermaid block to a PNG and strips the successfully-rendered
-// fences from the text, returning the PNG paths in document order. Blocks that
-// fail to render are left in place so they degrade to a normal code block. The
-// renderer is injectable so the splitting logic can be tested without a browser.
-export async function renderAndSplitMermaid(
-  text: string,
-  render: (code: string) => Promise<string | null> = renderMermaidToPng,
-): Promise<{ text: string; diagrams: string[] }> {
-  const blocks = extractMermaidBlocks(text);
-  if (blocks.length === 0) return { text, diagrams: [] };
+export interface MermaidOutboundDeps {
+  render: (code: string) => Promise<string | null>;
+  sendPhoto: (
+    pngPath: string,
+  ) => Promise<{ ok: true; message_id: string } | { ok: false; error: string }>;
+  onPhotoSent: (messageId: string, pngPath: string) => void;
+  cleanup?: (pngPath: string) => Promise<void>;
+}
 
-  const diagrams: string[] = [];
+// Renders each ```mermaid fence and sends the PNG as a photo. A fence is
+// stripped from the returned text ONLY after its photo is confirmed sent — if
+// either the render or the send fails, the fence is kept so it degrades to a
+// plain code block instead of vanishing. Returns the remaining prose (carrying
+// any surviving fences) for the caller to send as text. Dependencies are
+// injected so the orchestration is testable without a browser or a channel.
+export async function renderMermaidOutbound(
+  text: string,
+  deps: MermaidOutboundDeps,
+): Promise<{ text: string }> {
+  const blocks = extractMermaidBlocks(text);
+  if (blocks.length === 0) return { text };
+
   let out = text;
+  let stripped = 0;
   for (const block of blocks) {
-    const png = await render(block.code);
+    const png = await deps.render(block.code);
     if (!png) continue;
-    diagrams.push(png);
-    out = out.replace(block.raw, '');
+    try {
+      const res = await deps.sendPhoto(png);
+      if (res.ok) {
+        deps.onPhotoSent(res.message_id, png);
+        out = out.replace(block.raw, '');
+        stripped++;
+      }
+    } finally {
+      if (deps.cleanup) await deps.cleanup(png);
+    }
   }
-  if (diagrams.length > 0) out = out.replace(/\n{3,}/g, '\n\n').trim();
-  return { text: out, diagrams };
+  if (stripped > 0) out = out.replace(/\n{3,}/g, '\n\n').trim();
+  return { text: out };
 }
