@@ -319,6 +319,20 @@ describe('formatUsageLine', () => {
     expect(formatUsageLine('g1', null)).toBe(
       '[host-status] ctx: unknown · session: $0.00 (0 turns) · today: $0.42',
     );
+
+    recordUsage({
+      jid: 'g1',
+      sessionId: 'sess-A',
+      origin: 'interactive',
+      usage: makeUsage({
+        contextUsedTokens: 100_000,
+        totalCostUsd: 0.1,
+      }),
+    });
+
+    expect(formatUsageLine('g1', 'sess-A')).toBe(
+      '[host-status] ctx: 100k/1000k (10%) · session: $0.10 (1 turns) · today: $0.52',
+    );
   });
 
   it('produces a one-liner with ctx / session / today after a turn', () => {

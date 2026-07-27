@@ -117,7 +117,10 @@ function ensureState(jid: string, now: Date): UsageState {
       sessionId: null,
       lastTurn: null,
       session: defaultSession(now),
-      day: defaultDay(now),
+      day: {
+        ...defaultDay(now),
+        costUsd: readDailyCost(jid, now),
+      },
       warnedThreshold: 0,
     };
     states.set(jid, state);
@@ -269,11 +272,8 @@ export function formatUsageLine(
   jid: string,
   currentSessionId: string | null | undefined,
 ): string {
-  const state = states.get(jid);
-  if (!state || !state.lastTurn) {
-    const dayUsd = readDailyCost(jid, new Date());
-    return formatUnknownUsageLine(dayUsd);
-  }
+  const state = ensureState(jid, new Date());
+  if (!state.lastTurn) return formatUnknownUsageLine(state.day.costUsd);
 
   const dayUsd = state.day.costUsd;
 
