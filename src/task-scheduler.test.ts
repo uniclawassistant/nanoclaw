@@ -1,20 +1,40 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const { runContainerAgentMock } = vi.hoisted(() => ({
+  runContainerAgentMock: vi.fn(),
+}));
+
+vi.mock('./container-runner.js', () => ({
+  runContainerAgent: runContainerAgentMock,
+  writeTasksSnapshot: vi.fn(),
+}));
+
 import { _initTestDatabase, createTask, getTaskById } from './db.js';
 import {
   _resetSchedulerLoopForTests,
   computeNextRun,
   startSchedulerLoop,
 } from './task-scheduler.js';
+import type { SchedulerDependencies } from './task-scheduler.js';
+import {
+  _resetForTests,
+  formatUsageLine,
+  recordUsage,
+} from './usage-tracker.js';
 
 describe('task scheduler', () => {
   beforeEach(() => {
     _initTestDatabase();
     _resetSchedulerLoopForTests();
+    _resetForTests();
+    process.env.SPEND_DAILY_JSONL_PATH = '/dev/null';
+    runContainerAgentMock.mockReset();
+    runContainerAgentMock.mockResolvedValue({ status: 'success' });
     vi.useFakeTimers();
   });
 
   afterEach(() => {
+    delete process.env.SPEND_DAILY_JSONL_PATH;
     vi.useRealTimers();
   });
 
@@ -50,6 +70,73 @@ describe('task scheduler', () => {
 
     const task = getTaskById('task-invalid-folder');
     expect(task?.status).toBe('paused');
+  });
+
+  it('prefixes a scheduled prompt with fresh host status for its session', async () => {
+    recordUsage({
+      jid: 'main-chat',
+      sessionId: 'previous-session',
+      usage: {
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheReadInputTokens: 10,
+        cacheCreationInputTokens: 5,
+        totalCostUsd: 0.42,
+        contextWindow: 1_000_000,
+        contextUsedTokens: 250_000,
+        numTurns: 1,
+      },
+      origin: 'interactive',
+    });
+    createTask({
+      id: 'task-host-status',
+      group_folder: 'main',
+      chat_jid: 'main-chat',
+      prompt: 'run scheduled work',
+      schedule_type: 'once',
+      schedule_value: '2026-02-22T00:00:00.000Z',
+      context_mode: 'group',
+      next_run: new Date(Date.now() - 60_000).toISOString(),
+      status: 'active',
+      created_at: '2026-02-22T00:00:00.000Z',
+    });
+
+    startSchedulerLoop({
+      registeredGroups: () => ({
+        'main-chat': {
+          name: 'Main',
+          folder: 'main',
+          isMain: true,
+          trigger: '@Andy',
+          added_at: '2026-02-22T00:00:00.000Z',
+        },
+      }),
+      getSessions: () => ({ main: 'current-session' }),
+      queue: {
+        enqueueTask: (
+          _groupJid: string,
+          _taskId: string,
+          run: () => Promise<void>,
+        ) => {
+          void run();
+        },
+      } as unknown as SchedulerDependencies['queue'],
+      onProcess: () => {},
+      sendMessage: async () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    const input = runContainerAgentMock.mock.calls[0]?.[1];
+    const expectedLine = formatUsageLine('main-chat', 'current-session');
+    expect(expectedLine).toBe(
+      '[host-status] ctx: unknown · session: $0.00 (0 turns) · today: $0.42',
+    );
+    expect(input).toMatchObject({
+      sessionId: 'current-session',
+      prompt: `${expectedLine}\nrun scheduled work`,
+    });
+    expect(input.prompt).not.toContain('ctx: 250k/1000k (25%)');
   });
 
   it('computeNextRun anchors interval tasks to scheduled time to prevent drift', () => {

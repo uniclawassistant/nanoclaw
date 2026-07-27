@@ -21,7 +21,12 @@ import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { isRespawnTask } from './reset-lifecycle.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
-import { checkThreshold, getState, recordUsage } from './usage-tracker.js';
+import {
+  checkThreshold,
+  formatUsageLine,
+  getState,
+  recordUsage,
+} from './usage-tracker.js';
 
 /**
  * Compute the next run time for a recurring task, anchored to the
@@ -179,6 +184,8 @@ async function runTask(
   const sessions = deps.getSessions();
   const sessionId =
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
+  const usageLine = formatUsageLine(task.chat_jid, sessionId);
+  const prompt = usageLine ? `${usageLine}\n${task.prompt}` : task.prompt;
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
@@ -198,7 +205,7 @@ async function runTask(
     const output = await runContainerAgent(
       group,
       {
-        prompt: task.prompt,
+        prompt,
         sessionId,
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,
