@@ -268,9 +268,12 @@ function formatThresholdMessage(
 export function formatUsageLine(
   jid: string,
   currentSessionId: string | null | undefined,
-): string | null {
+): string {
   const state = states.get(jid);
-  if (!state || !state.lastTurn) return null;
+  if (!state || !state.lastTurn) {
+    const dayUsd = readDailyCost(jid, new Date());
+    return formatUnknownUsageLine(dayUsd);
+  }
 
   const dayUsd = state.day.costUsd;
 
@@ -278,7 +281,7 @@ export function formatUsageLine(
   const isFreshSession =
     state.sessionId === null || state.sessionId !== (currentSessionId ?? null);
   if (isFreshSession) {
-    return `[host-status] ctx: unknown · session: $0.00 (0 turns) · today: $${dayUsd.toFixed(2)}`;
+    return formatUnknownUsageLine(dayUsd);
   }
 
   const max = state.lastTurn.contextWindow ?? getContextMaxDefault();
@@ -289,6 +292,28 @@ export function formatUsageLine(
   const sessionUsd = state.session.costUsd;
 
   return `[host-status] ctx: ${ctxK}k/${maxK}k (${pct}%) · session: $${sessionUsd.toFixed(2)} (${state.session.turns} turns) · today: $${dayUsd.toFixed(2)}`;
+}
+
+function formatUnknownUsageLine(dayUsd: number): string {
+  return `[host-status] ctx: unknown · session: $0.00 (0 turns) · today: $${dayUsd.toFixed(2)}`;
+}
+
+function readDailyCost(jid: string, now: Date): number {
+  const filepath = getDailyJsonlPath();
+  if (!fs.existsSync(filepath)) return 0;
+
+  return fs
+    .readFileSync(filepath, 'utf-8')
+    .split('\n')
+    .reduce((total, line) => {
+      if (!line) return total;
+      const entry = JSON.parse(line) as Partial<DailyJsonlEntry>;
+      const isCurrentEntry =
+        entry.jid === jid && entry.ts?.slice(0, 10) === todayUtc(now);
+      return isCurrentEntry && Number.isFinite(entry.cost)
+        ? total + (entry.cost ?? 0)
+        : total;
+    }, 0);
 }
 
 export function snapshotForJid(jid: string): {

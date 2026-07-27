@@ -293,8 +293,32 @@ describe('checkThreshold — 70/85/95% bands and anti-spam', () => {
 });
 
 describe('formatUsageLine', () => {
-  it('returns null until the first turn is recorded', () => {
-    expect(formatUsageLine('g1', null)).toBeNull();
+  it('restores today from JSONL before the first turn is recorded', () => {
+    const today = new Date().toISOString();
+    fs.writeFileSync(
+      getDailyJsonlPath(),
+      [
+        JSON.stringify({
+          ts: today,
+          jid: 'g1',
+          cost: 0.31,
+        }),
+        JSON.stringify({
+          ts: today,
+          jid: 'g1',
+          cost: 0.11,
+        }),
+        JSON.stringify({
+          ts: today,
+          jid: 'other',
+          cost: 99,
+        }),
+      ].join('\n'),
+    );
+
+    expect(formatUsageLine('g1', null)).toBe(
+      '[host-status] ctx: unknown · session: $0.00 (0 turns) · today: $0.42',
+    );
   });
 
   it('produces a one-liner with ctx / session / today after a turn', () => {
