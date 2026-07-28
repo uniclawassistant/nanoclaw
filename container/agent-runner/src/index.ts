@@ -607,7 +607,7 @@ async function runQuery(
       // SDK learns the 1M window — a bare id falls back to the SDK's internal
       // table (200k for new models) and auto-compacts at ~167k (FED-34).
       // No maxThinkingTokens: the SDK enables adaptive thinking by default.
-      model: 'claude-opus-4-8[1m]',
+      model: 'claude-opus-5[1m]',
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
