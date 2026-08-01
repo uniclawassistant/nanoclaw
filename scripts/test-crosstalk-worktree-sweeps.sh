@@ -28,16 +28,6 @@ assert_not_contains() {
   fi
 }
 
-assert_count() {
-  local expected="$1" pattern="$2" file="$3" label="$4" actual
-  actual=$(grep -cF -- "$pattern" "$file" 2>/dev/null || true)
-  if [ "$actual" != "$expected" ]; then
-    echo "--- $file ---" >&2
-    sed 's/^/| /' "$file" >&2
-    fail "$label: expected $expected got $actual for [$pattern]"
-  fi
-}
-
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P) || exit 1
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P) || exit 1
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/crosstalk-sweep-test.XXXXXX") || exit 1
@@ -49,7 +39,6 @@ CLIP_DIR_FIXTURE="$TMP_ROOT/clip"
 ROOT="$CLIP_DIR_FIXTURE/demo-worktrees"
 OTHER_ROOT="$CLIP_DIR_FIXTURE/other-worktrees"
 LOG_DIR_FIXTURE="$TMP_ROOT/logs"
-PCP_COUNT="$TMP_ROOT/pcp-count.log"
 GH_COUNT="$TMP_ROOT/gh-count.log"
 REMOTE="$TMP_ROOT/remote.git"
 OTHER_REMOTE="$TMP_ROOT/other-remote.git"
@@ -63,12 +52,14 @@ ROOT=$(cd "$ROOT" && pwd -P) || exit 1
 OTHER_ROOT=$(cd "$OTHER_ROOT" && pwd -P) || exit 1
 CLIP_DIR_FIXTURE=$(cd "$CLIP_DIR_FIXTURE" && pwd -P) || exit 1
 LOG_DIR_FIXTURE=$(cd "$LOG_DIR_FIXTURE" && pwd -P) || exit 1
-: > "$PCP_COUNT"
 : > "$GH_COUNT"
 
 cat > "$BIN_DIR/fake-gh" <<EOF
 #!/bin/bash
 echo "\$*" >> "$GH_COUNT"
+case "\$*" in
+  *"--head exact-merged-CRO-606"*) echo 606 ;;
+esac
 exit 0
 EOF
 chmod +x "$BIN_DIR/fake-gh"
@@ -78,21 +69,6 @@ cat > "$BIN_DIR/fake-ssh" <<EOF
 exec git-upload-pack "$REMOTE"
 EOF
 chmod +x "$BIN_DIR/fake-ssh"
-
-cat > "$BIN_DIR/fake-pcp" <<EOF
-#!/bin/bash
-echo "\$*" >> "$PCP_COUNT"
-if [ "\$1" != "issue" ]; then exit 2; fi
-case "\$2" in
-  CRO-101) echo '{"status":{"name":"done"}}' ;;
-  CRO-202) echo '{"status":{"name":"todo"}}' ;;
-  CRO-333) echo '{"status":{"name":"done"}}' ;;
-  CRO-404) echo '404 not found' ;;
-  CRO-444) echo '{"status":{"name":"done"}}' ;;
-  *) echo '{"status":{"name":"blocked"}}' ;;
-esac
-EOF
-chmod +x "$BIN_DIR/fake-pcp"
 
 # Keep Xcode/lsof/pgrep behavior deterministic for host-independent tests.
 cat > "$BIN_DIR/pgrep" <<'EOF'
@@ -122,15 +98,24 @@ add_wt() {
   touch -t "$OLD_STAMP" "$path"
 }
 
-add_wt clean-CRO-101-done "$ROOT/clean-CRO-101-done"
-add_wt keep-CRO-202-todo "$ROOT/keep-CRO-202-todo"
-add_wt dirty-CRO-333-done "$ROOT/dirty-CRO-333-done"
-add_wt bad-CRO-404-output "$ROOT/bad-CRO-404-output"
-add_wt dup-a-CRO-444-done "$ROOT/dup-a-CRO-444-done"
-add_wt dup-b-CRO-444-done "$ROOT/dup-b-CRO-444-done"
+add_wt identical-CRO-101 "$ROOT/identical-CRO-101"
+add_wt differs-CRO-202 "$ROOT/differs-CRO-202"
+add_wt dirty-CRO-333 "$ROOT/dirty-CRO-333"
+add_wt exact-merged-CRO-606 "$ROOT/exact-merged-CRO-606"
 add_wt active-CRO-505-origin "$ROOT/active-CRO-505-origin"
-add_wt no-ticket-branch "$ROOT/no-ticket-branch"
-add_wt outside-CRO-777-done "$OUTSIDE"
+add_wt outside-CRO-777 "$OUTSIDE"
+git -C "$MAIN" worktree add --detach "$ROOT/detached-old" main >/dev/null 2>&1 || exit 1
+touch -t "$OLD_STAMP" "$ROOT/detached-old"
+
+printf 'changed\n' > "$ROOT/differs-CRO-202/README.md"
+printf 'one\ntwo\n' > "$ROOT/differs-CRO-202/extra.txt"
+git -C "$ROOT/differs-CRO-202" add README.md extra.txt >/dev/null || exit 1
+git -C "$ROOT/differs-CRO-202" commit -m differs >/dev/null || exit 1
+
+printf 'merged elsewhere\n' > "$ROOT/exact-merged-CRO-606/README.md"
+git -C "$ROOT/exact-merged-CRO-606" add README.md >/dev/null || exit 1
+git -C "$ROOT/exact-merged-CRO-606" commit -m exact-merged >/dev/null || exit 1
+touch -t "$OLD_STAMP" "$ROOT/differs-CRO-202" "$ROOT/exact-merged-CRO-606"
 
 git -C "$ROOT/active-CRO-505-origin" push -u origin active-CRO-505-origin >/dev/null 2>&1 || exit 1
 git -C "$MAIN" remote set-url origin git@github.com:acme/crosstalk-demo.git || exit 1
@@ -149,8 +134,8 @@ git -C "$OTHER_MAIN" worktree add -b cto-fed42-adr "$OTHER_ROOT/cto-fed42-adr" m
 touch -t "$OLD_STAMP" "$OTHER_ROOT/cto-fed42-adr"
 git -C "$OTHER_MAIN" remote set-url origin git@github.com:Fedos/swift-flush.git || exit 1
 
-echo dirty > "$ROOT/dirty-CRO-333-done/untracked.txt"
-touch -t "$OLD_STAMP" "$ROOT/dirty-CRO-333-done"
+echo dirty > "$ROOT/dirty-CRO-333/untracked.txt"
+touch -t "$OLD_STAMP" "$ROOT/dirty-CRO-333"
 
 mkdir -p "$ROOT/not-git-child" || exit 1
 git init "$ROOT/standalone-repo" >/dev/null || exit 1
@@ -160,8 +145,15 @@ echo standalone > "$ROOT/standalone-repo/file.txt"
 git -C "$ROOT/standalone-repo" add file.txt >/dev/null || exit 1
 git -C "$ROOT/standalone-repo" commit -m standalone >/dev/null || exit 1
 
+DIRS_BEFORE="$TMP_ROOT/dirs.before"
+REFS_BEFORE="$TMP_ROOT/refs.before"
+WORKTREES_BEFORE="$TMP_ROOT/worktrees.before"
+find "$ROOT" "$OTHER_ROOT" "$OUTSIDE" -type d -print | sort > "$DIRS_BEFORE" || exit 1
+git -C "$MAIN" for-each-ref --format='%(refname) %(objectname)' | sort > "$REFS_BEFORE" || exit 1
+git -C "$MAIN" worktree list --porcelain > "$WORKTREES_BEFORE" || exit 1
+
 SWEEP_OUT="$TMP_ROOT/sweep.out"
-CLIP_DIR="$CLIP_DIR_FIXTURE" LOG_DIR="$LOG_DIR_FIXTURE" PCP_CLI="$BIN_DIR/fake-pcp" GH_CLI="$BIN_DIR/fake-gh" GIT_SSH_COMMAND="$BIN_DIR/fake-ssh" \
+CLIP_DIR="$CLIP_DIR_FIXTURE" LOG_DIR="$LOG_DIR_FIXTURE" GH_CLI="$BIN_DIR/fake-gh" GIT_SSH_COMMAND="$BIN_DIR/fake-ssh" \
   bash "$REPO_ROOT/scripts/crosstalk-worktree-sweep.sh" > "$SWEEP_OUT" 2>&1 || fail "worktree sweep dry-run failed"
 
 assert_contains "$SWEEP_OUT" "# GH_CLI=$BIN_DIR/fake-gh" "GH_CLI env hook"
@@ -175,36 +167,48 @@ assert_contains "$SWEEP_OUT" "$ROOT/not-git-child :: not a git worktree/repo" "n
 assert_contains "$SWEEP_OUT" "$ROOT/standalone-repo :: standalone repo (not deleted)" "standalone reporting"
 assert_contains "$SWEEP_OUT" "$MAIN :: registered main checkout" "main checkout safe"
 assert_contains "$SWEEP_OUT" "$OUTSIDE :: registered worktree outside discovered roots" "outside worktree safe"
-assert_contains "$SWEEP_OUT" "$ROOT/dirty-CRO-333-done :: DIRTY" "dirty terminal ticket safe"
-assert_not_contains "$SWEEP_OUT" "$ROOT/dirty-CRO-333-done :: WOULD-TRASH" "dirty is not candidate"
-assert_contains "$SWEEP_OUT" "$ROOT/clean-CRO-101-done :: WOULD-TRASH" "terminal gone branch candidate"
-assert_contains "$SWEEP_OUT" "$ROOT/keep-CRO-202-todo :: Paperclip CRO-202 nonterminal status=todo" "nonterminal kept"
-assert_contains "$SWEEP_OUT" "$ROOT/bad-CRO-404-output :: Paperclip status parse failed for CRO-404" "malformed Paperclip output review-needed"
-assert_contains "$SWEEP_OUT" "$ROOT/no-ticket-branch :: branch gone, no exact merged PR" "no ticket review-needed"
-assert_contains "$SWEEP_OUT" "# paperclip: unique-ticket-queries=4" "unique ticket summary"
-assert_count 1 "issue CRO-444" "$PCP_COUNT" "ticket cache avoids duplicate Paperclip lookup"
-assert_contains "$GH_COUNT" "--head clean-CRO-101-done" "fake GitHub CLI used"
+assert_contains "$SWEEP_OUT" "$ROOT/dirty-CRO-333 :: DIRTY" "dirty equal-HEAD worktree safe"
+assert_not_contains "$SWEEP_OUT" "$ROOT/dirty-CRO-333 :: WOULD-TRASH" "dirty is not candidate"
+assert_contains "$SWEEP_OUT" "$ROOT/identical-CRO-101 :: WOULD-TRASH" "clean equal content candidate"
+assert_contains "$SWEEP_OUT" "content identical to origin/main" "content equality reason"
+assert_contains "$SWEEP_OUT" "$ROOT/detached-old :: WOULD-TRASH" "old detached equal content candidate"
+assert_contains "$SWEEP_OUT" "$ROOT/differs-CRO-202 :: differs from origin/main: files=2 +3/-1" "committed diff review stats"
+assert_not_contains "$SWEEP_OUT" "$ROOT/differs-CRO-202 :: WOULD-TRASH" "different content is not candidate"
+assert_contains "$SWEEP_OUT" "$ROOT/exact-merged-CRO-606 :: WOULD-TRASH" "exact merged PR remains candidate"
+assert_contains "$SWEEP_OUT" "merged PR #606" "exact merged PR reason"
+assert_contains "$GH_COUNT" "--head exact-merged-CRO-606" "fake GitHub exact merged-PR path used"
 
-for path in "$ROOT/clean-CRO-101-done" "$ROOT/dup-a-CRO-444-done" "$ROOT/dup-b-CRO-444-done" "$ROOT/dirty-CRO-333-done" "$OUTSIDE"; do
-  [ -d "$path" ] || fail "dry-run removed directory $path"
-done
-git -C "$MAIN" show-ref --verify --quiet refs/heads/clean-CRO-101-done || fail "dry-run deleted local branch ref"
-git -C "$MAIN" worktree list --porcelain | grep -qF "$ROOT/clean-CRO-101-done" || fail "dry-run pruned worktree registration"
+DIRS_AFTER="$TMP_ROOT/dirs.after"
+REFS_AFTER="$TMP_ROOT/refs.after"
+WORKTREES_AFTER="$TMP_ROOT/worktrees.after"
+find "$ROOT" "$OTHER_ROOT" "$OUTSIDE" -type d -print | sort > "$DIRS_AFTER" || exit 1
+git -C "$MAIN" for-each-ref --format='%(refname) %(objectname)' | sort > "$REFS_AFTER" || exit 1
+git -C "$MAIN" worktree list --porcelain > "$WORKTREES_AFTER" || exit 1
+cmp -s "$DIRS_BEFORE" "$DIRS_AFTER" || fail "dry-run changed fixture directories"
+cmp -s "$REFS_BEFORE" "$REFS_AFTER" || fail "dry-run changed refs"
+cmp -s "$WORKTREES_BEFORE" "$WORKTREES_AFTER" || fail "dry-run changed worktree registration"
 
-mkdir -p "$ROOT/clean-CRO-101-done/.build/checkouts" "$OTHER_ROOT/cto-fed42-adr/.build/checkouts" || exit 1
-echo cache > "$ROOT/clean-CRO-101-done/.build/checkouts/stale.txt"
+MISSING_OUT="$TMP_ROOT/missing-origin-main.out"
+git -C "$MAIN" update-ref -d refs/remotes/origin/main || exit 1
+CLIP_DIR="$CLIP_DIR_FIXTURE" LOG_DIR="$LOG_DIR_FIXTURE" GH_CLI="$BIN_DIR/fake-gh" GIT_SSH_COMMAND="$BIN_DIR/fake-ssh" \
+  bash "$REPO_ROOT/scripts/crosstalk-worktree-sweep.sh" > "$MISSING_OUT" 2>&1 || fail "missing-origin/main sweep dry-run failed"
+assert_contains "$MISSING_OUT" "$ROOT/identical-CRO-101 :: origin/main unavailable — fail closed" "missing origin/main review fail-closed"
+assert_not_contains "$MISSING_OUT" "$ROOT/identical-CRO-101 :: WOULD-TRASH" "missing origin/main is not candidate"
+
+mkdir -p "$ROOT/identical-CRO-101/.build/checkouts" "$OTHER_ROOT/cto-fed42-adr/.build/checkouts" || exit 1
+echo cache > "$ROOT/identical-CRO-101/.build/checkouts/stale.txt"
 echo other-cache > "$OTHER_ROOT/cto-fed42-adr/.build/checkouts/stale.txt"
-touch -t "$OLD_STAMP" "$ROOT/clean-CRO-101-done/.build/checkouts/stale.txt" "$ROOT/clean-CRO-101-done/.build/checkouts" "$ROOT/clean-CRO-101-done/.build"
+touch -t "$OLD_STAMP" "$ROOT/identical-CRO-101/.build/checkouts/stale.txt" "$ROOT/identical-CRO-101/.build/checkouts" "$ROOT/identical-CRO-101/.build"
 touch -t "$OLD_STAMP" "$OTHER_ROOT/cto-fed42-adr/.build/checkouts/stale.txt" "$OTHER_ROOT/cto-fed42-adr/.build/checkouts" "$OTHER_ROOT/cto-fed42-adr/.build"
 
 CACHE_OUT="$TMP_ROOT/cache.out"
 HOME="$TMP_ROOT" bash "$REPO_ROOT/scripts/crosstalk-build-cache-sweep.sh" --dry-run > "$CACHE_OUT" 2>&1 || fail "build cache sweep dry-run failed"
-assert_contains "$CACHE_OUT" "candidate root=$ROOT path=$ROOT/clean-CRO-101-done/.build" "cache dry-run candidate reporting"
+assert_contains "$CACHE_OUT" "candidate root=$ROOT path=$ROOT/identical-CRO-101/.build" "cache dry-run candidate reporting"
 assert_contains "$CACHE_OUT" "action=would-trash" "cache dry-run action"
 assert_contains "$CACHE_OUT" "standalone_repo root=$ROOT path=$ROOT/standalone-repo action=skip" "cache standalone skipped"
 assert_contains "$CACHE_OUT" "ignored_linked_repo root=$OTHER_ROOT path=$OTHER_ROOT/cto-fed42-adr" "cache non-Crosstalk linked repo ignored"
 assert_not_contains "$CACHE_OUT" "candidate root=$OTHER_ROOT path=$OTHER_ROOT/cto-fed42-adr/.build" "cache non-Crosstalk .build is not candidate"
-[ -d "$ROOT/clean-CRO-101-done/.build" ] || fail "cache dry-run deleted .build"
+[ -d "$ROOT/identical-CRO-101/.build" ] || fail "cache dry-run deleted .build"
 [ -d "$OTHER_ROOT/cto-fed42-adr/.build" ] || fail "cache dry-run deleted non-Crosstalk .build"
 
 printf 'PASS fixture=%s\n' "$TMP_ROOT"

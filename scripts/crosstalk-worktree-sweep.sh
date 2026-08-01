@@ -9,7 +9,6 @@ set -uo pipefail
 
 CLIP_DIR="${CLIP_DIR:-$HOME/clip}"
 WORKTREE_GLOB="${WORKTREE_GLOB:-$CLIP_DIR/*-worktrees}"
-PCP_CLI="${PCP_CLI:-/Users/fedor/nanoclaw-unic/groups/unic-shared-memory/scripts/pcp.sh}"
 GH_CLI="${GH_CLI:-gh}"
 LOG_DIR="${LOG_DIR:-/Users/fedor/nanoclaw-unic/groups/unic-shared-memory/memory/projects/crosstalk/worktree-sweep-logs}"
 AGE_REAP_SECS=$((24 * 3600))      # 24h guard for all reap candidates
@@ -46,8 +45,6 @@ repo_common=(); repo_rep=(); repo_gh=(); repo_branch_ctx=()
 root_reclaim_path=(); root_reclaim_kb=()
 removed=(); removal_failed=(); skipped_active=(); skipped_dirty=(); review_needed=(); skipped_fresh=(); skipped_detached=(); skipped_xcode=(); skipped_registered=()
 br_removed=(); br_fresh=(); br_unmerged=()
-ticket_ids=(); ticket_results=()
-PAPERCLIP_RESULT=""
 FAILURE_COUNT=0
 
 logline() { echo "$1" | tee -a "$LOG"; }
@@ -152,69 +149,6 @@ estimate_reclaim() {
   add_reclaim "$root" "$kb"
 }
 
-extract_ticket() {
-  local base="$1"
-  case "$base" in
-    *-CRO-[0-9]*) ;;
-    *) return 1 ;;
-  esac
-  printf '%s\n' "$base" | sed -n 's/^.*-\(CRO-[0-9][0-9]*\)\(-.*\)*$/\1/p'
-}
-
-parse_issue_status() {
-  python3 -c 'import json,sys
-try:
-    data=json.load(sys.stdin)
-    status=data.get("status")
-    if isinstance(status,dict):
-        status=status.get("name") or status.get("id") or status.get("status")
-    if not isinstance(status,str) or not status.strip():
-        raise ValueError("missing status")
-    print(status.strip())
-except Exception as e:
-    print("parse error: %s" % e, file=sys.stderr)
-    sys.exit(1)
-'
-}
-
-paperclip_ticket_result() {
-  local ticket="$1" i out status
-  PAPERCLIP_RESULT=""
-  i=0
-  while [ "$i" -lt "${#ticket_ids[@]}" ]; do
-    if [ "${ticket_ids[$i]}" = "$ticket" ]; then
-      PAPERCLIP_RESULT="${ticket_results[$i]}"
-      return 0
-    fi
-    i=$((i + 1))
-  done
-
-  if [ ! -x "$PCP_CLI" ]; then
-    PAPERCLIP_RESULT="ERR:PCP_CLI not executable: $PCP_CLI"
-    ticket_ids+=("$ticket")
-    ticket_results+=("$PAPERCLIP_RESULT")
-    return 0
-  fi
-
-  out=$("$PCP_CLI" issue "$ticket" 2>&1)
-  if [ "$?" -ne 0 ] || [ -z "$out" ]; then
-    PAPERCLIP_RESULT="ERR:Paperclip issue query failed for $ticket"
-    ticket_ids+=("$ticket")
-    ticket_results+=("$PAPERCLIP_RESULT")
-    return 0
-  fi
-  status=$(printf '%s\n' "$out" | parse_issue_status 2>/dev/null)
-  if [ "$?" -ne 0 ] || [ -z "$status" ]; then
-    PAPERCLIP_RESULT="ERR:Paperclip status parse failed for $ticket"
-    ticket_ids+=("$ticket")
-    ticket_results+=("$PAPERCLIP_RESULT")
-    return 0
-  fi
-  PAPERCLIP_RESULT="OK:$status"
-  ticket_ids+=("$ticket")
-  ticket_results+=("$PAPERCLIP_RESULT")
-}
-
 # Xcode-open guard: never reap a worktree whose project/workspace is open.
 XCODE_OPEN_DOCS=""
 XCODE_QUERY_FAILED=0
@@ -272,7 +206,7 @@ reap() {
 process_record() {
   local repo_idx="$1" W="$2" B="$3" D="$4" MAIN_W="$5"
   local rep="${repo_rep[$repo_idx]}" gh="${repo_gh[$repo_idx]}" repo_ctx
-  local age age_h rc merged base ticket tres status porcelain
+  local age age_h rc merged porcelain numstat stats files additions deletions binaries detail
   [ -z "$W" ] && return
 
   if [ "$W" = "$MAIN_W" ]; then
@@ -295,7 +229,7 @@ process_record() {
   age_h=$(( age / 3600 ))
 
   # Fail-closed guard order is intentional and must remain: dirty, Xcode,
-  # origin, <24h, detached<14d, exact merged PR, terminal Paperclip status.
+  # origin, <24h, detached<14d, exact merged PR, content equality with origin/main.
   porcelain=$(git -C "$W" status --porcelain 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -345,24 +279,40 @@ process_record() {
     fi
   fi
 
-  base=$(basename "$W")
-  ticket=$(extract_ticket "$base" 2>/dev/null || true)
-  if [ -z "$ticket" ]; then
-    review_needed+=("$W :: branch gone, no exact merged PR, basename has no CRO ticket — fail closed"); return
+  if ! git -C "$W" rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+    review_needed+=("$W :: origin/main unavailable — fail closed"); return
   fi
-  paperclip_ticket_result "$ticket"
-  tres="$PAPERCLIP_RESULT"
-  case "$tres" in
-    OK:*)
-      status=${tres#OK:}
-      case "$status" in
-        done|cancelled) reap "$W" "Paperclip $ticket terminal status=$status, age=${age_h}h, clean, repo=$gh" "$repo_ctx"; return ;;
-        backlog|todo|in_progress|in_review|blocked) skipped_active+=("$W :: Paperclip $ticket nonterminal status=$status — keep"); return ;;
-        *) review_needed+=("$W :: Paperclip $ticket unknown status=$status — fail closed"); return ;;
-      esac
+
+  git -C "$W" diff --quiet origin/main HEAD >/dev/null 2>&1
+  rc=$?
+  case "$rc" in
+    0)
+      reap "$W" "content identical to origin/main, age=${age_h}h, clean, repo=$gh" "$repo_ctx"; return
       ;;
-    ERR:*) review_needed+=("$W :: ${tres#ERR:} — fail closed"); return ;;
-    *) review_needed+=("$W :: Paperclip unexpected result for $ticket — fail closed"); return ;;
+    1)
+      numstat=$(git -C "$W" diff --numstat origin/main HEAD 2>&1)
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        review_needed+=("$W :: differs from origin/main; diff-stat unavailable (rc=$rc) — fail closed"); return
+      fi
+      stats=$(printf '%s\n' "$numstat" | awk -F '\t' '
+        NF >= 3 {
+          files++
+          if ($1 == "-" || $2 == "-") binaries++
+          else { additions += $1; deletions += $2 }
+        }
+        END { printf "%d %d %d %d\n", files, additions, deletions, binaries }
+      ')
+      read -r files additions deletions binaries <<EOF
+$stats
+EOF
+      detail="files=$files +$additions/-$deletions"
+      [ "$binaries" -gt 0 ] && detail="$detail binary=$binaries"
+      review_needed+=("$W :: differs from origin/main: $detail"); return
+      ;;
+    *)
+      review_needed+=("$W :: origin/main comparison failed (rc=$rc) — fail closed"); return
+      ;;
   esac
 }
 
@@ -499,7 +449,6 @@ emit_reclaim() {
 
 logline "# Crosstalk worktree sweep — $STAMP — mode=$mode"
 logline "# discovery=$WORKTREE_GLOB"
-logline "# PCP_CLI=$PCP_CLI"
 logline "# GH_CLI=$GH_CLI"
 [ "$XCODE_QUERY_FAILED" = "1" ] && logline "WARN: Xcode running but workspace-document query failed — reap candidates fail closed"
 
@@ -543,7 +492,6 @@ emit_reclaim
 logline ""
 logline "# summary: roots=${#roots[@]} repos=${#repo_common[@]} ignored-linked=${#ignored_linked_repos[@]} removed=${#removed[@]} removal-failures=${#removal_failed[@]} active=${#skipped_active[@]} fresh=${#skipped_fresh[@]} detached=${#skipped_detached[@]} dirty=${#skipped_dirty[@]} xcode-open=${#skipped_xcode[@]} registered-skip=${#skipped_registered[@]} review=${#review_needed[@]}"
 logline "# branches: deleted=${#br_removed[@]} fresh=${#br_fresh[@]} review=${#br_unmerged[@]}"
-logline "# paperclip: unique-ticket-queries=${#ticket_ids[@]}"
 logline "# log: $LOG"
 
 logline "# notification: no notification channel is configured"
