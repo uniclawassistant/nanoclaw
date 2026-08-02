@@ -206,7 +206,7 @@ reap() {
 process_record() {
   local repo_idx="$1" W="$2" B="$3" D="$4" MAIN_W="$5"
   local rep="${repo_rep[$repo_idx]}" gh="${repo_gh[$repo_idx]}" repo_ctx
-  local age age_h rc merged porcelain numstat stats files additions deletions binaries detail
+  local age age_h rc merged porcelain merge_base short_mb numstat stats files additions deletions binaries detail
   [ -z "$W" ] && return
 
   if [ "$W" = "$MAIN_W" ]; then
@@ -229,7 +229,7 @@ process_record() {
   age_h=$(( age / 3600 ))
 
   # Fail-closed guard order is intentional and must remain: dirty, Xcode,
-  # origin, <24h, detached<14d, exact merged PR, content equality with origin/main.
+  # origin, <24h, detached<14d, exact merged PR, own changes since merge-base.
   porcelain=$(git -C "$W" status --porcelain 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -283,17 +283,27 @@ process_record() {
     review_needed+=("$W :: origin/main unavailable — fail closed"); return
   fi
 
-  git -C "$W" diff --quiet origin/main HEAD >/dev/null 2>&1
+  merge_base=$(git -C "$W" merge-base HEAD origin/main 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$merge_base" ]; then
+    review_needed+=("$W :: merge-base with origin/main unavailable (rc=$rc) — fail closed"); return
+  fi
+  short_mb=$(printf '%.12s' "$merge_base")
+
+  git -C "$W" diff --quiet "$merge_base" HEAD >/dev/null 2>&1
   rc=$?
   case "$rc" in
     0)
-      reap "$W" "content identical to origin/main, age=${age_h}h, clean, repo=$gh" "$repo_ctx"; return
+      reap "$W" "no own changes since merge-base $short_mb, age=${age_h}h, clean, repo=$gh" "$repo_ctx"; return
       ;;
     1)
-      numstat=$(git -C "$W" diff --numstat origin/main HEAD 2>&1)
+      # A reverse --3way apply gate is intentionally not used: the host Git can
+      # return success from `git apply --check` while also reporting conflicts.
+      # Keep branches with own changes for review rather than risk a false reap.
+      numstat=$(git -C "$W" diff --numstat "$merge_base" HEAD 2>&1)
       rc=$?
       if [ "$rc" -ne 0 ]; then
-        review_needed+=("$W :: differs from origin/main; diff-stat unavailable (rc=$rc) — fail closed"); return
+        review_needed+=("$W :: own changes since merge-base; diff-stat unavailable (rc=$rc) — fail closed"); return
       fi
       stats=$(printf '%s\n' "$numstat" | awk -F '\t' '
         NF >= 3 {
@@ -308,10 +318,10 @@ $stats
 EOF
       detail="files=$files +$additions/-$deletions"
       [ "$binaries" -gt 0 ] && detail="$detail binary=$binaries"
-      review_needed+=("$W :: differs from origin/main: $detail"); return
+      review_needed+=("$W :: own changes since merge-base $short_mb: $detail"); return
       ;;
     *)
-      review_needed+=("$W :: origin/main comparison failed (rc=$rc) — fail closed"); return
+      review_needed+=("$W :: merge-base comparison failed (rc=$rc) — fail closed"); return
       ;;
   esac
 }

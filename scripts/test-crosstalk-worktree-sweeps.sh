@@ -101,8 +101,10 @@ add_wt() {
 add_wt identical-CRO-101 "$ROOT/identical-CRO-101"
 add_wt differs-CRO-202 "$ROOT/differs-CRO-202"
 add_wt dirty-CRO-333 "$ROOT/dirty-CRO-333"
+add_wt integrated-CRO-303 "$ROOT/integrated-CRO-303"
 add_wt exact-merged-CRO-606 "$ROOT/exact-merged-CRO-606"
 add_wt active-CRO-505-origin "$ROOT/active-CRO-505-origin"
+add_wt temporary-unrelated "$ROOT/unrelated-CRO-808"
 add_wt outside-CRO-777 "$OUTSIDE"
 git -C "$MAIN" worktree add --detach "$ROOT/detached-old" main >/dev/null 2>&1 || exit 1
 touch -t "$OLD_STAMP" "$ROOT/detached-old"
@@ -112,10 +114,27 @@ printf 'one\ntwo\n' > "$ROOT/differs-CRO-202/extra.txt"
 git -C "$ROOT/differs-CRO-202" add README.md extra.txt >/dev/null || exit 1
 git -C "$ROOT/differs-CRO-202" commit -m differs >/dev/null || exit 1
 
+printf 'integrated one\nintegrated two\n' > "$ROOT/integrated-CRO-303/integrated.txt"
+git -C "$ROOT/integrated-CRO-303" add integrated.txt >/dev/null || exit 1
+git -C "$ROOT/integrated-CRO-303" commit -m integrated-branch >/dev/null || exit 1
+
 printf 'merged elsewhere\n' > "$ROOT/exact-merged-CRO-606/README.md"
 git -C "$ROOT/exact-merged-CRO-606" add README.md >/dev/null || exit 1
 git -C "$ROOT/exact-merged-CRO-606" commit -m exact-merged >/dev/null || exit 1
-touch -t "$OLD_STAMP" "$ROOT/differs-CRO-202" "$ROOT/exact-merged-CRO-606"
+
+git -C "$ROOT/unrelated-CRO-808" checkout --orphan unrelated-CRO-808 >/dev/null 2>&1 || exit 1
+git -C "$ROOT/unrelated-CRO-808" rm -f README.md >/dev/null || exit 1
+printf 'unrelated\n' > "$ROOT/unrelated-CRO-808/unrelated.txt"
+git -C "$ROOT/unrelated-CRO-808" add unrelated.txt >/dev/null || exit 1
+git -C "$ROOT/unrelated-CRO-808" commit -m unrelated >/dev/null || exit 1
+
+touch -t "$OLD_STAMP" "$ROOT/differs-CRO-202" "$ROOT/integrated-CRO-303" "$ROOT/exact-merged-CRO-606" "$ROOT/unrelated-CRO-808"
+
+printf 'main advanced\n' > "$MAIN/main-only.txt"
+printf 'integrated one\nintegrated two\n' > "$MAIN/integrated.txt"
+git -C "$MAIN" add main-only.txt integrated.txt >/dev/null || exit 1
+git -C "$MAIN" commit -m advance-main >/dev/null || exit 1
+git -C "$MAIN" push origin main >/dev/null 2>&1 || exit 1
 
 git -C "$ROOT/active-CRO-505-origin" push -u origin active-CRO-505-origin >/dev/null 2>&1 || exit 1
 git -C "$MAIN" remote set-url origin git@github.com:acme/crosstalk-demo.git || exit 1
@@ -167,13 +186,19 @@ assert_contains "$SWEEP_OUT" "$ROOT/not-git-child :: not a git worktree/repo" "n
 assert_contains "$SWEEP_OUT" "$ROOT/standalone-repo :: standalone repo (not deleted)" "standalone reporting"
 assert_contains "$SWEEP_OUT" "$MAIN :: registered main checkout" "main checkout safe"
 assert_contains "$SWEEP_OUT" "$OUTSIDE :: registered worktree outside discovered roots" "outside worktree safe"
-assert_contains "$SWEEP_OUT" "$ROOT/dirty-CRO-333 :: DIRTY" "dirty equal-HEAD worktree safe"
+assert_contains "$SWEEP_OUT" "$ROOT/dirty-CRO-333 :: DIRTY" "dirty zero-own worktree safe"
 assert_not_contains "$SWEEP_OUT" "$ROOT/dirty-CRO-333 :: WOULD-TRASH" "dirty is not candidate"
-assert_contains "$SWEEP_OUT" "$ROOT/identical-CRO-101 :: WOULD-TRASH" "clean equal content candidate"
-assert_contains "$SWEEP_OUT" "content identical to origin/main" "content equality reason"
-assert_contains "$SWEEP_OUT" "$ROOT/detached-old :: WOULD-TRASH" "old detached equal content candidate"
-assert_contains "$SWEEP_OUT" "$ROOT/differs-CRO-202 :: differs from origin/main: files=2 +3/-1" "committed diff review stats"
-assert_not_contains "$SWEEP_OUT" "$ROOT/differs-CRO-202 :: WOULD-TRASH" "different content is not candidate"
+assert_contains "$SWEEP_OUT" "$ROOT/identical-CRO-101 :: WOULD-TRASH" "clean zero-own branch candidate after main advances"
+assert_contains "$SWEEP_OUT" "no own changes since merge-base" "merge-base reason"
+assert_contains "$SWEEP_OUT" "$ROOT/detached-old :: WOULD-TRASH" "old detached zero-own candidate"
+assert_contains "$SWEEP_OUT" "$ROOT/differs-CRO-202 :: own changes since merge-base" "own changes review reason"
+assert_contains "$SWEEP_OUT" "files=2 +3/-1" "own committed diff stats"
+assert_not_contains "$SWEEP_OUT" "$ROOT/differs-CRO-202 :: WOULD-TRASH" "own different content is not candidate"
+assert_contains "$SWEEP_OUT" "$ROOT/integrated-CRO-303 :: own changes since merge-base" "integrated patch stays review without reliable reverse gate"
+assert_contains "$SWEEP_OUT" "files=1 +2/-0" "integrated patch own diff stats"
+assert_not_contains "$SWEEP_OUT" "$ROOT/integrated-CRO-303 :: WOULD-TRASH" "unreliable reverse-apply path is disabled"
+assert_contains "$SWEEP_OUT" "$ROOT/unrelated-CRO-808 :: merge-base with origin/main unavailable" "missing merge-base fail-closed"
+assert_not_contains "$SWEEP_OUT" "$ROOT/unrelated-CRO-808 :: WOULD-TRASH" "missing merge-base is not candidate"
 assert_contains "$SWEEP_OUT" "$ROOT/exact-merged-CRO-606 :: WOULD-TRASH" "exact merged PR remains candidate"
 assert_contains "$SWEEP_OUT" "merged PR #606" "exact merged PR reason"
 assert_contains "$GH_COUNT" "--head exact-merged-CRO-606" "fake GitHub exact merged-PR path used"
