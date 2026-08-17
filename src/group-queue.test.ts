@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import type { ChildProcess } from 'child_process';
 
 import { GroupQueue } from './group-queue.js';
+import { logger } from './logger.js';
 
 // Mock config to control concurrency limit
 vi.mock('./config.js', () => ({
@@ -27,10 +29,12 @@ describe('GroupQueue', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.clearAllMocks();
     queue = new GroupQueue();
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -431,6 +435,169 @@ describe('GroupQueue', () => {
     expect(result).toBe(false);
 
     resolveTask!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('redelivers after the container exits between IPC write and acknowledgement', async () => {
+    const fs = await import('fs');
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const processResolvers: Array<() => void> = [];
+    const processMessages = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) =>
+          processResolvers.push(() => resolve(true)),
+        ),
+    );
+    const onAcknowledged = vi.fn();
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      {} as ChildProcess,
+      'container-1',
+      'test-group',
+    );
+
+    expect(
+      queue.sendMessage('group1@g.us', 'late message', {
+        messageCount: 1,
+        onAcknowledged,
+      }),
+    ).toBe(true);
+    expect(fs.default.writeFileSync).toHaveBeenCalled();
+
+    processResolvers[0]();
+    await vi.advanceTimersByTimeAsync(510);
+
+    expect(onAcknowledged).not.toHaveBeenCalled();
+    expect(processMessages).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith(
+      { chatJid: 'group1@g.us', count: 1 },
+      'IPC message delivery was not acknowledged; queued for retry',
+    );
+
+    processResolvers[1]();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('keeps an unacknowledged message queued while a scheduled task runs next', async () => {
+    const executionOrder: string[] = [];
+    let resolveInteractive: () => void;
+    const processMessages = vi.fn(async () => {
+      executionOrder.push('messages');
+      if (executionOrder.length === 1) {
+        await new Promise<void>((resolve) => {
+          resolveInteractive = resolve;
+        });
+      }
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      {} as ChildProcess,
+      'container-1',
+      'test-group',
+    );
+    queue.sendMessage('group1@g.us', 'late message', {
+      messageCount: 1,
+      onAcknowledged: vi.fn(),
+    });
+    queue.enqueueTask('group1@g.us', 'scheduled-task', async () => {
+      executionOrder.push('task');
+    });
+
+    resolveInteractive!();
+    await vi.advanceTimersByTimeAsync(1010);
+
+    expect(executionOrder).toEqual(['messages', 'task', 'messages']);
+  });
+
+  it('does not redeliver an acknowledged IPC message', async () => {
+    const fs = await import('fs');
+    let resolveProcess: () => void;
+    const onAcknowledged = vi.fn();
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveProcess = resolve;
+      });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      {} as ChildProcess,
+      'container-1',
+      'test-group',
+    );
+    queue.sendMessage('group1@g.us', 'confirmed message', {
+      messageCount: 1,
+      onAcknowledged,
+    });
+
+    const write = vi
+      .mocked(fs.default.writeFileSync)
+      .mock.calls.find(
+        (call) => typeof call[1] === 'string' && call[1].includes('deliveryId'),
+      );
+    const deliveryId = JSON.parse(String(write![1])).deliveryId;
+    expect(queue.acknowledgeMessage('group1@g.us', deliveryId)).toBe(true);
+
+    resolveProcess!();
+    await vi.advanceTimersByTimeAsync(510);
+
+    expect(onAcknowledged).toHaveBeenCalledTimes(1);
+    expect(processMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns with chat id and count when the IPC write fails', async () => {
+    const fs = await import('fs');
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    let resolveProcess: () => void;
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveProcess = resolve;
+      });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      {} as ChildProcess,
+      'container-1',
+      'test-group',
+    );
+    vi.mocked(fs.default.writeFileSync).mockImplementationOnce(() => {
+      throw new Error('disk unavailable');
+    });
+
+    expect(
+      queue.sendMessage('group1@g.us', 'failed message', {
+        messageCount: 2,
+        onAcknowledged: vi.fn(),
+      }),
+    ).toBe(false);
+    expect(warn).toHaveBeenCalledWith(
+      {
+        chatJid: 'group1@g.us',
+        count: 2,
+        err: expect.objectContaining({ message: 'disk unavailable' }),
+      },
+      'IPC message delivery write failed',
+    );
+
+    resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
   });
 

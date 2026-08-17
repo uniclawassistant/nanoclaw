@@ -1054,6 +1054,9 @@ async function runAgent(
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
+      (deliveryId) => {
+        queue.acknowledgeMessage(chatJid, deliveryId);
+      },
     );
 
     if (output.newSessionId) {
@@ -1179,14 +1182,21 @@ async function startMessageLoop(): Promise<void> {
           );
           const piped = usageLine ? `${usageLine}\n${formatted}` : formatted;
 
-          if (queue.sendMessage(chatJid, piped)) {
+          const deliveredThrough =
+            messagesToSend[messagesToSend.length - 1].timestamp;
+          if (
+            queue.sendMessage(chatJid, piped, {
+              messageCount: messagesToSend.length,
+              onAcknowledged: () => {
+                lastAgentTimestamp[chatJid] = deliveredThrough;
+                saveState();
+              },
+            })
+          ) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
             );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
-            saveState();
             // Show typing indicator while the container processes the piped message
             channel
               .setTyping?.(chatJid, true)

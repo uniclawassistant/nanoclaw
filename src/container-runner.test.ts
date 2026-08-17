@@ -225,6 +225,30 @@ describe('container-runner timeout behavior', () => {
     expect(result.newSessionId).toBe('session-456');
   });
 
+  it('routes delivery acknowledgements separately from agent output', async () => {
+    const onOutput = vi.fn(async () => {});
+    const onDeliveryAcknowledged = vi.fn();
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+      onDeliveryAcknowledged,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      deliveryAckId: 'delivery-123',
+    });
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    await resultPromise;
+    expect(onDeliveryAcknowledged).toHaveBeenCalledWith('delivery-123');
+    expect(onOutput).not.toHaveBeenCalled();
+  });
+
   it('scheduled task with no output is killed at 5min idle and reports idle_timeout', async () => {
     const scheduledInput = {
       ...testInput,
