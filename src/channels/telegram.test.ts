@@ -1395,6 +1395,88 @@ describe('TelegramChannel', () => {
         channel.setTyping('tg:100200300', true),
       ).resolves.toBeUndefined();
     });
+
+    it('re-sends the typing action until the turn is stopped', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      vi.useFakeTimers();
+
+      try {
+        await channel.setTyping('tg:100200300', true);
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(1);
+
+        // A 12s turn outlives Telegram's ~5s action expiry three times over.
+        await vi.advanceTimersByTimeAsync(12_000);
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(4);
+
+        await channel.setTyping('tg:100200300', false);
+        await vi.advanceTimersByTimeAsync(12_000);
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(4);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not stack heartbeats when typing is re-asserted mid-turn', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      vi.useFakeTimers();
+
+      try {
+        await channel.setTyping('tg:100200300', true);
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(2);
+
+        // Message piped into the live container — re-asserts, doesn't restack.
+        await channel.setTyping('tg:100200300', true);
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(3);
+
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(4);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops the heartbeat after the max duration', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      vi.useFakeTimers();
+
+      try {
+        await channel.setTyping('tg:100200300', true);
+        await vi.advanceTimersByTimeAsync(15 * 60 * 1000 + 4000);
+
+        const calls = currentBot().api.sendChatAction.mock.calls.length;
+        expect(calls).toBeGreaterThan(200);
+
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(calls);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops the heartbeat on disconnect', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      const bot = currentBot();
+      vi.useFakeTimers();
+
+      try {
+        await channel.setTyping('tg:100200300', true);
+        await channel.disconnect();
+
+        await vi.advanceTimersByTimeAsync(12_000);
+        expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   // --- Bot commands ---

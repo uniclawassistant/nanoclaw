@@ -748,6 +748,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       }
 
       if (result.turnEnd) {
+        // The turn is done — drop the typing heartbeat. The container stays
+        // alive and idle until IDLE_TIMEOUT, and "typing…" through that idle
+        // stretch would be a lie; the next piped message restarts it.
+        await channel.setTyping?.(chatJid, false);
         await checkClassB(turnState, rawAccumulated, {
           hadError,
           sendAckStub: async (ackText) => {
@@ -817,6 +821,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
     return true;
   } finally {
+    // Belt and braces: runAgent can reject (container died) and skip the
+    // in-band stops above, and the heartbeat must not outlive the run.
+    await channel.setTyping?.(chatJid, false);
     endTurn(chatJid);
   }
 }
