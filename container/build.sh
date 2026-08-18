@@ -1,16 +1,12 @@
 #!/bin/bash
 # Build the NanoClaw agent container image.
 #
-# By default, builds the image at $CONTAINER_IMAGE (the same env var the host
-# runtime reads in src/config.ts), so per-bot deployments stay in sync — set
-# CONTAINER_IMAGE=nanoclaw-agent-unic:latest in unic's launchd plist and
-# CONTAINER_IMAGE=nanoclaw-agent-chef:latest in chef's, and each bot rebuilds
-# its own image without overwriting the other.
+# Builds the image named by $CONTAINER_IMAGE (the same env var the host runtime
+# reads in src/config.ts), so per-bot deployments stay in sync.
 #
 # Override priority (highest first):
 #   1. positional argument:    ./build.sh my-image:tag
 #   2. CONTAINER_IMAGE env var
-#   3. legacy default:         nanoclaw-agent:latest
 #
 # Context is sent directly to the builder; on Apple Container ≥0.12.0 the
 # .dockerignore reliably excludes agent-runner/{node_modules,dist} so the
@@ -22,7 +18,16 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-IMAGE="${1:-${CONTAINER_IMAGE:-nanoclaw-agent:latest}}"
+IMAGE="${1:-${CONTAINER_IMAGE:-}}"
+if [ -z "$IMAGE" ]; then
+  echo "Error: image name is required." >&2
+  echo "Pass nanoclaw-agent-unic:latest or nanoclaw-agent-chef:latest as the first argument:" >&2
+  echo "  ./container/build.sh nanoclaw-agent-unic:latest" >&2
+  echo "Or set CONTAINER_IMAGE:" >&2
+  echo "  CONTAINER_IMAGE=nanoclaw-agent-chef:latest ./container/build.sh" >&2
+  exit 1
+fi
+
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-container}"
 
 cleanup_apple_container_build_cache() {
