@@ -11,6 +11,16 @@ interface QueuedTask {
   fn: () => Promise<void>;
 }
 
+interface PendingDelivery {
+  messageCount: number;
+  onAcknowledged: () => void;
+}
+
+interface DeliveryOptions {
+  messageCount: number;
+  onAcknowledged: () => void;
+}
+
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
 
@@ -32,6 +42,7 @@ interface GroupState {
   groupFolder: string | null;
   retryCount: number;
   lastExitAt: number | null;
+  pendingDeliveries: Map<string, PendingDelivery>;
 }
 
 export class GroupQueue {
@@ -57,6 +68,7 @@ export class GroupQueue {
         groupFolder: null,
         retryCount: 0,
         lastExitAt: null,
+        pendingDeliveries: new Map(),
       };
       this.groups.set(groupJid, state);
     }
@@ -165,24 +177,50 @@ export class GroupQueue {
    * Send a follow-up message to the active container via IPC file.
    * Returns true if the message was written, false if no active container.
    */
-  sendMessage(groupJid: string, text: string): boolean {
+  sendMessage(
+    groupJid: string,
+    text: string,
+    delivery?: DeliveryOptions,
+  ): boolean {
     const state = this.getGroup(groupJid);
     if (!state.active || !state.groupFolder || state.isTaskContainer)
       return false;
-    state.idleWaiting = false; // Agent is about to receive work, no longer idle
 
     const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
+    const deliveryId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     try {
       fs.mkdirSync(inputDir, { recursive: true });
-      const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
+      const filename = `${deliveryId}.json`;
       const filepath = path.join(inputDir, filename);
       const tempPath = `${filepath}.tmp`;
-      fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text }));
+      if (delivery) {
+        state.pendingDeliveries.set(deliveryId, delivery);
+      }
+      fs.writeFileSync(
+        tempPath,
+        JSON.stringify({ type: 'message', text, deliveryId }),
+      );
       fs.renameSync(tempPath, filepath);
+      state.idleWaiting = false;
       return true;
-    } catch {
+    } catch (err) {
+      state.pendingDeliveries.delete(deliveryId);
+      logger.warn(
+        { chatJid: groupJid, count: delivery?.messageCount ?? 1, err },
+        'IPC message delivery write failed',
+      );
       return false;
     }
+  }
+
+  acknowledgeMessage(groupJid: string, deliveryId: string): boolean {
+    const state = this.getGroup(groupJid);
+    const delivery = state.pendingDeliveries.get(deliveryId);
+    if (!delivery) return false;
+
+    state.pendingDeliveries.delete(deliveryId);
+    delivery.onAcknowledged();
+    return true;
   }
 
   /**
@@ -286,6 +324,7 @@ export class GroupQueue {
       logger.error({ groupJid, err }, 'Error processing messages for group');
       this.scheduleRetry(groupJid, state);
     } finally {
+      this.requeueUnacknowledgedDeliveries(groupJid, state);
       state.active = false;
       state.process = null;
       state.containerName = null;
@@ -294,6 +333,24 @@ export class GroupQueue {
       this.activeCount--;
       this.drainGroup(groupJid);
     }
+  }
+
+  private requeueUnacknowledgedDeliveries(
+    groupJid: string,
+    state: GroupState,
+  ): void {
+    if (state.pendingDeliveries.size === 0) return;
+
+    const count = [...state.pendingDeliveries.values()].reduce(
+      (total, delivery) => total + delivery.messageCount,
+      0,
+    );
+    state.pendingDeliveries.clear();
+    state.pendingMessages = true;
+    logger.warn(
+      { chatJid: groupJid, count },
+      'IPC message delivery was not acknowledged; queued for retry',
+    );
   }
 
   private async runTask(groupJid: string, task: QueuedTask): Promise<void> {

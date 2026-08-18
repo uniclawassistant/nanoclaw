@@ -5,11 +5,12 @@
  * Input protocol:
  *   Stdin: Full ContainerInput JSON (read until EOF, like before)
  *   IPC:   Follow-up messages written as JSON files to /workspace/ipc/input/
- *          Files: {type:"message", text:"..."}.json — polled and consumed
+ *          Files: {type:"message", text:"...", deliveryId:"..."}.json
  *          Sentinel: /workspace/ipc/input/_close — signals session end
  *
  * Stdout protocol:
  *   Each result is wrapped in OUTPUT_START_MARKER / OUTPUT_END_MARKER pairs.
+ *   Delivery acknowledgements use the same framing with deliveryAckId.
  *   Multiple results may be emitted (one per agent teams result).
  *   Final marker after loop ends signals completion.
  */
@@ -40,7 +41,13 @@ interface ContainerInput {
   script?: string;
 }
 
-type ContainerOutput = AgentRunnerOutput;
+interface DeliveryAckOutput {
+  status: 'success';
+  result: null;
+  deliveryAckId: string;
+}
+
+type ContainerOutput = AgentRunnerOutput | DeliveryAckOutput;
 
 interface SessionEntry {
   sessionId: string;
@@ -77,16 +84,22 @@ const IPC_POLL_MS = 500;
  * Keeps the iterable alive until end() is called, preventing isSingleUserTurn.
  */
 class MessageStream {
-  private queue: SDKUserMessage[] = [];
+  private queue: Array<{
+    message: SDKUserMessage;
+    deliveryIds: string[];
+  }> = [];
   private waiting: (() => void) | null = null;
   private done = false;
 
-  push(text: string): void {
+  push(text: string, deliveryIds: string[] = []): void {
     this.queue.push({
-      type: 'user',
-      message: { role: 'user', content: text },
-      parent_tool_use_id: null,
-      session_id: '',
+      message: {
+        type: 'user',
+        message: { role: 'user', content: text },
+        parent_tool_use_id: null,
+        session_id: '',
+      },
+      deliveryIds,
     });
     this.waiting?.();
   }
@@ -99,7 +112,9 @@ class MessageStream {
   async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
     while (true) {
       while (this.queue.length > 0) {
-        yield this.queue.shift()!;
+        const next = this.queue.shift()!;
+        acknowledgeDeliveries(next.deliveryIds);
+        yield next.message;
       }
       if (this.done) return;
       await new Promise<void>((r) => {
@@ -129,6 +144,12 @@ function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);
   console.log(JSON.stringify(output));
   console.log(OUTPUT_END_MARKER);
+}
+
+function acknowledgeDeliveries(deliveryIds: string[]): void {
+  for (const deliveryAckId of deliveryIds) {
+    writeOutput({ status: 'success', result: null, deliveryAckId });
+  }
 }
 
 function log(message: string): void {
@@ -422,7 +443,12 @@ function interruptResync(body: string | undefined): string {
  * Drain all pending IPC input messages.
  * Returns messages found, or empty array.
  */
-function drainIpcInput(): string[] {
+interface IpcInputMessage {
+  text: string;
+  deliveryId?: string;
+}
+
+function drainIpcInput(): IpcInputMessage[] {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs
@@ -430,14 +456,18 @@ function drainIpcInput(): string[] {
       .filter((f) => f.endsWith('.json'))
       .sort();
 
-    const messages: string[] = [];
+    const messages: IpcInputMessage[] = [];
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
         if (data.type === 'message' && data.text) {
-          messages.push(data.text);
+          messages.push({
+            text: data.text,
+            deliveryId:
+              typeof data.deliveryId === 'string' ? data.deliveryId : undefined,
+          });
         }
       } catch (err) {
         log(
@@ -460,6 +490,7 @@ function drainIpcInput(): string[] {
 interface PendingInput {
   text: string;
   stopResync: boolean;
+  deliveryIds: string[];
 }
 
 /**
@@ -482,12 +513,22 @@ function waitForIpcMessage(): Promise<PendingInput | null> {
         log(
           'Interrupt sentinel detected between queries, prioritizing re-sync',
         );
-        resolve({ text: interruptResync(interruptBody), stopResync: true });
+        resolve({
+          text: interruptResync(interruptBody),
+          stopResync: true,
+          deliveryIds: [],
+        });
         return;
       }
       const messages = drainIpcInput();
       if (messages.length > 0) {
-        resolve({ text: messages.join('\n'), stopResync: false });
+        resolve({
+          text: messages.map((message) => message.text).join('\n'),
+          stopResync: false,
+          deliveryIds: messages.flatMap((message) =>
+            message.deliveryId ? [message.deliveryId] : [],
+          ),
+        });
         return;
       }
       setTimeout(poll, IPC_POLL_MS);
@@ -510,6 +551,7 @@ async function runQuery(
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
   stopResyncTurn = false,
+  initialDeliveryIds: string[] = [],
 ): Promise<{
   newSessionId?: string;
   lastCompletedAssistantUuid?: string;
@@ -518,7 +560,7 @@ async function runQuery(
   resyncText?: string;
 }> {
   const stream = new MessageStream();
-  stream.push(prompt);
+  stream.push(prompt, initialDeliveryIds);
 
   // Poll IPC for follow-up messages, the _close sentinel, and the _interrupt
   // sentinel during the query. `agentQuery` (the Query handle) is created below
@@ -559,9 +601,14 @@ async function runQuery(
     }
     if (!stopResyncTurn) {
       const messages = drainIpcInput();
-      for (const text of messages) {
-        log(`Piping IPC message into active query (${text.length} chars)`);
-        stream.push(text);
+      for (const message of messages) {
+        log(
+          `Piping IPC message into active query (${message.text.length} chars)`,
+        );
+        stream.push(
+          message.text,
+          message.deliveryId ? [message.deliveryId] : [],
+        );
       }
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
@@ -798,9 +845,12 @@ async function main(): Promise<void> {
     prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
   }
   const pending = drainIpcInput();
+  let deliveryIds = pending.flatMap((message) =>
+    message.deliveryId ? [message.deliveryId] : [],
+  );
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.join('\n');
+    prompt += '\n' + pending.map((message) => message.text).join('\n');
   }
 
   // Script phase: run script before waking agent
@@ -842,7 +892,9 @@ async function main(): Promise<void> {
         sdkEnv,
         resumeAt,
         stopResyncTurn,
+        deliveryIds,
       );
+      deliveryIds = [];
       stopResyncTurn = false;
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
@@ -882,6 +934,7 @@ async function main(): Promise<void> {
       );
       prompt = nextMessage.text;
       stopResyncTurn = nextMessage.stopResync;
+      deliveryIds = nextMessage.deliveryIds;
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);

@@ -64,6 +64,7 @@ export interface ContainerUsage {
 export interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
+  deliveryAckId?: string;
   newSessionId?: string;
   error?: string;
   turnEnd?: boolean;
@@ -401,6 +402,7 @@ export async function runContainerAgent(
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  onDeliveryAcknowledged?: (deliveryId: string) => void | Promise<void>,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
@@ -490,6 +492,14 @@ export async function runContainerAgent(
 
           try {
             const parsed: ContainerOutput = JSON.parse(jsonStr);
+            if (parsed.deliveryAckId) {
+              hadStreamingOutput = true;
+              resetTimeout();
+              outputChain = outputChain.then(() =>
+                onDeliveryAcknowledged?.(parsed.deliveryAckId!),
+              );
+              continue;
+            }
             if (parsed.newSessionId) {
               newSessionId = parsed.newSessionId;
             }
