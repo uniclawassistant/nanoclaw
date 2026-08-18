@@ -35,6 +35,18 @@ import {
 const ALLOWED_REACTIONS: ReadonlySet<string> = new Set(allowedReactions);
 const REACTION_CACHE_CAP = 5000;
 
+/**
+ * Telegram drops a chat action after ~5s, so a turn that runs longer than that
+ * (a subagent, a long tool call) looks like silence. Re-send just under the
+ * expiry to keep "typing…" continuous for as long as the turn is in flight.
+ */
+const TYPING_REFRESH_MS = 4000;
+/**
+ * Safety net: a turn that never reports its end (container killed mid-flight)
+ * must not leave the indicator running forever.
+ */
+const TYPING_MAX_MS = 15 * 60 * 1000;
+
 const LARGE_CONTEXT_MODELS: ReadonlySet<string> = new Set(largeContextModels);
 
 /**
@@ -241,6 +253,7 @@ export class TelegramChannel implements Channel {
   private opts: TelegramChannelOpts;
   private botToken: string;
   private lastReactions = new Map<string, string | null>();
+  private typingTimers = new Map<string, ReturnType<typeof setInterval>>();
 
   constructor(botToken: string, opts: TelegramChannelOpts) {
     this.botToken = botToken;
@@ -990,6 +1003,8 @@ export class TelegramChannel implements Channel {
   }
 
   async disconnect(): Promise<void> {
+    for (const jid of [...this.typingTimers.keys()])
+      this.stopTypingHeartbeat(jid);
     if (this.bot) {
       this.bot.stop();
       this.bot = null;
@@ -1182,14 +1197,51 @@ export class TelegramChannel implements Channel {
     }
   }
 
-  async setTyping(jid: string, isTyping: boolean): Promise<void> {
-    if (!this.bot || !isTyping) return;
+  private async sendTypingAction(jid: string): Promise<void> {
+    if (!this.bot) return;
     try {
       const numericId = jid.replace(/^tg:/, '');
       await this.bot.api.sendChatAction(numericId, 'typing');
     } catch (err) {
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
     }
+  }
+
+  private stopTypingHeartbeat(jid: string): void {
+    const timer = this.typingTimers.get(jid);
+    if (!timer) return;
+    clearInterval(timer);
+    this.typingTimers.delete(jid);
+  }
+
+  /**
+   * Show "typing…" for the whole turn, not just the ~5s Telegram keeps a single
+   * chat action alive. `true` starts a heartbeat (repeat calls while one is
+   * already running just re-assert the action — a message piped into a live
+   * container does that), `false` stops it.
+   */
+  async setTyping(jid: string, isTyping: boolean): Promise<void> {
+    if (!isTyping) {
+      this.stopTypingHeartbeat(jid);
+      return;
+    }
+    if (!this.bot) return;
+
+    await this.sendTypingAction(jid);
+    if (this.typingTimers.has(jid)) return;
+
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      if (Date.now() - startedAt >= TYPING_MAX_MS) {
+        logger.debug({ jid }, 'Typing heartbeat hit max duration, stopping');
+        this.stopTypingHeartbeat(jid);
+        return;
+      }
+      void this.sendTypingAction(jid);
+    }, TYPING_REFRESH_MS);
+    // Never hold the process open on the indicator alone.
+    timer.unref?.();
+    this.typingTimers.set(jid, timer);
   }
 }
 
