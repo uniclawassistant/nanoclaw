@@ -29,6 +29,7 @@ import {
   type AgentRunnerOutput,
   type QueryLoopState,
 } from './handle-query-message.js';
+import { createContextThresholdHook } from './context-threshold-hook.js';
 
 interface ContainerInput {
   prompt: string;
@@ -39,6 +40,7 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  contextThreshold?: number;
 }
 
 interface DeliveryAckOutput {
@@ -618,7 +620,12 @@ async function runQuery(
   const state: QueryLoopState = {
     messageCount: 0,
     resultCount: 0,
+    assistantUsageSampleCount: 0,
   };
+  const contextThresholdHook = createContextThresholdHook(
+    state,
+    containerInput.contextThreshold,
+  );
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -707,6 +714,8 @@ async function runQuery(
           { hooks: [createPreCompactHook(containerInput.assistantName)] },
         ],
         Stop: [{ hooks: [createAutoClearEyeHook(containerInput)] }],
+        PostToolUse: [{ hooks: [contextThresholdHook] }],
+        PostToolUseFailure: [{ hooks: [contextThresholdHook] }],
       },
     },
   });
