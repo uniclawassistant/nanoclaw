@@ -677,4 +677,36 @@ describe('register_group success', () => {
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
   });
+
+  it('preserves existing container config when updating the context threshold', async () => {
+    const additionalMounts = [
+      { hostPath: '/allowed/source', containerPath: 'source' },
+    ];
+    const existing = {
+      ...OTHER_GROUP,
+      containerConfig: { additionalMounts, timeout: 42_000 },
+    };
+    groups['other@g.us'] = existing;
+    setRegisteredGroup('other@g.us', existing);
+
+    await processTaskIpc(
+      {
+        type: 'register_group',
+        jid: 'other@g.us',
+        name: existing.name,
+        folder: existing.folder,
+        trigger: existing.trigger,
+        containerConfig: { contextThreshold: 350_000 },
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('other@g.us')?.containerConfig).toEqual({
+      additionalMounts,
+      timeout: 42_000,
+      contextThreshold: 350_000,
+    });
+  });
 });
