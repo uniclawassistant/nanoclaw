@@ -214,6 +214,7 @@ async function runTask(
         taskId: task.id,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
+        contextThreshold: group.containerConfig?.contextThreshold,
       },
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),

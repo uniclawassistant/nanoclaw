@@ -1648,7 +1648,9 @@ export async function processTaskIpc(
           folder: data.folder,
           trigger: data.trigger,
           added_at: new Date().toISOString(),
-          containerConfig: data.containerConfig,
+          containerConfig: data.containerConfig
+            ? { ...existingGroup?.containerConfig, ...data.containerConfig }
+            : existingGroup?.containerConfig,
           requiresTrigger: data.requiresTrigger,
           isMain: existingGroup?.isMain,
         });

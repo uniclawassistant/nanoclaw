@@ -16,11 +16,89 @@ import {
   startSchedulerLoop,
 } from './task-scheduler.js';
 import type { SchedulerDependencies } from './task-scheduler.js';
+import { createContextThresholdHook } from '../container/agent-runner/src/context-threshold-hook.js';
+import {
+  handleQueryMessage,
+  type QueryLoopState,
+} from '../container/agent-runner/src/handle-query-message.js';
 import {
   _resetForTests,
   formatUsageLine,
   recordUsage,
 } from './usage-tracker.js';
+
+async function captureScheduledInput(contextThreshold?: number) {
+  createTask({
+    id: 'task-context-threshold',
+    group_folder: 'main',
+    chat_jid: 'main-chat',
+    prompt: 'run scheduled work',
+    schedule_type: 'once',
+    schedule_value: '2026-02-22T00:00:00.000Z',
+    context_mode: 'isolated',
+    next_run: new Date(Date.now() - 60_000).toISOString(),
+    status: 'active',
+    created_at: '2026-02-22T00:00:00.000Z',
+  });
+
+  startSchedulerLoop({
+    registeredGroups: () => ({
+      'main-chat': {
+        name: 'Main',
+        folder: 'main',
+        isMain: true,
+        trigger: '@Andy',
+        added_at: '2026-02-22T00:00:00.000Z',
+        containerConfig:
+          contextThreshold === undefined ? undefined : { contextThreshold },
+      },
+    }),
+    getSessions: () => ({}),
+    queue: {
+      enqueueTask: (
+        _groupJid: string,
+        _taskId: string,
+        run: () => Promise<void>,
+      ) => {
+        void run();
+      },
+    } as unknown as SchedulerDependencies['queue'],
+    onProcess: () => {},
+    sendMessage: async () => {},
+  });
+
+  await vi.advanceTimersByTimeAsync(10);
+  return runContainerAgentMock.mock.calls[0]?.[1] as {
+    contextThreshold?: number;
+  };
+}
+
+function recordMainUsage(
+  state: QueryLoopState,
+  messageId: string,
+  contextTokens: number,
+): void {
+  handleQueryMessage(
+    {
+      type: 'assistant',
+      parent_tool_use_id: null,
+      message: {
+        id: messageId,
+        usage: { input_tokens: contextTokens },
+      },
+    },
+    state,
+    { emit: () => {}, log: () => {} },
+  );
+}
+
+async function invokeSuccessHook(
+  hook: ReturnType<typeof createContextThresholdHook>,
+) {
+  return hook({ hook_event_name: 'PostToolUse' } as never, undefined, {
+    signal: new AbortController().signal,
+  });
+}
 
 describe('task scheduler', () => {
   beforeEach(() => {
@@ -137,6 +215,39 @@ describe('task scheduler', () => {
       prompt: `${expectedLine}\nrun scheduled work`,
     });
     expect(input.prompt).not.toContain('ctx: 250k/1000k (25%)');
+  });
+
+  it('passes the configured context threshold to a scheduled container', async () => {
+    const input = await captureScheduledInput(350_000);
+
+    expect(input.contextThreshold).toBe(350_000);
+  });
+
+  it('leaves the scheduled context threshold undefined when not configured', async () => {
+    const input = await captureScheduledInput();
+
+    expect(input.contextThreshold).toBeUndefined();
+  });
+
+  it('uses the scheduled threshold after the second unique main usage sample', async () => {
+    const input = await captureScheduledInput(350_000);
+    const state: QueryLoopState = {
+      messageCount: 0,
+      resultCount: 0,
+      assistantUsageMessageIds: new Set(),
+    };
+    const hook = createContextThresholdHook(state, input.contextThreshold);
+
+    recordMainUsage(state, 'main-1', 350_000);
+    expect(await invokeSuccessHook(hook)).toEqual({});
+    recordMainUsage(state, 'main-2', 350_000);
+    expect(await invokeSuccessHook(hook)).toMatchObject({
+      hookSpecificOutput: {
+        additionalContext:
+          '[context-threshold] ctx=350000. Save the session tail, then refresh the session.',
+      },
+    });
+    expect(await invokeSuccessHook(hook)).toEqual({});
   });
 
   it('computeNextRun anchors interval tasks to scheduled time to prevent drift', () => {

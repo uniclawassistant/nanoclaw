@@ -1412,6 +1412,14 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       .describe(
         'Whether messages must start with the trigger word. Default: false (respond to all messages). Set to true for busy groups with many participants where you only want the agent to respond when explicitly mentioned.',
       ),
+    contextThreshold: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        'Context token threshold for an in-session refresh reminder. Omit to preserve the current setting.',
+      ),
   },
   async (args) => {
     if (!isMain) {
@@ -1433,6 +1441,10 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       folder: args.folder,
       trigger: args.trigger,
       requiresTrigger: args.requiresTrigger ?? false,
+      containerConfig:
+        args.contextThreshold === undefined
+          ? undefined
+          : { contextThreshold: args.contextThreshold },
       timestamp: new Date().toISOString(),
     };
 

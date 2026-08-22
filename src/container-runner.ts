@@ -46,6 +46,7 @@ export interface ContainerInput {
   taskId?: string;
   assistantName?: string;
   script?: string;
+  contextThreshold?: number;
 }
 
 export const IDLE_TIMEOUT_ERROR = 'idle_timeout';

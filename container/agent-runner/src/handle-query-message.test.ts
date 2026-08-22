@@ -7,7 +7,11 @@ import {
 
 function runResult(modelUsage: Record<string, { contextWindow?: number }>) {
   const emitted: AgentRunnerOutput[] = [];
-  const state: QueryLoopState = { messageCount: 0, resultCount: 0 };
+  const state: QueryLoopState = {
+    messageCount: 0,
+    resultCount: 0,
+    assistantUsageMessageIds: new Set(),
+  };
   const message = {
     type: 'result',
     subtype: 'success',
@@ -30,7 +34,11 @@ function runResult(modelUsage: Record<string, { contextWindow?: number }>) {
 
 describe('completed resume pointer (FED-38)', () => {
   it('keeps the last successful assistant UUID across an interrupted result', () => {
-    const state: QueryLoopState = { messageCount: 0, resultCount: 0 };
+    const state: QueryLoopState = {
+      messageCount: 0,
+      resultCount: 0,
+      assistantUsageMessageIds: new Set(),
+    };
     const deps = { emit: () => {}, log: () => {} };
 
     handleQueryMessage({ type: 'assistant', uuid: 'completed-a' }, state, deps);
