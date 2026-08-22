@@ -10,7 +10,7 @@ function runResult(modelUsage: Record<string, { contextWindow?: number }>) {
   const state: QueryLoopState = {
     messageCount: 0,
     resultCount: 0,
-    assistantUsageSampleCount: 0,
+    assistantUsageMessageIds: new Set(),
   };
   const message = {
     type: 'result',
@@ -37,7 +37,7 @@ describe('completed resume pointer (FED-38)', () => {
     const state: QueryLoopState = {
       messageCount: 0,
       resultCount: 0,
-      assistantUsageSampleCount: 0,
+      assistantUsageMessageIds: new Set(),
     };
     const deps = { emit: () => {}, log: () => {} };
 

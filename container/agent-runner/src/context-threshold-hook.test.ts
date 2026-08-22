@@ -10,12 +10,13 @@ function createState(): QueryLoopState {
   return {
     messageCount: 0,
     resultCount: 0,
-    assistantUsageSampleCount: 0,
+    assistantUsageMessageIds: new Set(),
   };
 }
 
 function recordUsage(
   state: QueryLoopState,
+  messageId: string,
   inputTokens: unknown,
   cacheReadInputTokens: unknown = 0,
   cacheCreationInputTokens: unknown = 0,
@@ -24,6 +25,7 @@ function recordUsage(
     {
       type: 'assistant',
       message: {
+        id: messageId,
         usage: {
           input_tokens: inputTokens,
           cache_read_input_tokens: cacheReadInputTokens,
@@ -60,9 +62,9 @@ describe('context threshold hook', () => {
     const state = createState();
     const hook = createContextThresholdHook(state, 100);
 
-    recordUsage(state, 40);
+    recordUsage(state, 'call-1', 40);
     expect(await runHook(hook, 'PostToolUse')).toEqual({});
-    recordUsage(state, 99);
+    recordUsage(state, 'call-2', 99);
     expect(await runHook(hook, 'PostToolUse')).toEqual({});
   });
 
@@ -70,9 +72,9 @@ describe('context threshold hook', () => {
     const state = createState();
     const hook = createContextThresholdHook(state, 100);
 
-    recordUsage(state, 40);
+    recordUsage(state, 'call-1', 40);
     await runHook(hook, 'PostToolUse');
-    recordUsage(state, 60, 30, 10);
+    recordUsage(state, 'call-2', 60, 30, 10);
 
     expect(additionalContext(await runHook(hook, 'PostToolUse'))).toBe(
       '[context-threshold] ctx=100. Save the session tail, then refresh the session.',
@@ -83,9 +85,9 @@ describe('context threshold hook', () => {
     const state = createState();
     const hook = createContextThresholdHook(state, 100);
 
-    recordUsage(state, 90);
+    recordUsage(state, 'call-1', 90);
     await runHook(hook, 'PostToolUseFailure');
-    recordUsage(state, 101);
+    recordUsage(state, 'call-2', 101);
     const output = await runHook(hook, 'PostToolUseFailure');
 
     expect(output).toMatchObject({
@@ -102,11 +104,11 @@ describe('context threshold hook', () => {
     const hook = createContextThresholdHook(state, 100);
 
     expect(await runHook(hook, 'PostToolUse')).toEqual({});
-    recordUsage(state, 'unknown');
+    recordUsage(state, 'unknown-call', 'unknown');
     expect(await runHook(hook, 'PostToolUse')).toEqual({});
-    recordUsage(state, 200);
+    recordUsage(state, 'call-1', 200);
     expect(await runHook(hook, 'PostToolUse')).toEqual({});
-    recordUsage(state, 201);
+    recordUsage(state, 'call-2', 201);
     expect(additionalContext(await runHook(hook, 'PostToolUse'))).toContain(
       'ctx=201',
     );
@@ -116,14 +118,14 @@ describe('context threshold hook', () => {
     const state = createState();
     const hook = createContextThresholdHook(state, 100);
 
-    recordUsage(state, 90);
+    recordUsage(state, 'call-1', 90);
     await runHook(hook, 'PostToolUse');
-    recordUsage(state, 100);
+    recordUsage(state, 'call-2', 100);
     expect(additionalContext(await runHook(hook, 'PostToolUse'))).toContain(
       'ctx=100',
     );
     expect(await runHook(hook, 'PostToolUse')).toEqual({});
-    recordUsage(state, 150);
+    recordUsage(state, 'call-3', 150);
     expect(await runHook(hook, 'PostToolUse')).toEqual({});
   });
 
@@ -131,9 +133,26 @@ describe('context threshold hook', () => {
     const state = createState();
     const hook = createContextThresholdHook(state, undefined);
 
-    recordUsage(state, 500);
-    recordUsage(state, 501);
+    recordUsage(state, 'call-1', 500);
+    recordUsage(state, 'call-2', 501);
 
     expect(await runHook(hook, 'PostToolUse')).toEqual({});
+  });
+
+  it('counts repeated stream events with one message id as one API call', async () => {
+    const state = createState();
+    const hook = createContextThresholdHook(state, 1);
+
+    recordUsage(state, 'call-1', 100);
+    expect(await runHook(hook, 'PostToolUse')).toEqual({});
+    recordUsage(state, 'call-1', 101);
+    expect(await runHook(hook, 'PostToolUse')).toEqual({});
+    recordUsage(state, 'call-1', 102);
+    expect(await runHook(hook, 'PostToolUse')).toEqual({});
+
+    recordUsage(state, 'call-2', 103);
+    expect(additionalContext(await runHook(hook, 'PostToolUse'))).toContain(
+      'ctx=103',
+    );
   });
 });

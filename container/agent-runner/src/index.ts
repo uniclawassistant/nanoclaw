@@ -620,7 +620,7 @@ async function runQuery(
   const state: QueryLoopState = {
     messageCount: 0,
     resultCount: 0,
-    assistantUsageSampleCount: 0,
+    assistantUsageMessageIds: new Set(),
   };
   const contextThresholdHook = createContextThresholdHook(
     state,

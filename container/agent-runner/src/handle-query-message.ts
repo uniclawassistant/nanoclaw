@@ -29,7 +29,7 @@ export interface QueryLoopState {
   // single query() session; `assistant.message.usage` is per-API-call and
   // accurately reflects the current context size of that call.
   lastAssistantUsage?: SdkResultUsage;
-  assistantUsageSampleCount: number;
+  assistantUsageMessageIds: Set<string>;
 }
 
 interface SdkContentBlock {
@@ -62,12 +62,18 @@ export function handleQueryMessage(
     }
     const inner = (
       message as {
-        message?: { usage?: SdkResultUsage; content?: SdkContentBlock[] };
+        message?: {
+          id?: string;
+          usage?: SdkResultUsage;
+          content?: SdkContentBlock[];
+        };
       }
     ).message;
     if (inner?.usage && Number.isFinite(inner.usage.input_tokens)) {
       state.lastAssistantUsage = inner.usage;
-      state.assistantUsageSampleCount++;
+      if (typeof inner.id === 'string' && inner.id.length > 0) {
+        state.assistantUsageMessageIds.add(inner.id);
+      }
     }
     const parentToolUseId = (message as { parent_tool_use_id?: string | null })
       .parent_tool_use_id;

@@ -43,9 +43,9 @@ export function createContextThresholdHook(
   return async (input) => {
     const hookInput = input as ToolResultHookInput;
     if (!isEnabledThreshold(threshold) || warned) return {};
-    if (state.assistantUsageSampleCount === lastObservedSample) return {};
+    if (state.assistantUsageMessageIds.size === lastObservedSample) return {};
 
-    lastObservedSample = state.assistantUsageSampleCount;
+    lastObservedSample = state.assistantUsageMessageIds.size;
     if (lastObservedSample < 2) return {};
 
     const contextTokens = contextUsedTokens(state);
