@@ -37,17 +37,13 @@ export function createContextThresholdHook(
   state: QueryLoopState,
   threshold: number | undefined,
 ): HookCallback {
-  let lastObservedSample = 0;
   let warned = false;
 
   return async (input) => {
     const hookInput = input as ToolResultHookInput;
     if (hookInput.agent_id !== undefined) return {};
     if (!isEnabledThreshold(threshold) || warned) return {};
-    if (state.assistantUsageMessageIds.size === lastObservedSample) return {};
-
-    lastObservedSample = state.assistantUsageMessageIds.size;
-    if (lastObservedSample < 2) return {};
+    if (state.assistantUsageMessageIds.size < 2) return {};
 
     const contextTokens = contextUsedTokens(state);
     if (contextTokens === null || contextTokens < threshold) return {};
