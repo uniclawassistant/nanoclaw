@@ -60,6 +60,8 @@ export function handleQueryMessage(
     if ('uuid' in message) {
       state.lastAssistantUuid = (message as unknown as { uuid: string }).uuid;
     }
+    const parentToolUseId = (message as { parent_tool_use_id?: string | null })
+      .parent_tool_use_id;
     const inner = (
       message as {
         message?: {
@@ -69,14 +71,16 @@ export function handleQueryMessage(
         };
       }
     ).message;
-    if (inner?.usage && Number.isFinite(inner.usage.input_tokens)) {
+    if (
+      parentToolUseId == null &&
+      inner?.usage &&
+      Number.isFinite(inner.usage.input_tokens)
+    ) {
       state.lastAssistantUsage = inner.usage;
       if (typeof inner.id === 'string' && inner.id.length > 0) {
         state.assistantUsageMessageIds.add(inner.id);
       }
     }
-    const parentToolUseId = (message as { parent_tool_use_id?: string | null })
-      .parent_tool_use_id;
     if (parentToolUseId == null && Array.isArray(inner?.content)) {
       for (const block of inner.content) {
         if (block?.type !== 'text') continue;

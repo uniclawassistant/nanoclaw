@@ -20,10 +20,12 @@ function recordUsage(
   inputTokens: unknown,
   cacheReadInputTokens: unknown = 0,
   cacheCreationInputTokens: unknown = 0,
+  parentToolUseId: string | null = null,
 ): void {
   handleQueryMessage(
     {
       type: 'assistant',
+      parent_tool_use_id: parentToolUseId,
       message: {
         id: messageId,
         usage: {
@@ -41,10 +43,15 @@ function recordUsage(
 async function runHook(
   hook: ReturnType<typeof createContextThresholdHook>,
   hookEventName: 'PostToolUse' | 'PostToolUseFailure',
+  agentId?: string,
 ) {
-  return hook({ hook_event_name: hookEventName } as never, undefined, {
-    signal: new AbortController().signal,
-  });
+  return hook(
+    { hook_event_name: hookEventName, agent_id: agentId } as never,
+    undefined,
+    {
+      signal: new AbortController().signal,
+    },
+  );
 }
 
 function additionalContext(
@@ -153,6 +160,42 @@ describe('context threshold hook', () => {
     recordUsage(state, 'call-2', 103);
     expect(additionalContext(await runHook(hook, 'PostToolUse'))).toContain(
       'ctx=103',
+    );
+  });
+
+  it('ignores repeated subagent usage between the first and second main calls', async () => {
+    const state = createState();
+    const hook = createContextThresholdHook(state, 100);
+
+    recordUsage(state, 'main-1', 50);
+    recordUsage(state, 'main-1', 51);
+    expect(await runHook(hook, 'PostToolUse')).toEqual({});
+
+    recordUsage(state, 'sub-1', 500, 0, 0, 'parent-tool');
+    recordUsage(state, 'sub-1', 501, 0, 0, 'parent-tool');
+    expect(await runHook(hook, 'PostToolUse', 'subagent-1')).toEqual({});
+    expect(state.assistantUsageMessageIds).toEqual(new Set(['main-1']));
+    expect(state.lastAssistantUsage?.input_tokens).toBe(51);
+
+    recordUsage(state, 'main-2', 120);
+    expect(additionalContext(await runHook(hook, 'PostToolUse'))).toContain(
+      'ctx=120',
+    );
+  });
+
+  it('keeps a low subagent call from replacing main usage or consuming one-shot', async () => {
+    const state = createState();
+    const hook = createContextThresholdHook(state, 100);
+
+    recordUsage(state, 'main-1', 90);
+    expect(await runHook(hook, 'PostToolUse')).toEqual({});
+    recordUsage(state, 'main-2', 150);
+    recordUsage(state, 'sub-1', 5, 0, 0, 'parent-tool');
+
+    expect(await runHook(hook, 'PostToolUse', 'subagent-1')).toEqual({});
+    expect(state.lastAssistantUsage?.input_tokens).toBe(150);
+    expect(additionalContext(await runHook(hook, 'PostToolUse'))).toContain(
+      'ctx=150',
     );
   });
 });
