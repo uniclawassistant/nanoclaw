@@ -312,7 +312,14 @@ async function runTask(
       armSchedulerWake,
     );
     for (const alert of alerts) {
-      await deps.sendMessage(alert.chatJid, alert.text);
+      await deps
+        .sendMessage(alert.chatJid, alert.text)
+        .catch((err) =>
+          logger.error(
+            { taskId: task.id, chatJid: alert.chatJid, err },
+            'Failed to deliver work continuation limit alert',
+          ),
+        );
     }
   }
 

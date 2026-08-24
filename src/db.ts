@@ -1127,8 +1127,15 @@ export function upsertOpenWork(input: {
   chat_jid: string;
   remaining: string;
   opened_at: string;
-}): OpenWork {
+}): { accepted: true; work: OpenWork } | { accepted: false; reason: string } {
   return db.transaction(() => {
+    const existing = getOpenWork(input.group_folder, input.id);
+    if (existing?.status === 'halted') {
+      return {
+        accepted: false as const,
+        reason: existing.halted_reason ?? 'work continuation is halted',
+      };
+    }
     db.prepare(
       `INSERT INTO open_work (
          id, group_folder, chat_jid, remaining, opened_at
@@ -1150,7 +1157,7 @@ export function upsertOpenWork(input: {
         work.pending_task_id,
       );
     }
-    return work;
+    return { accepted: true as const, work };
   })();
 }
 

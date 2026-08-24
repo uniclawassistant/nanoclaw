@@ -121,6 +121,31 @@ describe('work continuations', () => {
     expect(getAllTasks()).toHaveLength(1);
   });
 
+  it('rejects reopening a halted id without resetting its limits', () => {
+    openWork('main', 'tg:owner', 'canary', 'remaining', openedAt);
+    const config = { ...enabledConfig, maxContinuations: 0 };
+    scheduleWorkContinuationsAtTurnEnd('main', turnEndedAt, config);
+
+    const result = openWork(
+      'main',
+      'tg:owner',
+      'canary',
+      'replacement',
+      turnEndedAt,
+    );
+
+    expect(result).toEqual({
+      accepted: false,
+      reason: 'MAX_CONTINUATIONS (0) reached',
+    });
+    expect(getOpenWork('main', 'canary')).toMatchObject({
+      remaining: 'remaining',
+      continuation_count: 0,
+      status: 'halted',
+      halted_reason: 'MAX_CONTINUATIONS (0) reached',
+    });
+  });
+
   it('stops after MAX_WORK_HOURS and names the work id and reason', () => {
     openWork('main', 'tg:owner', 'canary', 'remaining', openedAt);
 

@@ -43,7 +43,7 @@ export function openWork(
   id: string,
   remaining: string,
   now = new Date(),
-): OpenWork {
+): { accepted: true; work: OpenWork } | { accepted: false; reason: string } {
   return upsertOpenWork({
     id,
     group_folder: groupFolder,

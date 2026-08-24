@@ -25,19 +25,23 @@ export const ASSISTANT_HAS_OWN_NUMBER =
 export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
-function nonNegativeInteger(
+export function nonNegativeInteger(
   value: string | undefined,
   fallback: number,
 ): number {
-  const parsed = Number.parseInt(value ?? '', 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+  const normalized = value?.trim() ?? '';
+  if (!normalized) return fallback;
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
-function nonNegativeNumber(
+export function nonNegativeNumber(
   value: string | undefined,
   fallback: number,
 ): number {
-  const parsed = Number(value);
+  const normalized = value?.trim() ?? '';
+  if (!normalized) return fallback;
+  const parsed = Number(normalized);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 

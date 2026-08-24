@@ -180,7 +180,7 @@ export interface IpcDeps {
     chatJid: string,
     id: string,
     remaining: string,
-  ) => void;
+  ) => { accepted: true } | { accepted: false; reason: string };
   closeWork?: (folder: string, id: string) => boolean;
 }
 
@@ -1237,19 +1237,30 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     error: 'open_work not wired on host',
                   });
                 } else {
-                  deps.openWork(
+                  const result = deps.openWork(
                     sourceGroup,
                     ownGroup[0],
                     data.id,
                     data.remaining,
                   );
-                  writeIpcResponse(responsesDir, data.requestId, {
-                    success: true,
-                  });
-                  logger.info(
-                    { sourceGroup, workId: data.id },
-                    'IPC work opened',
-                  );
+                  if (result.accepted) {
+                    writeIpcResponse(responsesDir, data.requestId, {
+                      success: true,
+                    });
+                    logger.info(
+                      { sourceGroup, workId: data.id },
+                      'IPC work opened',
+                    );
+                  } else {
+                    writeIpcResponse(responsesDir, data.requestId, {
+                      success: false,
+                      error: `Work "${data.id}" is halted: ${result.reason}`,
+                    });
+                    logger.warn(
+                      { sourceGroup, workId: data.id, reason: result.reason },
+                      'IPC open_work rejected for halted work',
+                    );
+                  }
                 }
               } else if (
                 data.type === 'close_work' &&
