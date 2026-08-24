@@ -11,6 +11,10 @@ const envConfig = readEnvFile([
   'ONECLI_URL',
   'TZ',
   'CONTAINER_NAMESPACE',
+  'WORK_CONTINUATIONS_ENABLED',
+  'CONTINUATION_DELAY',
+  'MAX_CONTINUATIONS',
+  'MAX_WORK_HOURS',
 ]);
 
 export const ASSISTANT_NAME =
@@ -20,6 +24,39 @@ export const ASSISTANT_HAS_OWN_NUMBER =
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
+
+function nonNegativeInteger(
+  value: string | undefined,
+  fallback: number,
+): number {
+  const parsed = Number.parseInt(value ?? '', 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function nonNegativeNumber(
+  value: string | undefined,
+  fallback: number,
+): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+export const WORK_CONTINUATIONS_ENABLED =
+  (process.env.WORK_CONTINUATIONS_ENABLED ||
+    envConfig.WORK_CONTINUATIONS_ENABLED ||
+    'true') !== 'false';
+export const CONTINUATION_DELAY = nonNegativeInteger(
+  process.env.CONTINUATION_DELAY || envConfig.CONTINUATION_DELAY,
+  300000,
+);
+export const MAX_CONTINUATIONS = nonNegativeInteger(
+  process.env.MAX_CONTINUATIONS || envConfig.MAX_CONTINUATIONS,
+  8,
+);
+export const MAX_WORK_HOURS = nonNegativeNumber(
+  process.env.MAX_WORK_HOURS || envConfig.MAX_WORK_HOURS,
+  4,
+);
 
 // Absolute paths needed for container mounts
 const PROJECT_ROOT = process.cwd();

@@ -1464,6 +1464,69 @@ Use available_groups.json to find the JID for a group. The folder name must be c
 const RESET_SESSION_TIMEOUT_MS = 10_000;
 const RESET_SESSION_POLL_INTERVAL_MS = 100;
 
+async function requestHostWorkChange(
+  type: 'open_work' | 'close_work',
+  id: string,
+  remaining?: string,
+): Promise<ToolResult> {
+  const requestId = crypto.randomUUID();
+  writeIpcFile(MESSAGES_DIR, {
+    type,
+    id,
+    remaining,
+    requestId,
+    groupFolder,
+    chatJid,
+    timestamp: new Date().toISOString(),
+  });
+
+  const responsePath = path.join(RESPONSES_DIR, `${requestId}.json`);
+  const deadline = Date.now() + RESET_SESSION_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(responsePath)) {
+      try {
+        const response = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+        fs.unlinkSync(responsePath);
+        const payload = response.success
+          ? { ok: true, ...(response.data ?? {}) }
+          : { ok: false, error: response.error ?? 'unknown error' };
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
+          ...(response.success ? {} : { isError: true as const }),
+        };
+      } catch (err) {
+        return toolError(
+          `Failed to read ${type} response: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    await sleep(RESET_SESSION_POLL_INTERVAL_MS);
+  }
+  return toolError(
+    `${type} request timed out — host did not acknowledge within 10s.`,
+  );
+}
+
+safeTool(
+  'open_work',
+  'Declare a bounded piece of work before starting it. If the turn ends before close_work is called, the host schedules one continuation carrying remaining verbatim.',
+  {
+    id: z.string().min(1).describe('Stable identifier for this piece of work'),
+    remaining: z
+      .string()
+      .min(1)
+      .describe('Verbatim description of the work that remains'),
+  },
+  async (args) => requestHostWorkChange('open_work', args.id, args.remaining),
+);
+
+safeTool(
+  'close_work',
+  'Close a previously declared piece of work and cancel its pending continuation, if any.',
+  { id: z.string().min(1).describe('Identifier passed to open_work') },
+  async (args) => requestHostWorkChange('close_work', args.id),
+);
+
 safeTool(
   'reset_session',
   `Reset your conversation context for THIS chat. Two modes:

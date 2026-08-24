@@ -106,7 +106,16 @@ import {
 } from './sender-allowlist.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import { SessionInvalidationFence } from './session-invalidation.js';
-import { pokeScheduler, startSchedulerLoop } from './task-scheduler.js';
+import {
+  armSchedulerWake,
+  pokeScheduler,
+  startSchedulerLoop,
+} from './task-scheduler.js';
+import {
+  closeWork,
+  openWork,
+  scheduleWorkContinuationsAtTurnEnd,
+} from './work-continuation.js';
 import {
   Channel,
   type MessageFormat,
@@ -782,7 +791,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // 30-min idle close, since runAgent only returns on container exit).
         // FED-37: mode=new also respawns so a self-reset with no inbound message
         // pending doesn't leave the poller silent.
-        await applyPendingResetAtTurnEnd(group.folder);
+        await handleOpenWorkAtTurnEnd(group.folder);
       }
     });
 
@@ -797,6 +806,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           outputSentToUser = true;
         },
       });
+      await handleOpenWorkAtTurnEnd(group.folder);
     }
 
     if (output === 'error' || hadError) {
@@ -926,9 +936,33 @@ function applyPendingResetPreTurn(folder: string): void {
  * the requesting turn ends, the container dies, and the respawn brings the
  * group back to continue — no inbound message required.
  */
-async function applyPendingResetAtTurnEnd(folder: string): Promise<void> {
+async function applyPendingResetAtTurnEnd(folder: string): Promise<boolean> {
   const mode = consumePendingReset(folder);
-  if (mode) await resetGroupSessionWithRespawn(folder, mode);
+  if (!mode) return false;
+  await resetGroupSessionWithRespawn(folder, mode);
+  return true;
+}
+
+async function handleOpenWorkAtTurnEnd(folder: string): Promise<void> {
+  const resetApplied = await applyPendingResetAtTurnEnd(folder);
+  if (resetApplied) return;
+
+  const alerts = scheduleWorkContinuationsAtTurnEnd(
+    folder,
+    new Date(),
+    undefined,
+    armSchedulerWake,
+  );
+  for (const alert of alerts) {
+    const channel = findChannel(channels, alert.chatJid);
+    if (!channel) continue;
+    await sendText(
+      channel,
+      alert.chatJid,
+      alert.text,
+      getLastIncomingThreadId(alert.chatJid),
+    );
+  }
 }
 
 /**
@@ -1491,6 +1525,9 @@ async function main(): Promise<void> {
       pendingResets[folder] = mode;
       return { accepted: true };
     },
+    openWork: (folder, chatJid, id, remaining) =>
+      openWork(folder, chatJid, id, remaining),
+    closeWork: (folder, id) => closeWork(folder, id),
     onTasksChanged: () => {
       const tasks = getAllTasks();
       const taskRows = tasks.map((t) => ({

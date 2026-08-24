@@ -7,6 +7,7 @@ import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
   NewMessage,
+  OpenWork,
   RegisteredGroup,
   ScheduledTask,
   TaskRunLog,
@@ -66,6 +67,24 @@ function createSchema(database: Database.Database): void {
       FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id)
     );
     CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
+
+    CREATE TABLE IF NOT EXISTS open_work (
+      id TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      remaining TEXT NOT NULL,
+      opened_at TEXT NOT NULL,
+      continuation_count INTEGER NOT NULL DEFAULT 0,
+      pending_task_id TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      halted_reason TEXT,
+      PRIMARY KEY (group_folder, id),
+      FOREIGN KEY (pending_task_id) REFERENCES scheduled_tasks(id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_open_work_pending_task
+      ON open_work(pending_task_id) WHERE pending_task_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_open_work_group_status
+      ON open_work(group_folder, status);
 
     CREATE TABLE IF NOT EXISTS router_state (
       key TEXT PRIMARY KEY,
@@ -1100,6 +1119,129 @@ export function createTask(
     task.status,
     task.created_at,
   );
+}
+
+export function upsertOpenWork(input: {
+  id: string;
+  group_folder: string;
+  chat_jid: string;
+  remaining: string;
+  opened_at: string;
+}): OpenWork {
+  return db.transaction(() => {
+    db.prepare(
+      `INSERT INTO open_work (
+         id, group_folder, chat_jid, remaining, opened_at
+       ) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(group_folder, id) DO UPDATE SET
+         chat_jid = excluded.chat_jid,
+         remaining = excluded.remaining`,
+    ).run(
+      input.id,
+      input.group_folder,
+      input.chat_jid,
+      input.remaining,
+      input.opened_at,
+    );
+    const work = getOpenWork(input.group_folder, input.id)!;
+    if (work.pending_task_id) {
+      db.prepare('UPDATE scheduled_tasks SET prompt = ? WHERE id = ?').run(
+        input.remaining,
+        work.pending_task_id,
+      );
+    }
+    return work;
+  })();
+}
+
+export function getOpenWork(
+  groupFolder: string,
+  id: string,
+): OpenWork | undefined {
+  return db
+    .prepare('SELECT * FROM open_work WHERE group_folder = ? AND id = ?')
+    .get(groupFolder, id) as OpenWork | undefined;
+}
+
+export function getOpenWorkForGroup(groupFolder: string): OpenWork[] {
+  return db
+    .prepare(
+      `SELECT * FROM open_work
+       WHERE group_folder = ? AND status = 'open'
+       ORDER BY opened_at, id`,
+    )
+    .all(groupFolder) as OpenWork[];
+}
+
+export function closeOpenWork(groupFolder: string, id: string): boolean {
+  return db.transaction(() => {
+    const work = getOpenWork(groupFolder, id);
+    if (!work) return false;
+    db.prepare('DELETE FROM open_work WHERE group_folder = ? AND id = ?').run(
+      groupFolder,
+      id,
+    );
+    if (work.pending_task_id) deleteTask(work.pending_task_id);
+    return true;
+  })();
+}
+
+export function scheduleOpenWorkTask(
+  work: OpenWork,
+  task: Omit<ScheduledTask, 'last_run' | 'last_result'>,
+): boolean {
+  return db.transaction(() => {
+    const current = getOpenWork(work.group_folder, work.id);
+    if (
+      !current ||
+      current.status !== 'open' ||
+      current.pending_task_id !== null
+    ) {
+      return false;
+    }
+    createTask(task);
+    const result = db
+      .prepare(
+        `UPDATE open_work
+         SET pending_task_id = ?, continuation_count = continuation_count + 1
+         WHERE group_folder = ? AND id = ?
+           AND status = 'open' AND pending_task_id IS NULL`,
+      )
+      .run(task.id, work.group_folder, work.id);
+    if (result.changes === 0) {
+      deleteTask(task.id);
+      return false;
+    }
+    return true;
+  })();
+}
+
+export function claimOpenWorkTask(taskId: string): OpenWork | undefined {
+  return db.transaction(() => {
+    const work = db
+      .prepare('SELECT * FROM open_work WHERE pending_task_id = ?')
+      .get(taskId) as OpenWork | undefined;
+    if (!work) return undefined;
+    db.prepare(
+      `UPDATE open_work SET pending_task_id = NULL
+       WHERE group_folder = ? AND id = ? AND pending_task_id = ?`,
+    ).run(work.group_folder, work.id, taskId);
+    return { ...work, pending_task_id: null };
+  })();
+}
+
+export function haltOpenWork(
+  groupFolder: string,
+  id: string,
+  reason: string,
+): boolean {
+  const result = db
+    .prepare(
+      `UPDATE open_work SET status = 'halted', halted_reason = ?
+       WHERE group_folder = ? AND id = ? AND status = 'open'`,
+    )
+    .run(reason, groupFolder, id);
+  return result.changes === 1;
 }
 
 export function getTaskById(id: string): ScheduledTask | undefined {
