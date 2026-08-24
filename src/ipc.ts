@@ -175,6 +175,13 @@ export interface IpcDeps {
     folder: string,
     mode: 'new' | 'restart',
   ) => { accepted: boolean; reason?: string };
+  openWork?: (
+    folder: string,
+    chatJid: string,
+    id: string,
+    remaining: string,
+  ) => { accepted: true } | { accepted: false; reason: string };
+  closeWork?: (folder: string, id: string) => boolean;
 }
 
 const RESPONSE_TTL_MS = 60_000;
@@ -1209,6 +1216,77 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       });
                     }
                   }
+                }
+              } else if (
+                data.type === 'open_work' &&
+                typeof data.requestId === 'string' &&
+                typeof data.id === 'string' &&
+                typeof data.remaining === 'string'
+              ) {
+                const responsesDir = path.join(
+                  ipcBaseDir,
+                  sourceGroup,
+                  'responses',
+                );
+                const ownGroup = Object.entries(registeredGroups).find(
+                  ([, group]) => group.folder === sourceGroup,
+                );
+                if (!ownGroup || !deps.openWork) {
+                  writeIpcResponse(responsesDir, data.requestId, {
+                    success: false,
+                    error: 'open_work not wired on host',
+                  });
+                } else {
+                  const result = deps.openWork(
+                    sourceGroup,
+                    ownGroup[0],
+                    data.id,
+                    data.remaining,
+                  );
+                  if (result.accepted) {
+                    writeIpcResponse(responsesDir, data.requestId, {
+                      success: true,
+                    });
+                    logger.info(
+                      { sourceGroup, workId: data.id },
+                      'IPC work opened',
+                    );
+                  } else {
+                    writeIpcResponse(responsesDir, data.requestId, {
+                      success: false,
+                      error: `Work "${data.id}" is halted: ${result.reason}`,
+                    });
+                    logger.warn(
+                      { sourceGroup, workId: data.id, reason: result.reason },
+                      'IPC open_work rejected for halted work',
+                    );
+                  }
+                }
+              } else if (
+                data.type === 'close_work' &&
+                typeof data.requestId === 'string' &&
+                typeof data.id === 'string'
+              ) {
+                const responsesDir = path.join(
+                  ipcBaseDir,
+                  sourceGroup,
+                  'responses',
+                );
+                if (!deps.closeWork) {
+                  writeIpcResponse(responsesDir, data.requestId, {
+                    success: false,
+                    error: 'close_work not wired on host',
+                  });
+                } else {
+                  const closed = deps.closeWork(sourceGroup, data.id);
+                  writeIpcResponse(responsesDir, data.requestId, {
+                    success: true,
+                    data: { closed },
+                  });
+                  logger.info(
+                    { sourceGroup, workId: data.id, closed },
+                    'IPC work closed',
+                  );
                 }
               } else if (
                 data.type === 'reset_session' &&

@@ -27,6 +27,11 @@ import {
   getState,
   recordUsage,
 } from './usage-tracker.js';
+import {
+  claimWorkContinuation,
+  isWorkContinuationTask,
+  scheduleWorkContinuationsAtTurnEnd,
+} from './work-continuation.js';
 
 /**
  * Compute the next run time for a recurring task, anchored to the
@@ -89,7 +94,7 @@ export interface SchedulerDependencies {
    * scheduled-task turn — the primary night use case) actually take effect and
    * bring the group back, instead of hanging until the next inbound message.
    */
-  applyPendingResetAtTurnEnd?: (folder: string) => Promise<void>;
+  applyPendingResetAtTurnEnd?: (folder: string) => Promise<boolean>;
   queue: GroupQueue;
   onProcess: (
     groupJid: string,
@@ -105,6 +110,12 @@ async function runTask(
   deps: SchedulerDependencies,
 ): Promise<void> {
   const startTime = Date.now();
+  const isWorkContinuation = isWorkContinuationTask(task.id);
+  if (isWorkContinuation && !claimWorkContinuation(task.id)) {
+    logger.info({ taskId: task.id }, 'Skipping cancelled work continuation');
+    updateTaskAfterRun(task.id, null, 'Cancelled');
+    return;
+  }
   let groupDir: string;
   try {
     groupDir = resolveGroupFolderPath(task.group_folder);
@@ -184,7 +195,9 @@ async function runTask(
   const sessions = deps.getSessions();
   const sessionId =
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
-  const usageLine = formatUsageLine(task.chat_jid, sessionId);
+  const usageLine = isWorkContinuation
+    ? null
+    : formatUsageLine(task.chat_jid, sessionId);
   const prompt = usageLine ? `${usageLine}\n${task.prompt}` : task.prompt;
 
   // After the task produces a result, close the container promptly.
@@ -211,6 +224,7 @@ async function runTask(
         chatJid: task.chat_jid,
         isMain,
         isScheduledTask: true,
+        isWorkContinuation,
         taskId: task.id,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
@@ -287,8 +301,26 @@ async function runTask(
   // kill the session and respawn with a bootstrap prompt so the work continues.
   // Runs regardless of task error: a requested self-reset should still take.
   // Respawn tasks are exempt so a fresh bootstrap can't immediately re-reset.
-  if (!isRespawnTask(task.id)) {
-    await deps.applyPendingResetAtTurnEnd?.(task.group_folder);
+  const resetApplied = isRespawnTask(task.id)
+    ? false
+    : await deps.applyPendingResetAtTurnEnd?.(task.group_folder);
+  if (!resetApplied) {
+    const alerts = scheduleWorkContinuationsAtTurnEnd(
+      task.group_folder,
+      new Date(),
+      undefined,
+      armSchedulerWake,
+    );
+    for (const alert of alerts) {
+      await deps
+        .sendMessage(alert.chatJid, alert.text)
+        .catch((err) =>
+          logger.error(
+            { taskId: task.id, chatJid: alert.chatJid, err },
+            'Failed to deliver work continuation limit alert',
+          ),
+        );
+    }
   }
 
   const durationMs = Date.now() - startTime;
@@ -313,6 +345,38 @@ async function runTask(
 
 let schedulerRunning = false;
 let schedulerDeps: SchedulerDependencies | null = null;
+let scheduledPokeTimer: ReturnType<typeof setTimeout> | null = null;
+let scheduledPokeAt = Number.POSITIVE_INFINITY;
+
+export function armSchedulerWake(runAt: string): void {
+  const timestamp = new Date(runAt).getTime();
+  if (!Number.isFinite(timestamp) || timestamp >= scheduledPokeAt) return;
+  if (scheduledPokeTimer) clearTimeout(scheduledPokeTimer);
+  scheduledPokeAt = timestamp;
+  scheduledPokeTimer = setTimeout(
+    () => {
+      scheduledPokeTimer = null;
+      scheduledPokeAt = Number.POSITIVE_INFINITY;
+      pokeScheduler();
+      armNextWorkContinuation();
+    },
+    Math.max(0, timestamp - Date.now()),
+  );
+}
+
+function armNextWorkContinuation(): void {
+  const next = getAllTasks()
+    .filter(
+      (task) =>
+        isWorkContinuationTask(task.id) &&
+        task.status === 'active' &&
+        task.schedule_type === 'once' &&
+        task.next_run !== null &&
+        new Date(task.next_run).getTime() > Date.now(),
+    )
+    .sort((left, right) => left.next_run!.localeCompare(right.next_run!))[0];
+  if (next?.next_run) armSchedulerWake(next.next_run);
+}
 
 /**
  * Enqueue every task whose `next_run` is due. Shared by the periodic loop and
@@ -346,6 +410,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   schedulerRunning = true;
   schedulerDeps = deps;
   logger.info('Scheduler loop started');
+  armNextWorkContinuation();
 
   const loop = async () => {
     try {
@@ -380,4 +445,7 @@ export function pokeScheduler(): void {
 export function _resetSchedulerLoopForTests(): void {
   schedulerRunning = false;
   schedulerDeps = null;
+  if (scheduledPokeTimer) clearTimeout(scheduledPokeTimer);
+  scheduledPokeTimer = null;
+  scheduledPokeAt = Number.POSITIVE_INFINITY;
 }

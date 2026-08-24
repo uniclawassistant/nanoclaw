@@ -26,6 +26,10 @@ import {
   formatUsageLine,
   recordUsage,
 } from './usage-tracker.js';
+import {
+  openWork,
+  scheduleWorkContinuationsAtTurnEnd,
+} from './work-continuation.js';
 
 async function captureScheduledInput(contextThreshold?: number) {
   createTask({
@@ -227,6 +231,89 @@ describe('task scheduler', () => {
     const input = await captureScheduledInput();
 
     expect(input.contextThreshold).toBeUndefined();
+  });
+
+  it('passes continuation remaining to the agent verbatim', async () => {
+    const remaining = 'line 1\nline 2';
+    const now = new Date();
+    openWork('main', 'main-chat', 'canary', remaining, now);
+    scheduleWorkContinuationsAtTurnEnd('main', now, {
+      enabled: true,
+      delayMs: 0,
+      maxContinuations: 8,
+      maxWorkHours: 4,
+    });
+
+    startSchedulerLoop({
+      registeredGroups: () => ({
+        'main-chat': {
+          name: 'Main',
+          folder: 'main',
+          isMain: true,
+          trigger: '@Andy',
+          added_at: now.toISOString(),
+        },
+      }),
+      getSessions: () => ({ main: 'current-session' }),
+      queue: {
+        enqueueTask: (
+          _groupJid: string,
+          _taskId: string,
+          run: () => Promise<void>,
+        ) => {
+          void run();
+        },
+      } as unknown as SchedulerDependencies['queue'],
+      onProcess: () => {},
+      sendMessage: async () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    const input = runContainerAgentMock.mock.calls[0]?.[1];
+    expect(input.prompt.split('\n')).toEqual(remaining.split('\n'));
+    expect(input.isWorkContinuation).toBe(true);
+  });
+
+  it('wakes a continuation at its delay instead of waiting for the poll loop', async () => {
+    const now = new Date();
+    openWork('main', 'main-chat', 'canary', 'continue', now);
+    scheduleWorkContinuationsAtTurnEnd('main', now, {
+      enabled: true,
+      delayMs: 300_001,
+      maxContinuations: 8,
+      maxWorkHours: 4,
+    });
+
+    startSchedulerLoop({
+      registeredGroups: () => ({
+        'main-chat': {
+          name: 'Main',
+          folder: 'main',
+          isMain: true,
+          trigger: '@Andy',
+          added_at: now.toISOString(),
+        },
+      }),
+      getSessions: () => ({ main: 'current-session' }),
+      queue: {
+        enqueueTask: (
+          _groupJid: string,
+          _taskId: string,
+          run: () => Promise<void>,
+        ) => {
+          void run();
+        },
+      } as unknown as SchedulerDependencies['queue'],
+      onProcess: () => {},
+      sendMessage: async () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(runContainerAgentMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(runContainerAgentMock).toHaveBeenCalledTimes(1);
   });
 
   it('uses the scheduled threshold after the second unique main usage sample', async () => {

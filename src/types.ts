@@ -79,6 +79,18 @@ export interface ScheduledTask {
   created_at: string;
 }
 
+export interface OpenWork {
+  id: string;
+  group_folder: string;
+  chat_jid: string;
+  remaining: string;
+  opened_at: string;
+  continuation_count: number;
+  pending_task_id: string | null;
+  status: 'open' | 'halted';
+  halted_reason: string | null;
+}
+
 export interface TaskRunLog {
   task_id: string;
   run_at: string;

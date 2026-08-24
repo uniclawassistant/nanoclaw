@@ -43,6 +43,7 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  isWorkContinuation?: boolean;
   taskId?: string;
   assistantName?: string;
   script?: string;

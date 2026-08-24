@@ -30,6 +30,7 @@ import {
   type QueryLoopState,
 } from './handle-query-message.js';
 import { createContextThresholdHook } from './context-threshold-hook.js';
+import { buildInitialPrompt } from './initial-prompt.js';
 
 interface ContainerInput {
   prompt: string;
@@ -38,6 +39,7 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  isWorkContinuation?: boolean;
   assistantName?: string;
   script?: string;
   contextThreshold?: number;
@@ -849,17 +851,18 @@ async function main(): Promise<void> {
   }
 
   // Build initial prompt (drain any pending IPC messages too)
-  let prompt = containerInput.prompt;
-  if (containerInput.isScheduledTask) {
-    prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
-  }
   const pending = drainIpcInput();
+  let prompt = buildInitialPrompt(
+    containerInput.prompt,
+    containerInput.isScheduledTask === true,
+    containerInput.isWorkContinuation === true,
+    pending.map((message) => message.text),
+  );
   let deliveryIds = pending.flatMap((message) =>
     message.deliveryId ? [message.deliveryId] : [],
   );
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.map((message) => message.text).join('\n');
   }
 
   // Script phase: run script before waking agent

@@ -106,7 +106,17 @@ import {
 } from './sender-allowlist.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import { SessionInvalidationFence } from './session-invalidation.js';
-import { pokeScheduler, startSchedulerLoop } from './task-scheduler.js';
+import {
+  armSchedulerWake,
+  pokeScheduler,
+  startSchedulerLoop,
+} from './task-scheduler.js';
+import {
+  closeWork,
+  openWork,
+  scheduleWorkContinuationsAtTurnEnd,
+} from './work-continuation.js';
+import { TurnBoundary } from './turn-boundary.js';
 import {
   Channel,
   type MessageFormat,
@@ -713,83 +723,99 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     isUserFacing: true,
   });
   let rawAccumulated = '';
-  let turnEndProcessed = false;
+  const turnBoundary = new TurnBoundary();
 
   try {
-    const output = await runAgent(group, prompt, chatJid, async (result) => {
-      // Streaming output callback — called for each agent result
-      if (result.result) {
-        const raw =
-          typeof result.result === 'string'
-            ? result.result
-            : JSON.stringify(result.result);
-        rawAccumulated += raw;
-        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-        logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-        if (text) {
-          // FED-9 Class A: a prior outbound (MCP send_message etc.) already
-          // ran this turn — this trailing plain text is a recap leak.
-          checkClassA(turnState, text);
-          await sendText(channel, chatJid, text, replyThreadId);
-          turnState.outboundCount++;
-          outputSentToUser = true;
-        }
-        // Only reset idle timer on actual results, not session-update markers (result: null)
-        resetIdleTimer();
-      }
-
-      if (result.status === 'success') {
-        queue.notifyIdle(chatJid);
-      }
-
-      if (result.status === 'error') {
-        hadError = true;
-      }
-
-      if (result.turnEnd) {
-        // The turn is done — drop the typing heartbeat. The container stays
-        // alive and idle until IDLE_TIMEOUT, and "typing…" through that idle
-        // stretch would be a lie; the next piped message restarts it.
-        await channel.setTyping?.(chatJid, false);
-        await checkClassB(turnState, rawAccumulated, {
-          hadError,
-          sendAckStub: async (ackText) => {
-            await sendText(channel, chatJid, ackText, replyThreadId);
-            outputSentToUser = true;
-          },
-        });
-        if (result.usage) {
-          const state = recordUsage({
-            jid: chatJid,
-            sessionId: result.newSessionId ?? sessions[group.folder] ?? null,
-            usage: result.usage,
-            origin: 'interactive',
-          });
-          const threshold = checkThreshold(state);
-          if (threshold) {
-            await sendText(channel, chatJid, threshold.message, replyThreadId);
+    const output = await runAgent(
+      group,
+      prompt,
+      chatJid,
+      async (result) => {
+        // Streaming output callback — called for each agent result
+        if (result.result) {
+          const raw =
+            typeof result.result === 'string'
+              ? result.result
+              : JSON.stringify(result.result);
+          rawAccumulated += raw;
+          // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+          const text = raw
+            .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+            .trim();
+          logger.info(
+            { group: group.name },
+            `Agent output: ${raw.length} chars`,
+          );
+          if (text) {
+            // FED-9 Class A: a prior outbound (MCP send_message etc.) already
+            // ran this turn — this trailing plain text is a recap leak.
+            checkClassA(turnState, text);
+            await sendText(channel, chatJid, text, replyThreadId);
+            turnState.outboundCount++;
             outputSentToUser = true;
           }
+          // Only reset idle timer on actual results, not session-update markers (result: null)
+          resetIdleTimer();
         }
-        turnState.outboundCount = 0;
-        rawAccumulated = '';
-        turnEndProcessed = true;
 
-        // FED-21 / PR #61: agent may have called mcp__nanoclaw__reset_session
-        // during this turn. Apply at this turnEnd streaming event (container
-        // still alive → prompt kill; deferring past it hangs the reset until the
-        // 30-min idle close, since runAgent only returns on container exit).
-        // FED-37: mode=new also respawns so a self-reset with no inbound message
-        // pending doesn't leave the poller silent.
-        await applyPendingResetAtTurnEnd(group.folder);
-      }
-    });
+        if (result.status === 'success') {
+          queue.notifyIdle(chatJid);
+        }
+
+        if (result.status === 'error') {
+          hadError = true;
+        }
+
+        if (result.turnEnd) {
+          // The turn is done — drop the typing heartbeat. The container stays
+          // alive and idle until IDLE_TIMEOUT, and "typing…" through that idle
+          // stretch would be a lie; the next piped message restarts it.
+          await channel.setTyping?.(chatJid, false);
+          await checkClassB(turnState, rawAccumulated, {
+            hadError,
+            sendAckStub: async (ackText) => {
+              await sendText(channel, chatJid, ackText, replyThreadId);
+              outputSentToUser = true;
+            },
+          });
+          if (result.usage) {
+            const state = recordUsage({
+              jid: chatJid,
+              sessionId: result.newSessionId ?? sessions[group.folder] ?? null,
+              usage: result.usage,
+              origin: 'interactive',
+            });
+            const threshold = checkThreshold(state);
+            if (threshold) {
+              await sendText(
+                channel,
+                chatJid,
+                threshold.message,
+                replyThreadId,
+              );
+              outputSentToUser = true;
+            }
+          }
+          turnState.outboundCount = 0;
+          rawAccumulated = '';
+          // FED-21 / PR #61: agent may have called mcp__nanoclaw__reset_session
+          // during this turn. Apply at this turnEnd streaming event (container
+          // still alive → prompt kill; deferring past it hangs the reset until the
+          // 30-min idle close, since runAgent only returns on container exit).
+          // FED-37: mode=new also respawns so a self-reset with no inbound message
+          // pending doesn't leave the poller silent.
+          await turnBoundary.handleObserved(() =>
+            handleOpenWorkAtTurnEnd(group.folder),
+          );
+        }
+      },
+      () => turnBoundary.markActivity(),
+    );
 
     await channel.setTyping?.(chatJid, false);
     if (idleTimer) clearTimeout(idleTimer);
 
-    if (!turnEndProcessed) {
+    if (turnBoundary.isPending()) {
       await checkClassB(turnState, rawAccumulated, {
         hadError: hadError || output === 'error',
         sendAckStub: async (text) => {
@@ -797,6 +823,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           outputSentToUser = true;
         },
       });
+      await turnBoundary.handlePending(() =>
+        handleOpenWorkAtTurnEnd(group.folder),
+      );
     }
 
     if (output === 'error' || hadError) {
@@ -823,6 +852,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   } finally {
     // Belt and braces: runAgent can reject (container died) and skip the
     // in-band stops above, and the heartbeat must not outlive the run.
+    await turnBoundary
+      .handlePending(() => handleOpenWorkAtTurnEnd(group.folder))
+      .catch((err) =>
+        logger.error(
+          { folder: group.folder, err },
+          'Failed to handle open work at rejected turn boundary',
+        ),
+      );
     await channel.setTyping?.(chatJid, false);
     endTurn(chatJid);
   }
@@ -926,9 +963,44 @@ function applyPendingResetPreTurn(folder: string): void {
  * the requesting turn ends, the container dies, and the respawn brings the
  * group back to continue — no inbound message required.
  */
-async function applyPendingResetAtTurnEnd(folder: string): Promise<void> {
+async function applyPendingResetAtTurnEnd(folder: string): Promise<boolean> {
   const mode = consumePendingReset(folder);
-  if (mode) await resetGroupSessionWithRespawn(folder, mode);
+  if (!mode) return false;
+  await resetGroupSessionWithRespawn(folder, mode);
+  return true;
+}
+
+async function handleOpenWorkAtTurnEnd(folder: string): Promise<void> {
+  const resetApplied = await applyPendingResetAtTurnEnd(folder);
+  if (resetApplied) return;
+
+  const alerts = scheduleWorkContinuationsAtTurnEnd(
+    folder,
+    new Date(),
+    undefined,
+    armSchedulerWake,
+  );
+  for (const alert of alerts) {
+    const channel = findChannel(channels, alert.chatJid);
+    if (!channel) {
+      logger.error(
+        { folder, chatJid: alert.chatJid },
+        'Cannot deliver work continuation limit alert: channel not found',
+      );
+      continue;
+    }
+    await sendText(
+      channel,
+      alert.chatJid,
+      alert.text,
+      getLastIncomingThreadId(alert.chatJid),
+    ).catch((err) =>
+      logger.error(
+        { folder, chatJid: alert.chatJid, err },
+        'Failed to deliver work continuation limit alert',
+      ),
+    );
+  }
 }
 
 /**
@@ -981,6 +1053,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  onDeliveryAcknowledged?: () => void,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   let sessionId: string | undefined = sessions[group.folder];
@@ -1064,6 +1137,7 @@ async function runAgent(
       wrappedOnOutput,
       (deliveryId) => {
         queue.acknowledgeMessage(chatJid, deliveryId);
+        onDeliveryAcknowledged?.();
       },
     );
 
@@ -1491,6 +1565,9 @@ async function main(): Promise<void> {
       pendingResets[folder] = mode;
       return { accepted: true };
     },
+    openWork: (folder, chatJid, id, remaining) =>
+      openWork(folder, chatJid, id, remaining),
+    closeWork: (folder, id) => closeWork(folder, id),
     onTasksChanged: () => {
       const tasks = getAllTasks();
       const taskRows = tasks.map((t) => ({
