@@ -11,6 +11,7 @@ const envConfig = readEnvFile([
   'ONECLI_URL',
   'TZ',
   'CONTAINER_NAMESPACE',
+  'NANOCLAW_DEFAULT_MODEL',
   'WORK_CONTINUATIONS_ENABLED',
   'CONTINUATION_DELAY',
   'MAX_CONTINUATIONS',
@@ -85,6 +86,12 @@ export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
+
+// Instance-wide model override. It is forwarded explicitly into agent
+// containers so separate NanoClaw services can canary different models while
+// sharing the same code and retaining the current Opus default when unset.
+export const DEFAULT_MODEL =
+  process.env.NANOCLAW_DEFAULT_MODEL || envConfig.NANOCLAW_DEFAULT_MODEL || '';
 
 const rawContainerNamespace =
   process.env.CONTAINER_NAMESPACE || envConfig.CONTAINER_NAMESPACE || '';

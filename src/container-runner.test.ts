@@ -14,6 +14,7 @@ vi.mock('./config.js', () => ({
   CONTAINER_TIMEOUT: 1800000, // 30min
   CREDENTIAL_PROXY_PORT: 3001,
   DATA_DIR: '/tmp/nanoclaw-test-data',
+  DEFAULT_MODEL: 'claude-fable-5-1[1m]',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
   SCHEDULED_TASK_IDLE_TIMEOUT_MS: 300000, // 5min
@@ -396,6 +397,27 @@ describe('containerNamePrefix', () => {
   it('strips other special chars (defensive — folder validation lives elsewhere)', async () => {
     const { containerNamePrefix } = await import('./container-runner.js');
     expect(containerNamePrefix('a.b/c_d')).toBe('nanoclaw-unic--a-b-c-d-');
+  });
+});
+
+describe('instance-scoped model override', () => {
+  beforeEach(() => {
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+  });
+
+  it('forwards the configured model into the agent container', async () => {
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    fakeProc.emit('close', 0);
+    await resultPromise;
+
+    const args = vi.mocked(spawn).mock.calls[0][1] as string[];
+    expect(args).toContain('NANOCLAW_DEFAULT_MODEL=claude-fable-5-1[1m]');
   });
 });
 

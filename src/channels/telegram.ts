@@ -51,7 +51,7 @@ const LARGE_CONTEXT_MODELS: ReadonlySet<string> = new Set(largeContextModels);
 
 /**
  * True when the model id refers to a 1M-context Claude tier — either an
- * explicit `[1m]` suffix or a bare id that ships with 1M by default (Fable 5,
+ * explicit `[1m]` suffix or a bare id that ships with 1M by default (Fable 5+,
  * or Opus 4.7+/Sonnet 4.6 spawned with `[1m]` — Anthropic strips the suffix
  * from response.model, so jsonl and SDK modelUsage only carry the bare id).
  * Display heuristic for /status only — the container-side mirror was removed

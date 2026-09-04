@@ -663,7 +663,10 @@ async function runQuery(
       // SDK learns the 1M window — a bare id falls back to the SDK's internal
       // table (200k for new models) and auto-compacts at ~167k (FED-34).
       // No maxThinkingTokens: the SDK enables adaptive thinking by default.
-      model: 'claude-opus-5[1m]',
+      // The host forwards an instance-scoped override for canary rollouts;
+      // services without one stay on the existing Opus default.
+      model:
+        process.env.NANOCLAW_DEFAULT_MODEL || 'claude-opus-5[1m]',
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,

@@ -13,6 +13,7 @@ import {
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
+  DEFAULT_MODEL,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   SCHEDULED_TASK_IDLE_TIMEOUT_MS,
@@ -292,6 +293,12 @@ function buildContainerArgs(
     '-e',
     `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
   );
+
+  // Keep model rollout scoped to this NanoClaw instance. Services that do not
+  // set an override retain the runner's built-in default.
+  if (DEFAULT_MODEL) {
+    args.push('-e', `NANOCLAW_DEFAULT_MODEL=${DEFAULT_MODEL}`);
+  }
 
   // Mirror the host's auth method with a placeholder value.
   // API key mode: SDK sends x-api-key, proxy replaces with real key.
