@@ -1,0 +1,8 @@
+{
+  "name": "function-hooks-probe",
+  "version": "0.0.0",
+  "description": "Probe whether Claude Code function hooks run through the Agent SDK",
+  "author": {
+    "name": "UniClaw Labs"
+  }
+}

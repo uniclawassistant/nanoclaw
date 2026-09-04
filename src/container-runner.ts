@@ -300,6 +300,10 @@ function buildContainerArgs(
     args.push('-e', `NANOCLAW_DEFAULT_MODEL=${DEFAULT_MODEL}`);
   }
 
+  if (process.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS === '1') {
+    args.push('-e', 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1');
+  }
+
   // Mirror the host's auth method with a placeholder value.
   // API key mode: SDK sends x-api-key, proxy replaces with real key.
   // OAuth mode:   SDK exchanges placeholder token for temp API key,

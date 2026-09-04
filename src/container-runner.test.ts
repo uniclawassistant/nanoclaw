@@ -421,6 +421,42 @@ describe('instance-scoped model override', () => {
   });
 });
 
+describe('function hooks spike flag', () => {
+  beforeEach(() => {
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    delete process.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS;
+  });
+
+  afterEach(() => {
+    delete process.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS;
+  });
+
+  async function spawnArgs() {
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    fakeProc.emit('close', 0);
+    await resultPromise;
+    return vi.mocked(spawn).mock.calls[0][1] as string[];
+  }
+
+  it('does not enable function hooks by default', async () => {
+    expect(await spawnArgs()).not.toContain(
+      'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1',
+    );
+  });
+
+  it('forwards the explicit function hooks flag to the container', async () => {
+    process.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS = '1';
+
+    expect(await spawnArgs()).toContain('CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1');
+  });
+});
+
 describe('CAP_SYS_ADMIN for main containers', () => {
   beforeEach(() => {
     fakeProc = createFakeProcess();

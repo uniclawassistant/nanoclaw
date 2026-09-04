@@ -703,6 +703,12 @@ async function runQuery(
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
+      plugins: [
+        {
+          type: 'local',
+          path: '/app/.claude/plugins/function-hooks-probe',
+        },
+      ],
       mcpServers: {
         nanoclaw: {
           command: 'node',

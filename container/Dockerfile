@@ -56,6 +56,7 @@ RUN npm install
 
 # Copy source code
 COPY agent-runner/ ./
+COPY function-hooks-probe/ /app/.claude/plugins/function-hooks-probe/
 
 # Build TypeScript
 RUN npm run build
