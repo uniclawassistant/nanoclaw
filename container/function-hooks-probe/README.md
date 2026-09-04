@@ -4,9 +4,9 @@ This plugin exists only to test whether Claude Code function hooks execute when
 NanoClaw uses the Agent SDK. It rewrites a Bash tool call whose command matches
 `^echo FH_PROBE` to `echo FH_PROBE_REWRITTEN`.
 
-The host runner forwards `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` only when the
-host process has that exact value. The same image therefore supports both
-controls:
+The host runner forwards `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` and loads this
+plugin only when the host process has that exact value. The same image
+therefore supports both controls:
 
 - Without the environment variable, ask the agent to run `echo FH_PROBE` and
   expect `FH_PROBE`.
