@@ -68,6 +68,11 @@ vi.mock('./credential-proxy.js', () => ({
   detectAuthMode: vi.fn(() => 'api-key'),
 }));
 
+// Mock env (.env reader) — default: no secrets configured
+vi.mock('./env.js', () => ({
+  readEnvFile: vi.fn(() => ({})),
+}));
+
 // Create a controllable fake ChildProcess
 function createFakeProcess() {
   const proc = new EventEmitter() as EventEmitter & {
@@ -94,6 +99,7 @@ vi.mock('child_process', async () => {
   return {
     ...actual,
     spawn: vi.fn(() => fakeProc),
+    execFileSync: vi.fn(() => ''),
     exec: vi.fn(
       (_cmd: string, _opts: unknown, cb?: (err: Error | null) => void) => {
         if (cb) cb(null);
@@ -103,7 +109,8 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { spawn } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
+import { readEnvFile } from './env.js';
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
@@ -461,5 +468,78 @@ describe('CAP_SYS_ADMIN for main containers', () => {
     await resultPromise;
 
     expect(spawnArgs()).not.toContain('CAP_SYS_ADMIN');
+  });
+});
+
+describe('DeviceLab SSH key from Keychain', () => {
+  beforeEach(() => {
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(execFileSync).mockReset();
+    vi.mocked(readEnvFile).mockReset();
+  });
+
+  afterEach(() => {
+    vi.mocked(readEnvFile).mockImplementation(() => ({}));
+    vi.mocked(execFileSync).mockImplementation(() => '');
+  });
+
+  async function spawnArgs() {
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    fakeProc.emit('close', 0);
+    await resultPromise;
+    return vi.mocked(spawn).mock.calls[0][1] as string[];
+  }
+
+  it('passes DEVICELAB_SSH_KEY_B64 and DEVICELAB_SSH_KEY_ID when Keychain read succeeds', async () => {
+    vi.mocked(readEnvFile).mockImplementation((keys: string[]) =>
+      keys.includes('DEVICELAB_SSH_KEY_ID')
+        ? { DEVICELAB_SSH_KEY_ID: 'unic' }
+        : {},
+    );
+    vi.mocked(execFileSync).mockImplementation(() => 'YmFzZTY0LWtleQ==\n');
+
+    const args = await spawnArgs();
+
+    expect(execFileSync).toHaveBeenCalledWith(
+      '/usr/bin/security',
+      ['find-generic-password', '-s', 'DeviceLab SSH Key unic', '-w'],
+      { encoding: 'utf8' },
+    );
+    const idIdx = args.indexOf('DEVICELAB_SSH_KEY_ID=unic');
+    expect(idIdx).toBeGreaterThan(-1);
+    expect(args[idIdx - 1]).toBe('-e');
+    const keyIdx = args.indexOf('DEVICELAB_SSH_KEY_B64=YmFzZTY0LWtleQ==');
+    expect(keyIdx).toBeGreaterThan(-1);
+    expect(args[keyIdx - 1]).toBe('-e');
+  });
+
+  it('skips DeviceLab env without failing when Keychain read throws', async () => {
+    vi.mocked(readEnvFile).mockImplementation((keys: string[]) =>
+      keys.includes('DEVICELAB_SSH_KEY_ID')
+        ? { DEVICELAB_SSH_KEY_ID: 'unic' }
+        : {},
+    );
+    vi.mocked(execFileSync).mockImplementation(() => {
+      throw new Error('security: SecKeychainSearchCopyNext: item not found');
+    });
+
+    const args = await spawnArgs();
+
+    expect(args.some((a) => a.startsWith('DEVICELAB_SSH_KEY_'))).toBe(false);
+  });
+
+  it('does not touch the Keychain when DEVICELAB_SSH_KEY_ID is not configured', async () => {
+    vi.mocked(readEnvFile).mockImplementation(() => ({}));
+
+    const args = await spawnArgs();
+
+    expect(execFileSync).not.toHaveBeenCalled();
+    expect(args.some((a) => a.startsWith('DEVICELAB_SSH_KEY_'))).toBe(false);
   });
 });

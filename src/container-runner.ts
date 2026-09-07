@@ -352,6 +352,39 @@ function buildContainerArgs(
     }
   }
 
+  // Pass the Device Lab SSH key if configured (for the ssh operator on the
+  // device-lab Mac mini). The private key is never stored in .env: it is read
+  // from the login Keychain at container spawn and passed ephemerally as
+  // base64 env. The agent decodes it into a 0600 file in memory-backed tmpfs
+  // for the ssh session only; nothing is written to disk.
+  const devicelabConfig = readEnvFile(['DEVICELAB_SSH_KEY_ID']);
+  if (devicelabConfig.DEVICELAB_SSH_KEY_ID) {
+    try {
+      const devicelabKeyB64 = execFileSync(
+        '/usr/bin/security',
+        [
+          'find-generic-password',
+          '-s',
+          `DeviceLab SSH Key ${devicelabConfig.DEVICELAB_SSH_KEY_ID}`,
+          '-w',
+        ],
+        { encoding: 'utf8' },
+      ).trim();
+      if (devicelabKeyB64) {
+        args.push(
+          '-e',
+          `DEVICELAB_SSH_KEY_ID=${devicelabConfig.DEVICELAB_SSH_KEY_ID}`,
+        );
+        args.push('-e', `DEVICELAB_SSH_KEY_B64=${devicelabKeyB64}`);
+      }
+    } catch (err) {
+      logger.warn(
+        { err },
+        'DeviceLab SSH key configured but Keychain read failed; skipping DeviceLab env',
+      );
+    }
+  }
+
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
 
