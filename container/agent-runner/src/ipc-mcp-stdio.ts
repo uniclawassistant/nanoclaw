@@ -396,8 +396,8 @@ PROMPT: free-form description. Cyrillic and other non-ASCII work fine.
 
 PRESET (optional, array of tokens). Each token is one of:
   • named size: "portrait" (1024x1536) | "landscape" (1536x1024) | "square" (1024x1024) | "auto"
-  • custom WxH (e.g. "1920x1088") — each edge ≤ 3840 and a multiple of 16; aspect ≤ 3:1; total pixels in 655360..8388608
-  • key=value: format=jpeg|png|webp (default jpeg) | quality=low|medium|high (default medium) | compression=1..100 (jpeg/webp only, default 85) | size=<named or WxH>
+  • custom WxH (e.g. "1920x1088") — each edge ≤ 3840 and a multiple of 16; aspect between 1:3 and 3:1; total pixels in 655360..8294400 (max 3840x2160); above 2560x1440 is experimental per OpenAI
+  • key=value: format=jpeg|png|webp (default jpeg) | quality=low|medium|high|xhigh|max (default medium) | compression=1..100 (jpeg/webp only, default 85) | size=<named or WxH>
 Examples: ["portrait","quality=high"] | ["1536x1024","format=png","quality=high"] | ["compression=92"]
 Unknown values warn-and-ignore on the host; pick another token instead of the whole call failing.
 

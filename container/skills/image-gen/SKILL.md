@@ -39,7 +39,7 @@ There are no "HD" / "lossless" shortcut presets — for anything beyond the defa
 
 - **Aspect ratio** — square default, or portrait / landscape for non-square prompts
 - **Resolution** — 1024 default; bigger only when the user or use-case requires (posters, print, fine detail)
-- **Quality** — `medium` default; go `high` only when detail matters (editorial, product shots) and accept the cost/latency; drop to `low` for quick drafts
+- **Quality** — `medium` default; go `high` only when detail matters (editorial, product shots) and accept the cost/latency; drop to `low` for quick drafts. gpt-image-2.5-flare also accepts `xhigh` and `max` — reserve them for explicit user requests for maximum detail; each step up costs more tokens and latency
 - **Format** — JPEG default for photos; **PNG only for graphics / UI / text-rendering** or when the user asked for lossless; WebP if the user is shipping to the web and wants smaller files
 - **Compression** — 85 default for JPEG/WebP; raise if the user complained about JPEG artifacts; ignored for PNG
 
@@ -48,8 +48,8 @@ There are no "HD" / "lossless" shortcut presets — for anything beyond the defa
 | Shape | Example | Meaning |
 |---|---|---|
 | Named size | `"portrait"`, `"landscape"`, `"square"`, `"auto"` | Canonical aspect ratios |
-| Custom WxH | `"1920x1088"`, `"2048x2048"` | Any dimensions within gpt-image-2 bounds |
-| Keyword | `"format=png"`, `"quality=high"`, `"compression=92"`, `"size=1536x1024"` | Explicit per-parameter override |
+| Custom WxH | `"1920x1088"`, `"2048x2048"` | Any dimensions within gpt-image-2.5-flare bounds (see rules below) |
+| Keyword | `"format=png"`, `"quality=high"` (or `xhigh` / `max`), `"compression=92"`, `"size=1536x1024"` | Explicit per-parameter override |
 
 You can freely mix shapes in the same call.
 
@@ -93,7 +93,7 @@ generate_image({
 - Conflicting size tokens (e.g. `["portrait","landscape"]` or `["portrait","size=1536x1024"]`) → fallback to default `1024x1024`, warned.
 - `format=png` + `compression=X` → compression is silently dropped (PNG is lossless; the param is meaningless), warned in log.
 - Same-key keyword repeated (`["quality=low","quality=high"]`) → last write wins.
-- Custom WxH must satisfy gpt-image-2 constraints: each edge ≤3840, **each edge a multiple of 16**, aspect ratio ≤3:1, total pixels 655360–8388608. `1920x1080` is a common mistake (1080 is not /16) — use `1920x1088`.
+- Custom WxH must satisfy gpt-image-2.5-flare constraints (verified 2026-09-08 against the OpenAI image generation guide and images API reference): each edge ≤3840, **each edge a multiple of 16**, aspect ratio between 1:3 and 3:1, total pixels 655360–8294400 (max `3840x2160`). OpenAI marks resolutions above `2560x1440` as experimental. `1920x1080` is a common mistake (1080 is not /16) — use `1920x1088`.
 
 ## `edit_image`
 
