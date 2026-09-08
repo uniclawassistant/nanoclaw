@@ -68,7 +68,7 @@ export const KNOWN_PRESETS = new Set([
 const SIZE_PRESETS = KNOWN_PRESETS;
 
 // Custom WxH override, e.g. "1920x1088". Bounds are validated in
-// resolvePresets against gpt-image-2 constraints (see validateCustomSize).
+// resolvePresets against gpt-image-2.5-flare constraints (see validateCustomSize).
 const CUSTOM_SIZE_RE = /^\d+x\d+$/;
 
 // Explicit key=value parameter syntax. Each known key has a validator for
@@ -114,7 +114,7 @@ export function computeApiTimeoutMs(
   return Math.round(clamped) * 1000;
 }
 
-// gpt-image-2 size constraints (per OpenAI docs):
+// gpt-image-2.5-flare size constraints (per OpenAI docs):
 // - each edge ≤ 3840
 // - each edge a multiple of 16
 // - aspect ratio max/min ≤ 3
@@ -398,7 +398,7 @@ export async function generateImage(
   let resp: Response;
   try {
     const body: Record<string, unknown> = {
-      model: 'gpt-image-2',
+      model: 'gpt-image-2.5-flare',
       prompt,
       n: 1,
       size: resolved.size,
@@ -565,7 +565,7 @@ export async function editImage(
   });
 
   const form = new FormData();
-  form.append('model', 'gpt-image-2');
+  form.append('model', 'gpt-image-2.5-flare');
   form.append('image[]', imageFile);
   form.append('prompt', prompt);
   form.append('size', resolved.size);
