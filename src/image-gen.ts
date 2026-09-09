@@ -85,7 +85,15 @@ const TIMEOUT_BASE_S = 60;
 const TIMEOUT_PER_MP_S = 40;
 const TIMEOUT_FLOOR_S = 120;
 const TIMEOUT_CAP_S = 600; // 10 min hard ceiling
-const QUALITY_MULT = { low: 1, medium: 2, high: 3.5 } as const;
+// xhigh/max multipliers are not documented by OpenAI; they extrapolate the
+// low→high curve and are clamped by TIMEOUT_CAP_S anyway. Tune from logs.
+const QUALITY_MULT = {
+  low: 1,
+  medium: 2,
+  high: 3.5,
+  xhigh: 5,
+  max: 7,
+} as const;
 const PNG_MULT = 1.5;
 const EDIT_MULT = 1.2;
 
@@ -114,18 +122,21 @@ export function computeApiTimeoutMs(
   return Math.round(clamped) * 1000;
 }
 
-// gpt-image-2.5-flare size constraints (per OpenAI docs):
-// - each edge ≤ 3840
+// gpt-image-2.5-flare custom size constraints, verified 2026-09-08 against
+// https://developers.openai.com/api/docs/guides/image-generation ("Size and
+// quality options") and the images API reference (generations / edits):
+// - each edge ≤ 3840 (max supported resolution 3840x2160)
 // - each edge a multiple of 16
-// - aspect ratio max/min ≤ 3
-// - total pixels in [655_360, 8_388_608]
+// - aspect ratio between 1:3 and 3:1
+// - total pixels in [655_360, 8_294_400]
+// - resolutions above 2560x1440 are documented as experimental
 function validateCustomSize(w: number, h: number): string | null {
   if (w > 3840 || h > 3840) return 'edge exceeds 3840px';
   if (w % 16 !== 0 || h % 16 !== 0) return 'edge not a multiple of 16';
   if (Math.max(w, h) / Math.min(w, h) > 3) return 'aspect ratio exceeds 3:1';
   const total = w * h;
   if (total < 655_360) return 'total pixels below 655360';
-  if (total > 8_388_608) return 'total pixels above 8388608';
+  if (total > 8_294_400) return 'total pixels above 8294400';
   return null;
 }
 
@@ -133,7 +144,9 @@ export interface ResolvedPresets {
   // Resolved size string ready to send to OpenAI. Named presets map to fixed
   // dimensions; custom WxH tokens pass through verbatim after validation.
   size: string;
-  quality: 'low' | 'medium' | 'high';
+  // gpt-image-2.5-flare accepts low/medium/high/xhigh/max (plus 'auto', which
+  // we deliberately don't expose — the agent picks explicitly).
+  quality: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   // Output format sent to the API. Default 'jpeg' lets OpenAI return a
   // JPEG directly at output_compression quality, skipping local sips.
   // 'png' opts into the legacy PNG-plus-sips-preview path for lossless
@@ -207,7 +220,13 @@ export function resolvePresets(presets: string[] | undefined): ResolvedPresets {
           );
         }
       } else if (key === 'quality') {
-        if (value === 'low' || value === 'medium' || value === 'high') {
+        if (
+          value === 'low' ||
+          value === 'medium' ||
+          value === 'high' ||
+          value === 'xhigh' ||
+          value === 'max'
+        ) {
           out.quality = value;
         } else {
           logger.warn(

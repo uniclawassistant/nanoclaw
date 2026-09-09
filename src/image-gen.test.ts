@@ -82,6 +82,22 @@ describe('resolvePresets — custom WxH tokens', () => {
     expect(resolvePresets(['3200x800']).size).toBe('1024x1024');
     expect(warn).toHaveBeenCalled();
   });
+
+  it('3840x2160 (documented max resolution, 8294400 px) passes through', () => {
+    expect(resolvePresets(['3840x2160']).size).toBe('3840x2160');
+  });
+
+  it('2896x2896 (8386816 px, above the 8294400 cap) → warn + default', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    expect(resolvePresets(['2896x2896']).size).toBe('1024x1024');
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        wxh: '2896x2896',
+        reason: 'total pixels above 8294400',
+      }),
+      expect.stringContaining('out of bounds'),
+    );
+  });
 });
 
 describe('resolvePresets — keyword params', () => {
@@ -110,6 +126,14 @@ describe('resolvePresets — keyword params', () => {
 
   it('quality=low', () => {
     expect(resolvePresets(['quality=low']).quality).toBe('low');
+  });
+
+  it('quality=xhigh (gpt-image-2.5-flare)', () => {
+    expect(resolvePresets(['quality=xhigh']).quality).toBe('xhigh');
+  });
+
+  it('quality=max (gpt-image-2.5-flare)', () => {
+    expect(resolvePresets(['quality=max']).quality).toBe('max');
   });
 
   it('compression=95', () => {
@@ -269,6 +293,15 @@ describe('computeApiTimeoutMs', () => {
     const edit = computeApiTimeoutMs(DEFAULT, true);
     // 60 + 40 * 1.05 * 2 * 1.2 = 160.8 → 161000, vs 144000 for gen
     expect(edit).toBeGreaterThan(gen);
+  });
+
+  it('xhigh and max scale timeout above high (same size+format)', () => {
+    const high = computeApiTimeoutMs(resolvePresets(['quality=high']), false);
+    const xhigh = computeApiTimeoutMs(resolvePresets(['quality=xhigh']), false);
+    const max = computeApiTimeoutMs(resolvePresets(['quality=max']), false);
+    expect(xhigh).toBeGreaterThan(high);
+    expect(max).toBeGreaterThan(xhigh);
+    expect(max).toBeLessThanOrEqual(600_000);
   });
 
   it('png adds 1.5× multiplier over jpeg of same size+quality', () => {
