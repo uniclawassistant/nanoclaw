@@ -558,6 +558,83 @@ describe('schedule_task schedule types', () => {
   });
 });
 
+describe('update_task schedule types', () => {
+  beforeEach(() => {
+    createTask({
+      id: 'task-to-reschedule',
+      group_folder: 'other-group',
+      chat_jid: 'other@g.us',
+      prompt: 'reschedule me',
+      schedule_type: 'once',
+      schedule_value: '2026-09-10T12:00:00',
+      context_mode: 'isolated',
+      next_run: new Date('2026-09-10T12:00:00').toISOString(),
+      status: 'active',
+      created_at: '2026-09-09T00:00:00.000Z',
+    });
+  });
+
+  it('moves next_run with a once schedule both forward and backward', async () => {
+    for (const [scheduleValue, scheduleType] of [
+      ['2026-09-11T12:00:00', 'once'],
+      ['2026-09-10T08:00:00', undefined],
+    ] as const) {
+      await processTaskIpc(
+        {
+          type: 'update_task',
+          taskId: 'task-to-reschedule',
+          schedule_type: scheduleType,
+          schedule_value: scheduleValue,
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+
+      const task = getTaskById('task-to-reschedule')!;
+      expect(task.schedule_value).toBe(scheduleValue);
+      expect(task.next_run).toBe(new Date(scheduleValue).toISOString());
+    }
+  });
+
+  it('keeps cron and interval next_run recomputation working', async () => {
+    await processTaskIpc(
+      {
+        type: 'update_task',
+        taskId: 'task-to-reschedule',
+        schedule_type: 'cron',
+        schedule_value: '0 9 * * *',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const cronNextRun = getTaskById('task-to-reschedule')!.next_run;
+    expect(cronNextRun).toBeTruthy();
+    expect(new Date(cronNextRun!).getTime()).toBeGreaterThan(Date.now());
+
+    const beforeIntervalUpdate = Date.now();
+    await processTaskIpc(
+      {
+        type: 'update_task',
+        taskId: 'task-to-reschedule',
+        schedule_type: 'interval',
+        schedule_value: '60000',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const intervalNextRun = new Date(
+      getTaskById('task-to-reschedule')!.next_run!,
+    ).getTime();
+    expect(intervalNextRun).toBeGreaterThanOrEqual(
+      beforeIntervalUpdate + 60000,
+    );
+    expect(intervalNextRun).toBeLessThanOrEqual(Date.now() + 60000);
+  });
+});
+
 // --- context_mode defaulting ---
 
 describe('schedule_task context_mode', () => {
