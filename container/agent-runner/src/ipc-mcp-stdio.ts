@@ -17,6 +17,10 @@ import {
   TaskFilter,
   taskStatusEmoji,
 } from './tasks-filter.js';
+import {
+  findTaskScheduleType,
+  validateTaskScheduleValue,
+} from './task-update-validation.js';
 import { normalizeXmlSmuggledArgs } from './tool-args-normalize.js';
 
 const IPC_DIR = '/workspace/ipc';
@@ -1325,40 +1329,27 @@ safeTool(
       ),
   },
   async (args) => {
-    // Validate schedule_value if provided
-    if (
-      args.schedule_type === 'cron' ||
-      (!args.schedule_type && args.schedule_value)
-    ) {
-      if (args.schedule_value) {
-        try {
-          CronExpressionParser.parse(args.schedule_value);
-        } catch {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Invalid cron: "${args.schedule_value}".`,
-              },
-            ],
-            isError: true,
-          };
+    let scheduleType = args.schedule_type;
+    if (!scheduleType && args.schedule_value) {
+      const tasksFile = path.join(IPC_DIR, 'current_tasks.json');
+      try {
+        if (fs.existsSync(tasksFile)) {
+          const tasks = JSON.parse(fs.readFileSync(tasksFile, 'utf-8'));
+          scheduleType = findTaskScheduleType(tasks, args.task_id);
         }
+      } catch (err) {
+        return toolError(
+          `Failed to read current task schedule: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
-    if (args.schedule_type === 'interval' && args.schedule_value) {
-      const ms = parseInt(args.schedule_value, 10);
-      if (isNaN(ms) || ms <= 0) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `Invalid interval: "${args.schedule_value}".`,
-            },
-          ],
-          isError: true,
-        };
-      }
+
+    const validationError = validateTaskScheduleValue(
+      scheduleType,
+      args.schedule_value,
+    );
+    if (validationError) {
+      return toolError(validationError);
     }
 
     const data: Record<string, string | undefined> = {
