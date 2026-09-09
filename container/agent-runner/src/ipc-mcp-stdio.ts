@@ -17,6 +17,7 @@ import {
   TaskFilter,
   taskStatusEmoji,
 } from './tasks-filter.js';
+import { resolveUpdateScheduleError } from './task-update-validation.js';
 import { normalizeXmlSmuggledArgs } from './tool-args-normalize.js';
 
 const IPC_DIR = '/workspace/ipc';
@@ -1325,40 +1326,14 @@ safeTool(
       ),
   },
   async (args) => {
-    // Validate schedule_value if provided
-    if (
-      args.schedule_type === 'cron' ||
-      (!args.schedule_type && args.schedule_value)
-    ) {
-      if (args.schedule_value) {
-        try {
-          CronExpressionParser.parse(args.schedule_value);
-        } catch {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Invalid cron: "${args.schedule_value}".`,
-              },
-            ],
-            isError: true,
-          };
-        }
-      }
-    }
-    if (args.schedule_type === 'interval' && args.schedule_value) {
-      const ms = parseInt(args.schedule_value, 10);
-      if (isNaN(ms) || ms <= 0) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `Invalid interval: "${args.schedule_value}".`,
-            },
-          ],
-          isError: true,
-        };
-      }
+    const scheduleError = resolveUpdateScheduleError({
+      tasksFile: path.join(IPC_DIR, 'current_tasks.json'),
+      taskId: args.task_id,
+      scheduleType: args.schedule_type,
+      scheduleValue: args.schedule_value,
+    });
+    if (scheduleError) {
+      return toolError(scheduleError);
     }
 
     const data: Record<string, string | undefined> = {
