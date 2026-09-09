@@ -1,3 +1,4 @@
+import fs from 'fs';
 import { CronExpressionParser } from 'cron-parser';
 
 export type ScheduleType = 'cron' | 'interval' | 'once';
@@ -54,4 +55,25 @@ export function validateTaskScheduleValue(
   return isNaN(new Date(scheduleValue).getTime())
     ? `Invalid timestamp: "${scheduleValue}". Use local time format like "2026-02-01T15:30:00".`
     : undefined;
+}
+
+export function resolveUpdateScheduleError(params: {
+  tasksFile: string;
+  taskId: string;
+  scheduleType: ScheduleType | undefined;
+  scheduleValue: string | undefined;
+}): string | undefined {
+  let scheduleType = params.scheduleType;
+  if (!scheduleType && params.scheduleValue) {
+    try {
+      if (fs.existsSync(params.tasksFile)) {
+        const tasks = JSON.parse(fs.readFileSync(params.tasksFile, 'utf-8'));
+        scheduleType = findTaskScheduleType(tasks, params.taskId);
+      }
+    } catch (err) {
+      return `Failed to read current task schedule: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  return validateTaskScheduleValue(scheduleType, params.scheduleValue);
 }

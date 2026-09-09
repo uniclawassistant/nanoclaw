@@ -17,10 +17,7 @@ import {
   TaskFilter,
   taskStatusEmoji,
 } from './tasks-filter.js';
-import {
-  findTaskScheduleType,
-  validateTaskScheduleValue,
-} from './task-update-validation.js';
+import { resolveUpdateScheduleError } from './task-update-validation.js';
 import { normalizeXmlSmuggledArgs } from './tool-args-normalize.js';
 
 const IPC_DIR = '/workspace/ipc';
@@ -1329,27 +1326,14 @@ safeTool(
       ),
   },
   async (args) => {
-    let scheduleType = args.schedule_type;
-    if (!scheduleType && args.schedule_value) {
-      const tasksFile = path.join(IPC_DIR, 'current_tasks.json');
-      try {
-        if (fs.existsSync(tasksFile)) {
-          const tasks = JSON.parse(fs.readFileSync(tasksFile, 'utf-8'));
-          scheduleType = findTaskScheduleType(tasks, args.task_id);
-        }
-      } catch (err) {
-        return toolError(
-          `Failed to read current task schedule: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-
-    const validationError = validateTaskScheduleValue(
-      scheduleType,
-      args.schedule_value,
-    );
-    if (validationError) {
-      return toolError(validationError);
+    const scheduleError = resolveUpdateScheduleError({
+      tasksFile: path.join(IPC_DIR, 'current_tasks.json'),
+      taskId: args.task_id,
+      scheduleType: args.schedule_type,
+      scheduleValue: args.schedule_value,
+    });
+    if (scheduleError) {
+      return toolError(scheduleError);
     }
 
     const data: Record<string, string | undefined> = {
