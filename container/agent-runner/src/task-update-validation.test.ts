@@ -160,3 +160,124 @@ describe('update schedule resolution against the task snapshot', () => {
     ).toMatch(/^Failed to read current task schedule: /);
   });
 });
+
+describe('a spent one-time task cannot be moved', () => {
+  let snapshotDir: string;
+  let tasksFile: string;
+
+  beforeEach(() => {
+    snapshotDir = fs.mkdtempSync(path.join(os.tmpdir(), 'task-spent-'));
+    tasksFile = path.join(snapshotDir, 'current_tasks.json');
+  });
+
+  afterEach(() => {
+    fs.rmSync(snapshotDir, { recursive: true, force: true });
+  });
+
+  function writeSnapshot(tasks: unknown): void {
+    fs.writeFileSync(tasksFile, JSON.stringify(tasks));
+  }
+
+  const spent = {
+    id: 'task-spent',
+    schedule_type: 'once',
+    status: 'completed',
+  };
+
+  it('refuses a new value instead of silently accepting it', () => {
+    writeSnapshot([spent]);
+
+    expect(
+      resolveUpdateScheduleError({
+        tasksFile,
+        taskId: 'task-spent',
+        scheduleType: undefined,
+        scheduleValue: '2026-09-11T09:15:00',
+      }),
+    ).toBe(
+      'Task task-spent has already run. A one-time task is spent — schedule a new one instead of moving this one.',
+    );
+  });
+
+  it('refuses even when the caller states the type explicitly', () => {
+    writeSnapshot([spent]);
+
+    expect(
+      resolveUpdateScheduleError({
+        tasksFile,
+        taskId: 'task-spent',
+        scheduleType: 'once',
+        scheduleValue: '2026-09-11T09:15:00',
+      }),
+    ).toBe(
+      'Task task-spent has already run. A one-time task is spent — schedule a new one instead of moving this one.',
+    );
+  });
+
+  it('still moves a one-time task that has not run yet', () => {
+    writeSnapshot([
+      { id: 'task-pending', schedule_type: 'once', status: 'active' },
+    ]);
+
+    expect(
+      resolveUpdateScheduleError({
+        tasksFile,
+        taskId: 'task-pending',
+        scheduleType: undefined,
+        scheduleValue: '2026-09-11T09:15:00',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('leaves recurring tasks alone whatever their status', () => {
+    writeSnapshot([
+      { id: 'task-cron', schedule_type: 'cron', status: 'completed' },
+      { id: 'task-interval', schedule_type: 'interval', status: 'completed' },
+    ]);
+
+    expect(
+      resolveUpdateScheduleError({
+        tasksFile,
+        taskId: 'task-cron',
+        scheduleType: undefined,
+        scheduleValue: '0 9 * * *',
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveUpdateScheduleError({
+        tasksFile,
+        taskId: 'task-interval',
+        scheduleType: undefined,
+        scheduleValue: '600000',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('refuses a type-only change with no new value', () => {
+    writeSnapshot([spent]);
+
+    expect(
+      resolveUpdateScheduleError({
+        tasksFile,
+        taskId: 'task-spent',
+        scheduleType: 'once',
+        scheduleValue: undefined,
+      }),
+    ).toBe(
+      'Task task-spent has already run. A one-time task is spent — schedule a new one instead of moving this one.',
+    );
+  });
+
+  it('leaves a prompt-only update alone: nothing about the schedule changes', () => {
+    writeSnapshot([spent]);
+
+    expect(
+      resolveUpdateScheduleError({
+        tasksFile,
+        taskId: 'task-spent',
+        scheduleType: undefined,
+        scheduleValue: undefined,
+      }),
+    ).toBeUndefined();
+  });
+});
