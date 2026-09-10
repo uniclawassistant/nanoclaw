@@ -3,27 +3,32 @@ import { CronExpressionParser } from 'cron-parser';
 
 export type ScheduleType = 'cron' | 'interval' | 'once';
 
-export function findTaskScheduleType(
+function findTask(
   tasks: unknown,
   taskId: string,
-): ScheduleType | undefined {
+): Record<string, unknown> | undefined {
   if (!Array.isArray(tasks)) return undefined;
 
-  const task = tasks.find(
+  return tasks.find(
     (candidate) =>
       typeof candidate === 'object' &&
       candidate !== null &&
       'id' in candidate &&
       candidate.id === taskId,
   );
-  if (!task || !('schedule_type' in task)) return undefined;
+}
 
-  const scheduleType = task.schedule_type;
-  return scheduleType === 'cron' ||
-    scheduleType === 'interval' ||
-    scheduleType === 'once'
-    ? scheduleType
+function toScheduleType(value: unknown): ScheduleType | undefined {
+  return value === 'cron' || value === 'interval' || value === 'once'
+    ? value
     : undefined;
+}
+
+export function findTaskScheduleType(
+  tasks: unknown,
+  taskId: string,
+): ScheduleType | undefined {
+  return toScheduleType(findTask(tasks, taskId)?.schedule_type);
 }
 
 export function validateTaskScheduleValue(
@@ -64,15 +69,25 @@ export function resolveUpdateScheduleError(params: {
   scheduleValue: string | undefined;
 }): string | undefined {
   let scheduleType = params.scheduleType;
-  if (!scheduleType && params.scheduleValue) {
+  if (params.scheduleValue || params.scheduleType) {
+    let snapshotTask: Record<string, unknown> | undefined;
     try {
       if (fs.existsSync(params.tasksFile)) {
         const tasks = JSON.parse(fs.readFileSync(params.tasksFile, 'utf-8'));
-        scheduleType = findTaskScheduleType(tasks, params.taskId);
+        snapshotTask = findTask(tasks, params.taskId);
       }
     } catch (err) {
       return `Failed to read current task schedule: ${err instanceof Error ? err.message : String(err)}`;
     }
+
+    if (
+      snapshotTask?.schedule_type === 'once' &&
+      snapshotTask.status === 'completed'
+    ) {
+      return `Task ${params.taskId} has already run. A one-time task is spent — schedule a new one instead of moving this one.`;
+    }
+
+    scheduleType = scheduleType ?? toScheduleType(snapshotTask?.schedule_type);
   }
 
   return validateTaskScheduleValue(scheduleType, params.scheduleValue);

@@ -1306,7 +1306,7 @@ safeTool(
 
 safeTool(
   'update_task',
-  'Update an existing scheduled task. Only provided fields are changed; omitted fields stay the same.',
+  `Update an existing scheduled task. Only provided fields are changed; omitted fields stay the same. A one-time task that has already run cannot be moved — schedule a new one instead.`,
   {
     task_id: z.string().describe('The task ID to update'),
     prompt: z.string().optional().describe('New prompt for the task'),
