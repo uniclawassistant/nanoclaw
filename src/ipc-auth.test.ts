@@ -4,10 +4,16 @@ import {
   _initTestDatabase,
   createTask,
   getAllTasks,
+  getOpenWorkForGroup,
   getRegisteredGroup,
   getTaskById,
   setRegisteredGroup,
 } from './db.js';
+import {
+  closeWork,
+  openWork,
+  scheduleWorkContinuationsAtTurnEnd,
+} from './work-continuation.js';
 import { processTaskIpc, IpcDeps } from './ipc.js';
 import { RegisteredGroup } from './types.js';
 
@@ -785,5 +791,104 @@ describe('register_group success', () => {
       timeout: 42_000,
       contextThreshold: 350_000,
     });
+  });
+});
+
+// --- cancel_task on a work continuation ---
+
+describe('cancel_task on a work continuation row', () => {
+  const openedAt = new Date('2026-09-13T20:00:00.000Z');
+  const turnEndedAt = new Date('2026-09-13T20:01:00.000Z');
+
+  function openWorkWithPendingContinuation(): string {
+    openWork(
+      'other-group',
+      'other@g.us',
+      'audit',
+      'finish the audit',
+      openedAt,
+    );
+    scheduleWorkContinuationsAtTurnEnd('other-group', turnEndedAt, {
+      enabled: true,
+      delayMs: 300_000,
+      maxContinuations: 8,
+      maxWorkHours: 4,
+    });
+    return getAllTasks()[0].id;
+  }
+
+  it('cancels the row and closes the work behind it', async () => {
+    const taskId = openWorkWithPendingContinuation();
+
+    await processTaskIpc(
+      { type: 'cancel_task', taskId },
+      'other-group',
+      false,
+      {
+        ...deps,
+        closeWork: (folder, id) => closeWork(folder, id),
+      },
+    );
+
+    expect(getTaskById(taskId)).toBeUndefined();
+    expect(getOpenWorkForGroup('other-group')).toHaveLength(0);
+  });
+
+  it('the cancelled work mints no further continuation at the next turn end', async () => {
+    const taskId = openWorkWithPendingContinuation();
+
+    await processTaskIpc(
+      { type: 'cancel_task', taskId },
+      'other-group',
+      false,
+      {
+        ...deps,
+        closeWork: (folder, id) => closeWork(folder, id),
+      },
+    );
+    scheduleWorkContinuationsAtTurnEnd(
+      'other-group',
+      new Date(turnEndedAt.getTime() + 600_000),
+      {
+        enabled: true,
+        delayMs: 300_000,
+        maxContinuations: 8,
+        maxWorkHours: 4,
+      },
+    );
+
+    expect(getAllTasks()).toHaveLength(0);
+  });
+
+  it('leaves an ordinary task alone: no work is touched', async () => {
+    openWork(
+      'other-group',
+      'other@g.us',
+      'audit',
+      'finish the audit',
+      openedAt,
+    );
+    createTask({
+      id: 'plain-task',
+      group_folder: 'other-group',
+      chat_jid: 'other@g.us',
+      prompt: 'unrelated',
+      schedule_type: 'once',
+      schedule_value: '2026-09-14T00:00:00',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2026-09-13T00:00:00.000Z',
+    });
+
+    await processTaskIpc(
+      { type: 'cancel_task', taskId: 'plain-task' },
+      'other-group',
+      false,
+      { ...deps, closeWork: (folder, id) => closeWork(folder, id) },
+    );
+
+    expect(getTaskById('plain-task')).toBeUndefined();
+    expect(getOpenWorkForGroup('other-group')).toHaveLength(1);
   });
 });

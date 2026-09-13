@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   _initTestDatabase,
+  deleteTask,
   getAllTasks,
   getOpenWork,
   getOpenWorkForGroup,
@@ -158,5 +159,78 @@ describe('work continuations', () => {
     expect(alerts[0].text).toContain('canary');
     expect(alerts[0].text).toContain('MAX_WORK_HOURS (4) reached');
     expect(getAllTasks()).toHaveLength(0);
+  });
+});
+
+describe('the woken session can close the work it was woken for', () => {
+  function wakeOnOpenWork(): { workId: string; taskId: string } {
+    openWork('main', 'tg:owner', 'canary', 'finish the audit', openedAt);
+    scheduleWorkContinuationsAtTurnEnd('main', turnEndedAt, enabledConfig);
+    const taskId = getAllTasks()[0].id;
+    return { workId: 'canary', taskId };
+  }
+
+  it('closes by the id of the continuation task that woke it', () => {
+    const { taskId } = wakeOnOpenWork();
+    claimWorkContinuation(taskId);
+
+    expect(closeWork('main', taskId)).toBe(true);
+    expect(getOpenWork('main', 'canary')).toBeUndefined();
+  });
+
+  it('closes by the task id even before the continuation is claimed', () => {
+    const { taskId } = wakeOnOpenWork();
+
+    expect(closeWork('main', taskId)).toBe(true);
+    expect(getOpenWork('main', 'canary')).toBeUndefined();
+    expect(getTaskById(taskId)).toBeUndefined();
+  });
+
+  it('still closes by the work id', () => {
+    const { taskId } = wakeOnOpenWork();
+    claimWorkContinuation(taskId);
+
+    expect(closeWork('main', 'canary')).toBe(true);
+    expect(getOpenWork('main', 'canary')).toBeUndefined();
+  });
+
+  it('reports false for an id that names neither a work nor its continuation', () => {
+    wakeOnOpenWork();
+
+    expect(closeWork('main', 'work-continuation:not-a-real-row')).toBe(false);
+    expect(getOpenWork('main', 'canary')).toBeDefined();
+  });
+
+  it('does not let one group close the work of another by task id', () => {
+    const { taskId } = wakeOnOpenWork();
+
+    expect(closeWork('other', taskId)).toBe(false);
+    expect(getOpenWork('main', 'canary')).toBeDefined();
+  });
+});
+
+describe('deleting a continuation row', () => {
+  it('does not throw while open_work still points at it', () => {
+    openWork('main', 'tg:owner', 'canary', 'finish the audit', openedAt);
+    scheduleWorkContinuationsAtTurnEnd('main', turnEndedAt, enabledConfig);
+    const taskId = getAllTasks()[0].id;
+
+    expect(() => deleteTask(taskId)).not.toThrow();
+    expect(getTaskById(taskId)).toBeUndefined();
+  });
+
+  it('leaves the work open, so cancelling the row alone is not enough', () => {
+    openWork('main', 'tg:owner', 'canary', 'finish the audit', openedAt);
+    scheduleWorkContinuationsAtTurnEnd('main', turnEndedAt, enabledConfig);
+    deleteTask(getAllTasks()[0].id);
+
+    scheduleWorkContinuationsAtTurnEnd(
+      'main',
+      new Date(turnEndedAt.getTime() + 60_000),
+      enabledConfig,
+    );
+
+    expect(getAllTasks()).toHaveLength(1);
+    expect(getOpenWorkForGroup('main')).toHaveLength(1);
   });
 });

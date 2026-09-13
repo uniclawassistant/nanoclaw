@@ -105,6 +105,14 @@ function createSchema(database: Database.Database): void {
     );
   `);
 
+  // Remembers the continuation row that last woke this work, so close_work still
+  // resolves after claimOpenWorkTask clears pending_task_id for the running turn.
+  try {
+    database.exec(`ALTER TABLE open_work ADD COLUMN claimed_task_id TEXT`);
+  } catch {
+    /* column already exists */
+  }
+
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -1180,8 +1188,33 @@ export function getOpenWorkForGroup(groupFolder: string): OpenWork[] {
     .all(groupFolder) as OpenWork[];
 }
 
-export function closeOpenWork(groupFolder: string, id: string): boolean {
+/**
+ * Resolves what a caller passed to the work record it means: either the work's
+ * own id, or the id of the continuation row that carries it. A woken session is
+ * handed the task row id and not the work id, so without this the most natural
+ * close_work call reports `closed: false` and the work keeps re-firing.
+ */
+export function resolveOpenWorkId(
+  groupFolder: string,
+  idOrTaskId: string,
+): string | undefined {
+  if (getOpenWork(groupFolder, idOrTaskId)) return idOrTaskId;
+  const work = db
+    .prepare(
+      `SELECT id FROM open_work
+       WHERE group_folder = ? AND (pending_task_id = ? OR claimed_task_id = ?)`,
+    )
+    .get(groupFolder, idOrTaskId, idOrTaskId) as { id: string } | undefined;
+  return work?.id;
+}
+
+export function closeOpenWork(
+  groupFolder: string,
+  idOrTaskId: string,
+): boolean {
   return db.transaction(() => {
+    const id = resolveOpenWorkId(groupFolder, idOrTaskId);
+    if (!id) return false;
     const work = getOpenWork(groupFolder, id);
     if (!work) return false;
     db.prepare('DELETE FROM open_work WHERE group_folder = ? AND id = ?').run(
@@ -1230,10 +1263,10 @@ export function claimOpenWorkTask(taskId: string): OpenWork | undefined {
       .get(taskId) as OpenWork | undefined;
     if (!work) return undefined;
     db.prepare(
-      `UPDATE open_work SET pending_task_id = NULL
+      `UPDATE open_work SET pending_task_id = NULL, claimed_task_id = ?
        WHERE group_folder = ? AND id = ? AND pending_task_id = ?`,
-    ).run(work.group_folder, work.id, taskId);
-    return { ...work, pending_task_id: null };
+    ).run(taskId, work.group_folder, work.id, taskId);
+    return { ...work, pending_task_id: null, claimed_task_id: taskId };
   })();
 }
 
@@ -1322,7 +1355,13 @@ export function updateTask(
 }
 
 export function deleteTask(id: string): void {
-  // Delete child records first (FK constraint)
+  // Delete child records first (FK constraint). open_work.pending_task_id
+  // references this row, so drop the link before the row goes: otherwise the
+  // delete throws, the caller has already answered "cancellation requested",
+  // and the task survives to fire anyway.
+  db.prepare(
+    'UPDATE open_work SET pending_task_id = NULL WHERE pending_task_id = ?',
+  ).run(id);
   db.prepare('DELETE FROM task_run_logs WHERE task_id = ?').run(id);
   db.prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
 }

@@ -1484,7 +1484,7 @@ async function requestHostWorkChange(
 
 safeTool(
   'open_work',
-  'Declare a bounded piece of work before starting it. If the turn ends before close_work is called, the host schedules one continuation carrying remaining verbatim.',
+  'Declare a bounded piece of work before starting it. Each turn that ends without close_work schedules one more continuation carrying remaining verbatim — not one in total, so an unclosed work keeps waking you until a limit stops it.',
   {
     id: z.string().min(1).describe('Stable identifier for this piece of work'),
     remaining: z
@@ -1497,8 +1497,15 @@ safeTool(
 
 safeTool(
   'close_work',
-  'Close a previously declared piece of work and cancel its pending continuation, if any.',
-  { id: z.string().min(1).describe('Identifier passed to open_work') },
+  'Close a previously declared piece of work and cancel its pending continuation, if any. Woken by a continuation and unsure of the id? The task id from the wake-up header works here too.',
+  {
+    id: z
+      .string()
+      .min(1)
+      .describe(
+        'Identifier passed to open_work, or the id of the continuation task that woke you',
+      ),
+  },
   async (args) => requestHostWorkChange('close_work', args.id),
 );
 
