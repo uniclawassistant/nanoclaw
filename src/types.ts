@@ -87,6 +87,7 @@ export interface OpenWork {
   opened_at: string;
   continuation_count: number;
   pending_task_id: string | null;
+  claimed_task_id: string | null;
   status: 'open' | 'halted';
   halted_reason: string | null;
 }

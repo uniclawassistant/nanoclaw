@@ -17,6 +17,7 @@ import {
 import { resolveContainerPathToHost } from './document-paths.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { isWorkContinuationTask } from './work-continuation.js';
 import { type MessageFormat, RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -1595,9 +1596,16 @@ export async function processTaskIpc(
       if (data.taskId) {
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
-          deleteTask(data.taskId);
+          // Cancelling a continuation row alone leaves the work record open, so
+          // the next turn end mints a fresh row and the cancel looks successful
+          // while changing nothing. Close the work instead; it takes the row with it.
+          const closedWork =
+            isWorkContinuationTask(data.taskId) && deps.closeWork
+              ? deps.closeWork(task.group_folder, data.taskId)
+              : false;
+          if (!closedWork) deleteTask(data.taskId);
           logger.info(
-            { taskId: data.taskId, sourceGroup },
+            { taskId: data.taskId, sourceGroup, closedWork },
             'Task cancelled via IPC',
           );
           deps.onTasksChanged();

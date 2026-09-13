@@ -111,7 +111,10 @@ async function runTask(
 ): Promise<void> {
   const startTime = Date.now();
   const isWorkContinuation = isWorkContinuationTask(task.id);
-  if (isWorkContinuation && !claimWorkContinuation(task.id)) {
+  const claimedWork = isWorkContinuation
+    ? claimWorkContinuation(task.id)
+    : undefined;
+  if (isWorkContinuation && !claimedWork) {
     logger.info({ taskId: task.id }, 'Skipping cancelled work continuation');
     updateTaskAfterRun(task.id, null, 'Cancelled');
     return;
@@ -225,6 +228,7 @@ async function runTask(
         isMain,
         isScheduledTask: true,
         isWorkContinuation,
+        workId: claimedWork?.id,
         taskId: task.id,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,

@@ -45,6 +45,8 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   isWorkContinuation?: boolean;
+  /** Work this continuation carries. Without it a woken session cannot close it. */
+  workId?: string;
   taskId?: string;
   assistantName?: string;
   script?: string;
