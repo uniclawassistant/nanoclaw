@@ -1221,6 +1221,12 @@ export function getAllOpenWork(): OpenWork[] {
     .all() as OpenWork[];
 }
 
+export function getAllWork(): OpenWork[] {
+  return db
+    .prepare('SELECT * FROM open_work ORDER BY opened_at, group_folder, id')
+    .all() as OpenWork[];
+}
+
 /**
  * Resolves what a caller passed to the work record it means: either the work's
  * own id, or the id of the continuation row that carries it. A woken session is

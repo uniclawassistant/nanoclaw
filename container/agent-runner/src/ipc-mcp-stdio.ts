@@ -12,11 +12,13 @@ import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 import allowedReactions from './telegram-allowed-reactions.json' with { type: 'json' };
+import { filterTasksByStatus, TaskFilter } from './tasks-filter.js';
 import {
-  filterTasksByStatus,
-  TaskFilter,
-  taskStatusEmoji,
-} from './tasks-filter.js';
+  formatVisibleOpenWork,
+  formatVisibleTask,
+  type VisibleOpenWork,
+  type VisibleTask,
+} from './work-visibility.js';
 import { resolveUpdateScheduleError } from './task-update-validation.js';
 import { normalizeXmlSmuggledArgs } from './tool-args-normalize.js';
 
@@ -1179,17 +1181,7 @@ safeTool(
             (t: { groupFolder: string }) => t.groupFolder === groupFolder,
           );
 
-      const tasks = filterTasksByStatus(
-        groupScoped as Array<{ status: string }>,
-        filter,
-      ) as Array<{
-        id: string;
-        prompt: string;
-        schedule_type: string;
-        schedule_value: string;
-        status: string;
-        next_run: string | null;
-      }>;
+      const tasks = filterTasksByStatus(groupScoped as VisibleTask[], filter);
 
       if (tasks.length === 0) {
         const emptyMsg =
@@ -1201,12 +1193,7 @@ safeTool(
         return { content: [{ type: 'text' as const, text: emptyMsg }] };
       }
 
-      const formatted = tasks
-        .map(
-          (t) =>
-            `- ${taskStatusEmoji(t.status)} [${t.id}] ${t.prompt.slice(0, 50)}... (${t.schedule_type}: ${t.schedule_value}) - ${t.status}, next: ${t.next_run || 'N/A'}`,
-        )
-        .join('\n');
+      const formatted = tasks.map(formatVisibleTask).join('\n');
 
       return {
         content: [
@@ -1227,81 +1214,56 @@ safeTool(
 );
 
 safeTool(
-  'pause_task',
-  'Pause a scheduled task. It will not run until resumed.',
-  { task_id: z.string().describe('The task ID to pause') },
-  async (args) => {
-    const data = {
-      type: 'pause_task',
-      taskId: args.task_id,
-      groupFolder,
-      isMain,
-      timestamp: new Date().toISOString(),
-    };
-
-    writeIpcFile(TASKS_DIR, data);
-
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          text: `Task ${args.task_id} pause requested.`,
-        },
-      ],
-    };
+  'list_work',
+  'List declared work and its continuation state. From main: shows all work. From other groups: shows only that group. Includes halted reasons and counters.',
+  {},
+  async () => {
+    const workFile = path.join(IPC_DIR, 'current_open_work.json');
+    try {
+      if (!fs.existsSync(workFile)) {
+        return { content: [{ type: 'text' as const, text: 'No work found.' }] };
+      }
+      const work = JSON.parse(fs.readFileSync(workFile, 'utf-8')) as
+        | VisibleOpenWork[]
+        | undefined;
+      if (!work || work.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No work found.' }] };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Declared work:\n${work.map(formatVisibleOpenWork).join('\n')}`,
+          },
+        ],
+      };
+    } catch (err) {
+      return toolError(
+        `Error reading work: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   },
+);
+
+safeTool(
+  'pause_task',
+  'Pause a scheduled task. Returns the host-confirmed status or the refusal reason.',
+  { task_id: z.string().describe('The task ID to pause') },
+  async (args) => requestHostTaskChange('pause_task', args.task_id),
 );
 
 safeTool(
   'resume_task',
-  'Resume a paused task.',
+  'Resume a paused task. Returns the host-confirmed status or the refusal reason.',
   { task_id: z.string().describe('The task ID to resume') },
-  async (args) => {
-    const data = {
-      type: 'resume_task',
-      taskId: args.task_id,
-      groupFolder,
-      isMain,
-      timestamp: new Date().toISOString(),
-    };
-
-    writeIpcFile(TASKS_DIR, data);
-
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          text: `Task ${args.task_id} resume requested.`,
-        },
-      ],
-    };
-  },
+  async (args) => requestHostTaskChange('resume_task', args.task_id),
 );
 
 safeTool(
   'cancel_task',
-  'Cancel and delete a scheduled task.',
+  'Cancel and delete a scheduled task. Returns host confirmation or the refusal reason.',
   { task_id: z.string().describe('The task ID to cancel') },
-  async (args) => {
-    const data = {
-      type: 'cancel_task',
-      taskId: args.task_id,
-      groupFolder,
-      isMain,
-      timestamp: new Date().toISOString(),
-    };
-
-    writeIpcFile(TASKS_DIR, data);
-
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          text: `Task ${args.task_id} cancellation requested.`,
-        },
-      ],
-    };
-  },
+  async (args) => requestHostTaskChange('cancel_task', args.task_id),
 );
 
 safeTool(
@@ -1336,30 +1298,15 @@ safeTool(
       return toolError(scheduleError);
     }
 
-    const data: Record<string, string | undefined> = {
-      type: 'update_task',
-      taskId: args.task_id,
-      groupFolder,
-      isMain: String(isMain),
-      timestamp: new Date().toISOString(),
-    };
-    if (args.prompt !== undefined) data.prompt = args.prompt;
-    if (args.script !== undefined) data.script = args.script;
+    const updates: Record<string, string | undefined> = {};
+    if (args.prompt !== undefined) updates.prompt = args.prompt;
+    if (args.script !== undefined) updates.script = args.script;
     if (args.schedule_type !== undefined)
-      data.schedule_type = args.schedule_type;
+      updates.schedule_type = args.schedule_type;
     if (args.schedule_value !== undefined)
-      data.schedule_value = args.schedule_value;
+      updates.schedule_value = args.schedule_value;
 
-    writeIpcFile(TASKS_DIR, data);
-
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          text: `Task ${args.task_id} update requested.`,
-        },
-      ],
-    };
+    return requestHostTaskChange('update_task', args.task_id, updates);
   },
 );
 
@@ -1436,27 +1383,15 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
-const RESET_SESSION_TIMEOUT_MS = 10_000;
-const RESET_SESSION_POLL_INTERVAL_MS = 100;
+const HOST_RESPONSE_TIMEOUT_MS = 10_000;
+const HOST_RESPONSE_POLL_INTERVAL_MS = 100;
 
-async function requestHostWorkChange(
-  type: 'open_work' | 'close_work',
-  id: string,
-  remaining?: string,
+async function waitForHostResponse(
+  requestId: string,
+  type: string,
 ): Promise<ToolResult> {
-  const requestId = crypto.randomUUID();
-  writeIpcFile(MESSAGES_DIR, {
-    type,
-    id,
-    remaining,
-    requestId,
-    groupFolder,
-    chatJid,
-    timestamp: new Date().toISOString(),
-  });
-
   const responsePath = path.join(RESPONSES_DIR, `${requestId}.json`);
-  const deadline = Date.now() + RESET_SESSION_TIMEOUT_MS;
+  const deadline = Date.now() + HOST_RESPONSE_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (fs.existsSync(responsePath)) {
       try {
@@ -1475,11 +1410,48 @@ async function requestHostWorkChange(
         );
       }
     }
-    await sleep(RESET_SESSION_POLL_INTERVAL_MS);
+    await sleep(HOST_RESPONSE_POLL_INTERVAL_MS);
   }
   return toolError(
     `${type} request timed out — host did not acknowledge within 10s.`,
   );
+}
+
+async function requestHostTaskChange(
+  type: 'pause_task' | 'resume_task' | 'cancel_task' | 'update_task',
+  taskId: string,
+  updates: Record<string, string | undefined> = {},
+): Promise<ToolResult> {
+  const requestId = crypto.randomUUID();
+  writeIpcFile(TASKS_DIR, {
+    type,
+    taskId,
+    requestId,
+    groupFolder,
+    isMain,
+    timestamp: new Date().toISOString(),
+    ...updates,
+  });
+  return waitForHostResponse(requestId, type);
+}
+
+async function requestHostWorkChange(
+  type: 'open_work' | 'close_work',
+  id: string,
+  remaining?: string,
+): Promise<ToolResult> {
+  const requestId = crypto.randomUUID();
+  writeIpcFile(MESSAGES_DIR, {
+    type,
+    id,
+    remaining,
+    requestId,
+    groupFolder,
+    chatJid,
+    timestamp: new Date().toISOString(),
+  });
+
+  return waitForHostResponse(requestId, type);
 }
 
 safeTool(
@@ -1543,7 +1515,7 @@ RETURN (JSON in tool output): { ok: true } on accepted, { ok: false, error } on 
     writeIpcFile(MESSAGES_DIR, data);
 
     const responsePath = path.join(RESPONSES_DIR, `${requestId}.json`);
-    const deadline = Date.now() + RESET_SESSION_TIMEOUT_MS;
+    const deadline = Date.now() + HOST_RESPONSE_TIMEOUT_MS;
     while (Date.now() < deadline) {
       if (fs.existsSync(responsePath)) {
         try {
@@ -1562,7 +1534,7 @@ RETURN (JSON in tool output): { ok: true } on accepted, { ok: false, error } on 
           );
         }
       }
-      await sleep(RESET_SESSION_POLL_INTERVAL_MS);
+      await sleep(HOST_RESPONSE_POLL_INTERVAL_MS);
     }
 
     return toolError(

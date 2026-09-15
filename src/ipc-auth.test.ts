@@ -335,6 +335,53 @@ describe('cancel_task authorization', () => {
   });
 });
 
+describe('task mutation responses', () => {
+  it.each(['pause_task', 'resume_task', 'cancel_task', 'update_task'])(
+    'returns the refusal reason for %s instead of optimistic confirmation',
+    async (type) => {
+      const result = await processTaskIpc(
+        { type, taskId: 'missing-task' },
+        'other-group',
+        false,
+        deps,
+      );
+
+      expect(result).toEqual({
+        success: false,
+        error:
+          'Task missing-task was not found or is not accessible from this group.',
+      });
+    },
+  );
+
+  it('returns host-confirmed state after a successful mutation', async () => {
+    createTask({
+      id: 'task-to-pause',
+      group_folder: 'other-group',
+      chat_jid: 'other@g.us',
+      prompt: 'pause me',
+      schedule_type: 'once',
+      schedule_value: '2026-09-15T12:00:00.000Z',
+      context_mode: 'group',
+      next_run: '2026-09-15T12:00:00.000Z',
+      status: 'active',
+      created_at: '2026-09-15T10:00:00.000Z',
+    });
+
+    const result = await processTaskIpc(
+      { type: 'pause_task', taskId: 'task-to-pause' },
+      'other-group',
+      false,
+      deps,
+    );
+
+    expect(result).toEqual({
+      success: true,
+      data: { task_id: 'task-to-pause', status: 'paused' },
+    });
+  });
+});
+
 // --- register_group authorization ---
 
 describe('register_group authorization', () => {
