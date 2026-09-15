@@ -36,6 +36,13 @@ export interface WorkContinuationAlert {
   text: string;
 }
 
+interface HaltedWorkReopenPolicy {
+  accepted: boolean;
+  reason?: string;
+  resetContinuationCount: boolean;
+  resetEmptyContinuationCount: boolean;
+}
+
 const defaultConfig: WorkContinuationConfig = {
   enabled: WORK_CONTINUATIONS_ENABLED,
   delayMs: CONTINUATION_DELAY,
@@ -52,13 +59,24 @@ export function openWork(
   now = new Date(),
 ): { accepted: true; work: OpenWork } | { accepted: false; reason: string } {
   const previous = getOpenWork(groupFolder, id);
+  const reopenPolicy = previous
+    ? haltedWorkReopenPolicy(previous, now)
+    : undefined;
+  if (reopenPolicy && !reopenPolicy.accepted) {
+    return { accepted: false, reason: reopenPolicy.reason! };
+  }
   const result = upsertOpenWork({
     id,
     group_folder: groupFolder,
     chat_jid: chatJid,
     remaining,
     opened_at: now.toISOString(),
-    reopenHalted: previous ? isWorkHoursLimitHalt(previous) : false,
+    reopenHalted: reopenPolicy?.accepted
+      ? {
+          resetContinuationCount: reopenPolicy.resetContinuationCount,
+          resetEmptyContinuationCount: reopenPolicy.resetEmptyContinuationCount,
+        }
+      : undefined,
   });
   if (
     result.accepted &&
@@ -217,9 +235,68 @@ function workHoursLimitReason(
   return null;
 }
 
-function isWorkHoursLimitHalt(work: OpenWork): boolean {
-  return (
-    work.status === 'halted' &&
-    work.halted_reason?.startsWith('MAX_WORK_HOURS (') === true
+function haltedWorkReopenPolicy(
+  work: OpenWork,
+  now: Date,
+): HaltedWorkReopenPolicy | undefined {
+  if (work.status !== 'halted') return undefined;
+  const reason = work.halted_reason ?? 'work continuation is halted';
+  if (reason.startsWith('MAX_WORK_HOURS (')) {
+    return resetHaltedWorkPolicy(true);
+  }
+  if (/^\d+ consecutive empty continuation passes$/.test(reason)) {
+    return resetHaltedWorkPolicy(false);
+  }
+  if (reason.startsWith('continuation count limit (')) {
+    return countLimitReopenPolicy(work, now, reason);
+  }
+  return rejectedHaltedWorkPolicy(reason);
+}
+
+function countLimitReopenPolicy(
+  work: OpenWork,
+  now: Date,
+  reason: string,
+): HaltedWorkReopenPolicy {
+  const resetMs = CONTINUATION_SILENCE_RESET_HOURS * 60 * 60 * 1000;
+  const lastContinuationAt = new Date(
+    work.last_continuation_at ?? work.opened_at,
+  ).getTime();
+  const elapsedMs = Math.max(0, now.getTime() - lastContinuationAt);
+  if (elapsedMs >= resetMs) return resetHaltedWorkPolicy(true);
+  const remaining = formatRemainingSilence(resetMs - elapsedMs);
+  return rejectedHaltedWorkPolicy(
+    `${reason}; ${remaining} of continuation silence remaining before this name can reopen`,
   );
+}
+
+function resetHaltedWorkPolicy(
+  resetEmptyContinuationCount: boolean,
+): HaltedWorkReopenPolicy {
+  return {
+    accepted: true,
+    resetContinuationCount: true,
+    resetEmptyContinuationCount,
+  };
+}
+
+function rejectedHaltedWorkPolicy(reason: string): HaltedWorkReopenPolicy {
+  return {
+    accepted: false,
+    reason,
+    resetContinuationCount: false,
+    resetEmptyContinuationCount: false,
+  };
+}
+
+function formatRemainingSilence(milliseconds: number): string {
+  const totalMinutes = Math.max(1, Math.ceil(milliseconds / 60_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  const parts: string[] = [];
+  if (hours > 0) parts.push(`${hours} ${hours === 1 ? 'hour' : 'hours'}`);
+  if (minutes > 0) {
+    parts.push(`${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`);
+  }
+  return parts.join(' ');
 }

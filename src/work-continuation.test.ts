@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  CONTINUATION_DELAY,
+  CONTINUATION_SILENCE_RESET_HOURS,
+  MAX_CONTINUATIONS,
+  MAX_WORK_HOURS,
+} from './config.js';
+import {
   _initTestDatabase,
   deleteTask,
   getAllTasks,
@@ -25,6 +31,14 @@ const enabledConfig: WorkContinuationConfig = {
   maxContinuations: 8,
   silenceResetHours: 6,
   maxWorkHours: 4,
+};
+
+const productionConfig: WorkContinuationConfig = {
+  enabled: true,
+  delayMs: CONTINUATION_DELAY,
+  maxContinuations: MAX_CONTINUATIONS,
+  silenceResetHours: CONTINUATION_SILENCE_RESET_HOURS,
+  maxWorkHours: MAX_WORK_HOURS,
 };
 
 const openedAt = new Date('2026-08-24T20:00:00.000Z');
@@ -141,7 +155,8 @@ describe('work continuations', () => {
 
     expect(result).toEqual({
       accepted: false,
-      reason: 'continuation count limit (0) reached before 6 hours of silence',
+      reason:
+        'continuation count limit (0) reached before 6 hours of silence; 5 hours 59 minutes of continuation silence remaining before this name can reopen',
     });
     expect(getOpenWork('main', 'canary')).toMatchObject({
       remaining: 'remaining',
@@ -231,57 +246,139 @@ describe('work continuations', () => {
     expect(getAllTasks()).toHaveLength(2);
   });
 
-  it('preserves the name counter across expiry and resets it after six hours of silence', () => {
-    openWork('main', 'tg:owner', 'short-pause', 'remaining', openedAt);
-    scheduleWorkContinuationsAtTurnEnd('main', turnEndedAt, enabledConfig);
-    claimWorkContinuation(getAllTasks()[0].id);
-    haltExpiredOpenWork(new Date('2026-08-25T00:00:00.000Z'), enabledConfig);
-
-    expect(
-      openWork(
-        'main',
-        'tg:owner',
-        'short-pause',
-        'next cycle',
-        new Date('2026-08-25T01:00:00.000Z'),
-      ),
-    ).toMatchObject({ accepted: true });
-    scheduleWorkContinuationsAtTurnEnd(
-      'main',
-      new Date('2026-08-25T01:00:00.000Z'),
-      enabledConfig,
-    );
-    expect(getOpenWork('main', 'short-pause')).toMatchObject({
-      opened_at: '2026-08-25T01:00:00.000Z',
-      continuation_count: 2,
-      status: 'open',
-      halted_reason: null,
+  it('reopens a production count-limit halt only after six hours of silence', () => {
+    expect(productionConfig).toEqual({
+      enabled: true,
+      delayMs: 300_000,
+      maxContinuations: 20,
+      silenceResetHours: 6,
+      maxWorkHours: 4,
     });
+    openWork('main', 'tg:owner', 'fast-work', 'remaining', openedAt);
+    recordWorkContinuationTurnOutcome(getOpenWork('main', 'fast-work')!, false);
+    for (let index = 0; index < 20; index += 1) {
+      const turnAt = new Date(openedAt.getTime() + index * 5 * 60_000);
+      scheduleWorkContinuationsAtTurnEnd('main', turnAt, productionConfig);
+      claimWorkContinuation(getOpenWork('main', 'fast-work')!.pending_task_id!);
+    }
 
-    openWork('main', 'tg:owner', 'long-pause', 'remaining', openedAt);
-    scheduleWorkContinuationsAtTurnEnd('main', turnEndedAt, enabledConfig);
-    claimWorkContinuation(getOpenWork('main', 'long-pause')!.pending_task_id!);
-    haltExpiredOpenWork(new Date('2026-08-25T00:00:00.000Z'), enabledConfig);
+    const alerts = scheduleWorkContinuationsAtTurnEnd(
+      'main',
+      new Date('2026-08-24T21:40:00.000Z'),
+      productionConfig,
+    );
+    expect(alerts[0].text).toContain(
+      'continuation count limit (20) reached before 6 hours of silence',
+    );
 
     expect(
       openWork(
         'main',
         'tg:owner',
-        'long-pause',
-        'next cycle',
+        'fast-work',
+        'too soon',
         new Date('2026-08-25T03:00:00.000Z'),
       ),
+    ).toEqual({
+      accepted: false,
+      reason:
+        'continuation count limit (20) reached before 6 hours of silence; 35 minutes of continuation silence remaining before this name can reopen',
+    });
+
+    expect(
+      openWork(
+        'main',
+        'tg:owner',
+        'fast-work',
+        'new cycle',
+        new Date('2026-08-25T03:36:00.000Z'),
+      ),
     ).toMatchObject({ accepted: true });
+    expect(getOpenWork('main', 'fast-work')).toMatchObject({
+      opened_at: '2026-08-25T03:36:00.000Z',
+      continuation_count: 0,
+      empty_continuation_count: 0,
+      status: 'open',
+    });
+  });
+
+  it('reopens expired work immediately with fresh counters and time window', () => {
+    openWork('main', 'tg:owner', 'expired-work', 'remaining', openedAt);
+    scheduleWorkContinuationsAtTurnEnd('main', openedAt, productionConfig);
+    const work = claimWorkContinuation(
+      getOpenWork('main', 'expired-work')!.pending_task_id!,
+    )!;
+    recordWorkContinuationTurnOutcome(work, false);
+    haltExpiredOpenWork(new Date('2026-08-25T00:00:00.000Z'), productionConfig);
+
+    expect(
+      openWork(
+        'main',
+        'tg:owner',
+        'expired-work',
+        'new cycle',
+        new Date('2026-08-25T00:01:00.000Z'),
+      ),
+    ).toMatchObject({ accepted: true });
+    expect(getOpenWork('main', 'expired-work')).toMatchObject({
+      opened_at: '2026-08-25T00:01:00.000Z',
+      continuation_count: 0,
+      empty_continuation_count: 0,
+      status: 'open',
+    });
+
     scheduleWorkContinuationsAtTurnEnd(
       'main',
-      new Date('2026-08-25T03:00:00.000Z'),
-      enabledConfig,
+      new Date('2026-08-25T00:01:00.000Z'),
+      productionConfig,
     );
-    expect(getOpenWork('main', 'long-pause')).toMatchObject({
-      opened_at: '2026-08-25T03:00:00.000Z',
-      continuation_count: 1,
+    expect(getOpenWork('main', 'expired-work')?.continuation_count).toBe(1);
+  });
+
+  it('gives empty-pass work one effect-bearing turn after reopening', () => {
+    openWork('main', 'tg:owner', 'empty-work', 'remaining', openedAt);
+    scheduleWorkContinuationsAtTurnEnd('main', openedAt, productionConfig);
+    const work = claimWorkContinuation(
+      getOpenWork('main', 'empty-work')!.pending_task_id!,
+    )!;
+    recordWorkContinuationTurnOutcome(work, false);
+    recordWorkContinuationTurnOutcome(work, false);
+
+    expect(
+      openWork('main', 'tg:owner', 'empty-work', 'retry', turnEndedAt),
+    ).toMatchObject({ accepted: true });
+    const reopened = getOpenWork('main', 'empty-work')!;
+    expect(reopened).toMatchObject({
+      opened_at: turnEndedAt.toISOString(),
+      continuation_count: 0,
+      empty_continuation_count: 2,
       status: 'open',
-      halted_reason: null,
+    });
+
+    const emptyAlerts = recordWorkContinuationTurnOutcome(reopened, false);
+    expect(emptyAlerts[0].text).toContain(
+      '3 consecutive empty continuation passes',
+    );
+    expect(getOpenWork('main', 'empty-work')).toMatchObject({
+      empty_continuation_count: 3,
+      status: 'halted',
+    });
+
+    openWork(
+      'main',
+      'tg:owner',
+      'empty-work',
+      'retry with effect',
+      turnEndedAt,
+    );
+    const effectAlerts = recordWorkContinuationTurnOutcome(
+      getOpenWork('main', 'empty-work')!,
+      true,
+    );
+    expect(effectAlerts).toEqual([]);
+    expect(getOpenWork('main', 'empty-work')).toMatchObject({
+      empty_continuation_count: 0,
+      status: 'open',
     });
   });
 

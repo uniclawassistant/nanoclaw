@@ -1158,7 +1158,10 @@ export function upsertOpenWork(input: {
   chat_jid: string;
   remaining: string;
   opened_at: string;
-  reopenHalted?: boolean;
+  reopenHalted?: {
+    resetContinuationCount: boolean;
+    resetEmptyContinuationCount: boolean;
+  };
 }): { accepted: true; work: OpenWork } | { accepted: false; reason: string } {
   return db.transaction(() => {
     const existing = getOpenWork(input.group_folder, input.id);
@@ -1172,13 +1175,17 @@ export function upsertOpenWork(input: {
       db.prepare(
         `UPDATE open_work
          SET chat_jid = ?, remaining = ?, opened_at = ?,
-             empty_continuation_count = 0, pending_task_id = NULL,
+             continuation_count = CASE WHEN ? THEN 0 ELSE continuation_count END,
+             empty_continuation_count = CASE WHEN ? THEN 0 ELSE empty_continuation_count END,
+             pending_task_id = NULL,
              claimed_task_id = NULL, status = 'open', halted_reason = NULL
          WHERE group_folder = ? AND id = ? AND status = 'halted'`,
       ).run(
         input.chat_jid,
         input.remaining,
         input.opened_at,
+        input.reopenHalted!.resetContinuationCount ? 1 : 0,
+        input.reopenHalted!.resetEmptyContinuationCount ? 1 : 0,
         input.group_folder,
         input.id,
       );
