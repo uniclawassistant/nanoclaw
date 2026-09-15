@@ -15,6 +15,7 @@ const envConfig = readEnvFile([
   'WORK_CONTINUATIONS_ENABLED',
   'CONTINUATION_DELAY',
   'MAX_CONTINUATIONS',
+  'CONTINUATION_SILENCE_RESET_HOURS',
   'MAX_WORK_HOURS',
 ]);
 
@@ -56,7 +57,12 @@ export const CONTINUATION_DELAY = nonNegativeInteger(
 );
 export const MAX_CONTINUATIONS = nonNegativeInteger(
   process.env.MAX_CONTINUATIONS || envConfig.MAX_CONTINUATIONS,
-  8,
+  20,
+);
+export const CONTINUATION_SILENCE_RESET_HOURS = nonNegativeNumber(
+  process.env.CONTINUATION_SILENCE_RESET_HOURS ||
+    envConfig.CONTINUATION_SILENCE_RESET_HOURS,
+  6,
 );
 export const MAX_WORK_HOURS = nonNegativeNumber(
   process.env.MAX_WORK_HOURS || envConfig.MAX_WORK_HOURS,

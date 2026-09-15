@@ -64,4 +64,56 @@ describe('database migrations', () => {
       process.chdir(repoRoot);
     }
   });
+
+  it('adds continuation guard columns to populated open work', async () => {
+    const repoRoot = process.cwd();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-db-test-'));
+
+    try {
+      process.chdir(tempDir);
+      fs.mkdirSync(path.join(tempDir, 'store'), { recursive: true });
+
+      const dbPath = path.join(tempDir, 'store', 'messages.db');
+      const legacyDb = new Database(dbPath);
+      legacyDb.exec(`
+        CREATE TABLE open_work (
+          id TEXT NOT NULL,
+          group_folder TEXT NOT NULL,
+          chat_jid TEXT NOT NULL,
+          remaining TEXT NOT NULL,
+          opened_at TEXT NOT NULL,
+          continuation_count INTEGER NOT NULL DEFAULT 0,
+          pending_task_id TEXT,
+          status TEXT NOT NULL DEFAULT 'open',
+          halted_reason TEXT,
+          claimed_task_id TEXT,
+          PRIMARY KEY (group_folder, id)
+        );
+        INSERT INTO open_work (
+          id, group_folder, chat_jid, remaining, opened_at,
+          continuation_count, status
+        ) VALUES (
+          'audit', 'main', 'tg:owner', 'finish it',
+          '2026-09-14T20:00:00.000Z', 3, 'open'
+        );
+      `);
+      legacyDb.close();
+
+      vi.resetModules();
+      const { initDatabase, getOpenWork, _closeDatabase } =
+        await import('./db.js');
+
+      initDatabase();
+
+      expect(getOpenWork('main', 'audit')).toMatchObject({
+        continuation_count: 3,
+        last_continuation_at: '2026-09-14T20:00:00.000Z',
+        empty_continuation_count: 0,
+      });
+
+      _closeDatabase();
+    } finally {
+      process.chdir(repoRoot);
+    }
+  });
 });
