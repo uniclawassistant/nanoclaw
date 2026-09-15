@@ -17,6 +17,7 @@ import {
   scheduleWorkContinuationsAtTurnEnd,
   type WorkContinuationConfig,
 } from './work-continuation.js';
+import { getWorkEffectRevision } from './work-effect.js';
 
 const enabledConfig: WorkContinuationConfig = {
   enabled: true,
@@ -228,6 +229,76 @@ describe('work continuations', () => {
       status: 'open',
     });
     expect(getAllTasks()).toHaveLength(2);
+  });
+
+  it('preserves the name counter across expiry and resets it after six hours of silence', () => {
+    openWork('main', 'tg:owner', 'short-pause', 'remaining', openedAt);
+    scheduleWorkContinuationsAtTurnEnd('main', turnEndedAt, enabledConfig);
+    claimWorkContinuation(getAllTasks()[0].id);
+    haltExpiredOpenWork(new Date('2026-08-25T00:00:00.000Z'), enabledConfig);
+
+    expect(
+      openWork(
+        'main',
+        'tg:owner',
+        'short-pause',
+        'next cycle',
+        new Date('2026-08-25T01:00:00.000Z'),
+      ),
+    ).toMatchObject({ accepted: true });
+    scheduleWorkContinuationsAtTurnEnd(
+      'main',
+      new Date('2026-08-25T01:00:00.000Z'),
+      enabledConfig,
+    );
+    expect(getOpenWork('main', 'short-pause')).toMatchObject({
+      opened_at: '2026-08-25T01:00:00.000Z',
+      continuation_count: 2,
+      status: 'open',
+      halted_reason: null,
+    });
+
+    openWork('main', 'tg:owner', 'long-pause', 'remaining', openedAt);
+    scheduleWorkContinuationsAtTurnEnd('main', turnEndedAt, enabledConfig);
+    claimWorkContinuation(getOpenWork('main', 'long-pause')!.pending_task_id!);
+    haltExpiredOpenWork(new Date('2026-08-25T00:00:00.000Z'), enabledConfig);
+
+    expect(
+      openWork(
+        'main',
+        'tg:owner',
+        'long-pause',
+        'next cycle',
+        new Date('2026-08-25T03:00:00.000Z'),
+      ),
+    ).toMatchObject({ accepted: true });
+    scheduleWorkContinuationsAtTurnEnd(
+      'main',
+      new Date('2026-08-25T03:00:00.000Z'),
+      enabledConfig,
+    );
+    expect(getOpenWork('main', 'long-pause')).toMatchObject({
+      opened_at: '2026-08-25T03:00:00.000Z',
+      continuation_count: 1,
+      status: 'open',
+      halted_reason: null,
+    });
+  });
+
+  it('records opening, remaining changes, and closing as observable effects', () => {
+    const initialRevision = getWorkEffectRevision('effect-group');
+
+    openWork('effect-group', 'tg:owner', 'audit', 'first', openedAt);
+    expect(getWorkEffectRevision('effect-group')).toBe(initialRevision + 1);
+
+    openWork('effect-group', 'tg:owner', 'audit', 'first', turnEndedAt);
+    expect(getWorkEffectRevision('effect-group')).toBe(initialRevision + 1);
+
+    openWork('effect-group', 'tg:owner', 'audit', 'changed', turnEndedAt);
+    expect(getWorkEffectRevision('effect-group')).toBe(initialRevision + 2);
+
+    closeWork('effect-group', 'audit');
+    expect(getWorkEffectRevision('effect-group')).toBe(initialRevision + 3);
   });
 
   it('halts expired work and removes a continuation that has not run', () => {

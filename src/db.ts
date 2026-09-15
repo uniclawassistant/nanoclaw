@@ -1158,13 +1158,33 @@ export function upsertOpenWork(input: {
   chat_jid: string;
   remaining: string;
   opened_at: string;
+  reopenHalted?: boolean;
 }): { accepted: true; work: OpenWork } | { accepted: false; reason: string } {
   return db.transaction(() => {
     const existing = getOpenWork(input.group_folder, input.id);
-    if (existing?.status === 'halted') {
+    if (existing?.status === 'halted' && !input.reopenHalted) {
       return {
         accepted: false as const,
         reason: existing.halted_reason ?? 'work continuation is halted',
+      };
+    }
+    if (existing?.status === 'halted') {
+      db.prepare(
+        `UPDATE open_work
+         SET chat_jid = ?, remaining = ?, opened_at = ?,
+             empty_continuation_count = 0, pending_task_id = NULL,
+             claimed_task_id = NULL, status = 'open', halted_reason = NULL
+         WHERE group_folder = ? AND id = ? AND status = 'halted'`,
+      ).run(
+        input.chat_jid,
+        input.remaining,
+        input.opened_at,
+        input.group_folder,
+        input.id,
+      );
+      return {
+        accepted: true as const,
+        work: getOpenWork(input.group_folder, input.id)!,
       };
     }
     db.prepare(

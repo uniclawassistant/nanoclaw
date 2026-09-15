@@ -16,6 +16,7 @@ import {
 } from './work-continuation.js';
 import { processTaskIpc, IpcDeps } from './ipc.js';
 import { RegisteredGroup } from './types.js';
+import { getWorkEffectRevision } from './work-effect.js';
 
 // Set up registered groups used across tests
 const MAIN_GROUP: RegisteredGroup = {
@@ -379,6 +380,59 @@ describe('task mutation responses', () => {
       success: true,
       data: { task_id: 'task-to-pause', status: 'paused' },
     });
+  });
+});
+
+describe('task mutation work effects', () => {
+  it('records every successful mutation as an observable effect', async () => {
+    const initialRevision = getWorkEffectRevision('other-group');
+
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        taskId: 'effect-task',
+        prompt: 'initial',
+        schedule_type: 'once',
+        schedule_value: '2026-09-16T12:00:00.000Z',
+        targetJid: 'other@g.us',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+    expect(getWorkEffectRevision('other-group')).toBe(initialRevision + 1);
+
+    await processTaskIpc(
+      { type: 'pause_task', taskId: 'effect-task' },
+      'other-group',
+      false,
+      deps,
+    );
+    expect(getWorkEffectRevision('other-group')).toBe(initialRevision + 2);
+
+    await processTaskIpc(
+      { type: 'resume_task', taskId: 'effect-task' },
+      'other-group',
+      false,
+      deps,
+    );
+    expect(getWorkEffectRevision('other-group')).toBe(initialRevision + 3);
+
+    await processTaskIpc(
+      { type: 'update_task', taskId: 'effect-task', prompt: 'changed' },
+      'other-group',
+      false,
+      deps,
+    );
+    expect(getWorkEffectRevision('other-group')).toBe(initialRevision + 4);
+
+    await processTaskIpc(
+      { type: 'cancel_task', taskId: 'effect-task' },
+      'other-group',
+      false,
+      deps,
+    );
+    expect(getWorkEffectRevision('other-group')).toBe(initialRevision + 5);
   });
 });
 
