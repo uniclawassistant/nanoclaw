@@ -1,4 +1,5 @@
 import { taskStatusEmoji } from './tasks-filter.js';
+import fs from 'fs';
 
 export interface VisibleTask {
   id: string;
@@ -30,6 +31,38 @@ export interface VisibleOpenWork {
   claimed_task_id: string | null;
   status: string;
   halted_reason: string | null;
+}
+
+export function readVisibleOpenWorkSnapshot(
+  filePath: string,
+): VisibleOpenWork[] {
+  const parsed: unknown = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  if (!Array.isArray(parsed) || !parsed.every(isVisibleOpenWork)) {
+    throw new Error('Invalid work snapshot');
+  }
+  return parsed;
+}
+
+function isVisibleOpenWork(value: unknown): value is VisibleOpenWork {
+  if (!value || typeof value !== 'object') return false;
+  const work = value as Record<string, unknown>;
+  return (
+    typeof work.id === 'string' &&
+    typeof work.group_folder === 'string' &&
+    typeof work.remaining === 'string' &&
+    typeof work.opened_at === 'string' &&
+    typeof work.continuation_count === 'number' &&
+    isNullableString(work.last_continuation_at) &&
+    typeof work.empty_continuation_count === 'number' &&
+    isNullableString(work.pending_task_id) &&
+    isNullableString(work.claimed_task_id) &&
+    (work.status === 'open' || work.status === 'halted') &&
+    isNullableString(work.halted_reason)
+  );
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string';
 }
 
 function preview(text: string): string {

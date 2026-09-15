@@ -16,7 +16,7 @@ import { filterTasksByStatus, TaskFilter } from './tasks-filter.js';
 import {
   formatVisibleOpenWork,
   formatVisibleTask,
-  type VisibleOpenWork,
+  readVisibleOpenWorkSnapshot,
   type VisibleTask,
 } from './work-visibility.js';
 import { resolveUpdateScheduleError } from './task-update-validation.js';
@@ -1223,10 +1223,8 @@ safeTool(
       if (!fs.existsSync(workFile)) {
         return { content: [{ type: 'text' as const, text: 'No work found.' }] };
       }
-      const work = JSON.parse(fs.readFileSync(workFile, 'utf-8')) as
-        | VisibleOpenWork[]
-        | undefined;
-      if (!work || work.length === 0) {
+      const work = readVisibleOpenWorkSnapshot(workFile);
+      if (work.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No work found.' }] };
       }
       return {
