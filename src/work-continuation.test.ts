@@ -11,7 +11,9 @@ import {
 import {
   claimWorkContinuation,
   closeWork,
+  haltExpiredOpenWork,
   openWork,
+  recordWorkContinuationTurnOutcome,
   scheduleWorkContinuationsAtTurnEnd,
   type WorkContinuationConfig,
 } from './work-continuation.js';
@@ -20,6 +22,7 @@ const enabledConfig: WorkContinuationConfig = {
   enabled: true,
   delayMs: 300_000,
   maxContinuations: 8,
+  silenceResetHours: 6,
   maxWorkHours: 4,
 };
 
@@ -115,7 +118,7 @@ describe('work continuations', () => {
     expect(alerts).toEqual([
       {
         chatJid: 'tg:owner',
-        text: '⚠️ Work continuation stopped for "canary": MAX_CONTINUATIONS (1) reached.',
+        text: '⚠️ Work continuation stopped for "canary": continuation count limit (1) reached before 6 hours of silence.',
       },
     ]);
     expect(repeated).toEqual([]);
@@ -137,13 +140,14 @@ describe('work continuations', () => {
 
     expect(result).toEqual({
       accepted: false,
-      reason: 'MAX_CONTINUATIONS (0) reached',
+      reason: 'continuation count limit (0) reached before 6 hours of silence',
     });
     expect(getOpenWork('main', 'canary')).toMatchObject({
       remaining: 'remaining',
       continuation_count: 0,
       status: 'halted',
-      halted_reason: 'MAX_CONTINUATIONS (0) reached',
+      halted_reason:
+        'continuation count limit (0) reached before 6 hours of silence',
     });
   });
 
@@ -159,6 +163,86 @@ describe('work continuations', () => {
     expect(alerts[0].text).toContain('canary');
     expect(alerts[0].text).toContain('MAX_WORK_HOURS (4) reached');
     expect(getAllTasks()).toHaveLength(0);
+  });
+
+  it('warns after one empty continuation and stops after two', () => {
+    openWork('main', 'tg:owner', 'canary', 'remaining', openedAt);
+    const work = getOpenWork('main', 'canary')!;
+
+    const first = recordWorkContinuationTurnOutcome(work, false);
+    const second = recordWorkContinuationTurnOutcome(work, false);
+
+    expect(first).toEqual([
+      {
+        chatJid: 'tg:owner',
+        text: '⚠️ Work continuation "canary" produced no observable effect. If you are working silently, update remaining with open_work or send a message. It will stop after 2 consecutive empty passes.',
+      },
+    ]);
+    expect(second).toEqual([
+      {
+        chatJid: 'tg:owner',
+        text: '⚠️ Work continuation stopped for "canary": 2 consecutive empty continuation passes.',
+      },
+    ]);
+    expect(getOpenWork('main', 'canary')).toMatchObject({
+      empty_continuation_count: 2,
+      status: 'halted',
+      halted_reason: '2 consecutive empty continuation passes',
+    });
+  });
+
+  it('resets the consecutive empty count after an observed effect', () => {
+    openWork('main', 'tg:owner', 'canary', 'remaining', openedAt);
+    const work = getOpenWork('main', 'canary')!;
+
+    recordWorkContinuationTurnOutcome(work, false);
+    recordWorkContinuationTurnOutcome(work, true);
+    const afterEffect = recordWorkContinuationTurnOutcome(work, false);
+
+    expect(afterEffect[0].text).toContain('produced no observable effect');
+    expect(getOpenWork('main', 'canary')).toMatchObject({
+      empty_continuation_count: 1,
+      status: 'open',
+    });
+  });
+
+  it('resets the name counter after six hours of continuation silence', () => {
+    const config = {
+      ...enabledConfig,
+      maxContinuations: 1,
+      maxWorkHours: 48,
+    };
+    openWork('main', 'tg:owner', 'canary', 'remaining', openedAt);
+    scheduleWorkContinuationsAtTurnEnd('main', turnEndedAt, config);
+    claimWorkContinuation(getAllTasks()[0].id);
+
+    scheduleWorkContinuationsAtTurnEnd(
+      'main',
+      new Date('2026-08-25T02:01:00.000Z'),
+      config,
+    );
+
+    expect(getOpenWork('main', 'canary')).toMatchObject({
+      continuation_count: 1,
+      last_continuation_at: '2026-08-25T02:01:00.000Z',
+      status: 'open',
+    });
+    expect(getAllTasks()).toHaveLength(2);
+  });
+
+  it('halts expired work and removes a continuation that has not run', () => {
+    openWork('main', 'tg:owner', 'canary', 'remaining', openedAt);
+    scheduleWorkContinuationsAtTurnEnd('main', turnEndedAt, enabledConfig);
+    const taskId = getAllTasks()[0].id;
+
+    const alerts = haltExpiredOpenWork(
+      new Date('2026-08-25T00:00:00.000Z'),
+      enabledConfig,
+    );
+
+    expect(alerts[0].text).toContain('MAX_WORK_HOURS (4) reached');
+    expect(getOpenWork('main', 'canary')?.status).toBe('halted');
+    expect(getTaskById(taskId)).toBeUndefined();
   });
 });
 

@@ -75,6 +75,8 @@ function createSchema(database: Database.Database): void {
       remaining TEXT NOT NULL,
       opened_at TEXT NOT NULL,
       continuation_count INTEGER NOT NULL DEFAULT 0,
+      last_continuation_at TEXT,
+      empty_continuation_count INTEGER NOT NULL DEFAULT 0,
       pending_task_id TEXT,
       status TEXT NOT NULL DEFAULT 'open',
       halted_reason TEXT,
@@ -111,6 +113,27 @@ function createSchema(database: Database.Database): void {
     database.exec(`ALTER TABLE open_work ADD COLUMN claimed_task_id TEXT`);
   } catch {
     /* column already exists */
+  }
+  const openWorkColumns = database.pragma('table_info(open_work)') as Array<{
+    name: string;
+  }>;
+  if (
+    !openWorkColumns.some((column) => column.name === 'last_continuation_at')
+  ) {
+    database.exec(`ALTER TABLE open_work ADD COLUMN last_continuation_at TEXT`);
+  }
+  database.exec(
+    `UPDATE open_work SET last_continuation_at = opened_at
+     WHERE continuation_count > 0 AND last_continuation_at IS NULL`,
+  );
+  if (
+    !openWorkColumns.some(
+      (column) => column.name === 'empty_continuation_count',
+    )
+  ) {
+    database.exec(
+      `ALTER TABLE open_work ADD COLUMN empty_continuation_count INTEGER NOT NULL DEFAULT 0`,
+    );
   }
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -1188,6 +1211,16 @@ export function getOpenWorkForGroup(groupFolder: string): OpenWork[] {
     .all(groupFolder) as OpenWork[];
 }
 
+export function getAllOpenWork(): OpenWork[] {
+  return db
+    .prepare(
+      `SELECT * FROM open_work
+       WHERE status = 'open'
+       ORDER BY opened_at, group_folder, id`,
+    )
+    .all() as OpenWork[];
+}
+
 /**
  * Resolves what a caller passed to the work record it means: either the work's
  * own id, or the id of the continuation row that carries it. A woken session is
@@ -1229,6 +1262,7 @@ export function closeOpenWork(
 export function scheduleOpenWorkTask(
   work: OpenWork,
   task: Omit<ScheduledTask, 'last_run' | 'last_result'>,
+  resetContinuationCount = false,
 ): boolean {
   return db.transaction(() => {
     const current = getOpenWork(work.group_folder, work.id);
@@ -1243,17 +1277,41 @@ export function scheduleOpenWorkTask(
     const result = db
       .prepare(
         `UPDATE open_work
-         SET pending_task_id = ?, continuation_count = continuation_count + 1
+         SET pending_task_id = ?,
+             continuation_count = CASE WHEN ? THEN 1 ELSE continuation_count + 1 END,
+             last_continuation_at = ?
          WHERE group_folder = ? AND id = ?
            AND status = 'open' AND pending_task_id IS NULL`,
       )
-      .run(task.id, work.group_folder, work.id);
+      .run(
+        task.id,
+        resetContinuationCount ? 1 : 0,
+        task.created_at,
+        work.group_folder,
+        work.id,
+      );
     if (result.changes === 0) {
       deleteTask(task.id);
       return false;
     }
     return true;
   })();
+}
+
+export function recordOpenWorkContinuationOutcome(
+  groupFolder: string,
+  id: string,
+  hadEffect: boolean,
+): OpenWork | undefined {
+  db.prepare(
+    `UPDATE open_work
+     SET empty_continuation_count = CASE
+       WHEN ? THEN 0
+       ELSE empty_continuation_count + 1
+     END
+     WHERE group_folder = ? AND id = ? AND status = 'open'`,
+  ).run(hadEffect ? 1 : 0, groupFolder, id);
+  return getOpenWork(groupFolder, id);
 }
 
 export function claimOpenWorkTask(taskId: string): OpenWork | undefined {
@@ -1275,13 +1333,20 @@ export function haltOpenWork(
   id: string,
   reason: string,
 ): boolean {
-  const result = db
-    .prepare(
-      `UPDATE open_work SET status = 'halted', halted_reason = ?
-       WHERE group_folder = ? AND id = ? AND status = 'open'`,
-    )
-    .run(reason, groupFolder, id);
-  return result.changes === 1;
+  return db.transaction(() => {
+    const work = getOpenWork(groupFolder, id);
+    if (!work || work.status !== 'open') return false;
+    const result = db
+      .prepare(
+        `UPDATE open_work SET status = 'halted', halted_reason = ?
+         WHERE group_folder = ? AND id = ? AND status = 'open'`,
+      )
+      .run(reason, groupFolder, id);
+    if (result.changes === 1 && work.pending_task_id) {
+      deleteTask(work.pending_task_id);
+    }
+    return result.changes === 1;
+  })();
 }
 
 export function getTaskById(id: string): ScheduledTask | undefined {

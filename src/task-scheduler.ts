@@ -29,9 +29,12 @@ import {
 } from './usage-tracker.js';
 import {
   claimWorkContinuation,
+  haltExpiredOpenWork,
   isWorkContinuationTask,
+  recordWorkContinuationTurnOutcome,
   scheduleWorkContinuationsAtTurnEnd,
 } from './work-continuation.js';
+import { getWorkEffectRevision, recordWorkEffect } from './work-effect.js';
 
 /**
  * Compute the next run time for a recurring task, anchored to the
@@ -114,6 +117,9 @@ async function runTask(
   const claimedWork = isWorkContinuation
     ? claimWorkContinuation(task.id)
     : undefined;
+  const initialWorkEffectRevision = isWorkContinuation
+    ? getWorkEffectRevision(task.group_folder)
+    : null;
   if (isWorkContinuation && !claimedWork) {
     logger.info({ taskId: task.id }, 'Skipping cancelled work continuation');
     updateTaskAfterRun(task.id, null, 'Cancelled');
@@ -250,6 +256,7 @@ async function runTask(
           result = streamedOutput.result;
           // Forward result to user (sendMessage handles formatting)
           await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          if (isWorkContinuation) recordWorkEffect(task.group_folder);
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {
@@ -308,6 +315,22 @@ async function runTask(
   const resetApplied = isRespawnTask(task.id)
     ? false
     : await deps.applyPendingResetAtTurnEnd?.(task.group_folder);
+  const continuationAlerts = claimedWork
+    ? recordWorkContinuationTurnOutcome(
+        claimedWork,
+        getWorkEffectRevision(task.group_folder) !== initialWorkEffectRevision,
+      )
+    : [];
+  for (const alert of continuationAlerts) {
+    await deps
+      .sendMessage(alert.chatJid, alert.text)
+      .catch((err) =>
+        logger.error(
+          { taskId: task.id, chatJid: alert.chatJid, err },
+          'Failed to deliver work continuation effect alert',
+        ),
+      );
+  }
   if (!resetApplied) {
     const alerts = scheduleWorkContinuationsAtTurnEnd(
       task.group_folder,
@@ -388,6 +411,16 @@ function armNextWorkContinuation(): void {
  * and loop tick can never double-run the same task.
  */
 function enqueueDueTasks(deps: SchedulerDependencies): void {
+  for (const alert of haltExpiredOpenWork()) {
+    void deps
+      .sendMessage(alert.chatJid, alert.text)
+      .catch((err) =>
+        logger.error(
+          { chatJid: alert.chatJid, err },
+          'Failed to deliver expired work continuation alert',
+        ),
+      );
+  }
   const dueTasks = getDueTasks();
   if (dueTasks.length > 0) {
     logger.info({ count: dueTasks.length }, 'Found due tasks');

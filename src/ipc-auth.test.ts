@@ -812,6 +812,7 @@ describe('cancel_task on a work continuation row', () => {
       enabled: true,
       delayMs: 300_000,
       maxContinuations: 8,
+      silenceResetHours: 6,
       maxWorkHours: 4,
     });
     return getAllTasks()[0].id;
@@ -853,6 +854,7 @@ describe('cancel_task on a work continuation row', () => {
         enabled: true,
         delayMs: 300_000,
         maxContinuations: 8,
+        silenceResetHours: 6,
         maxWorkHours: 4,
       },
     );
