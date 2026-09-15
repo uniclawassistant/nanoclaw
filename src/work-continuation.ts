@@ -58,10 +58,13 @@ export function openWork(
     chat_jid: chatJid,
     remaining,
     opened_at: now.toISOString(),
+    reopenHalted: previous ? isWorkHoursLimitHalt(previous) : false,
   });
   if (
     result.accepted &&
-    (!previous || previous.remaining !== result.work.remaining)
+    (!previous ||
+      previous.status === 'halted' ||
+      previous.remaining !== result.work.remaining)
   ) {
     recordWorkEffect(groupFolder);
   }
@@ -212,4 +215,11 @@ function workHoursLimitReason(
     return `MAX_WORK_HOURS (${config.maxWorkHours}) reached`;
   }
   return null;
+}
+
+function isWorkHoursLimitHalt(work: OpenWork): boolean {
+  return (
+    work.status === 'halted' &&
+    work.halted_reason?.startsWith('MAX_WORK_HOURS (') === true
+  );
 }
