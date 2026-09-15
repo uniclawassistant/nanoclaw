@@ -43,6 +43,16 @@ export function readVisibleOpenWorkSnapshot(
   return parsed;
 }
 
+export function filterVisibleOpenWorkForGroup(
+  work: VisibleOpenWork[],
+  groupFolder: string,
+  isMain: boolean,
+): VisibleOpenWork[] {
+  return isMain
+    ? work
+    : work.filter((item) => item.group_folder === groupFolder);
+}
+
 function isVisibleOpenWork(value: unknown): value is VisibleOpenWork {
   if (!value || typeof value !== 'object') return false;
   const work = value as Record<string, unknown>;

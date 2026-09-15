@@ -9,15 +9,15 @@ describe('work visibility snapshot', () => {
       id: 'audit',
       group_folder: 'main',
       chat_jid: 'tg:owner',
-      remaining: 'finish the audit',
+      remaining: 'private audit context',
       opened_at: '2026-09-15T00:00:00.000Z',
       continuation_count: 4,
       last_continuation_at: '2026-09-15T01:00:00.000Z',
       empty_continuation_count: 1,
       pending_task_id: 'work-continuation:pending',
       claimed_task_id: 'work-continuation:claimed',
-      status: 'open',
-      halted_reason: null,
+      status: 'halted',
+      halted_reason: 'continuation count limit reached',
     };
     const task = (id: string) => ({
       id,
@@ -41,7 +41,14 @@ describe('work visibility snapshot', () => {
 
     expect(snapshot[0]).toMatchObject({
       kind: 'work_continuation',
-      work: { id: 'audit', continuation_count: 4 },
+      work: {
+        id: 'audit',
+        remaining: 'private audit context',
+        continuation_count: 4,
+        empty_continuation_count: 1,
+        status: 'halted',
+        halted_reason: 'continuation count limit reached',
+      },
     });
     expect(snapshot[1]).toMatchObject({
       kind: 'work_continuation',

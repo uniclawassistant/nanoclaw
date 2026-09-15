@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  filterVisibleOpenWorkForGroup,
   formatVisibleOpenWork,
   formatVisibleTask,
   type VisibleOpenWork,
@@ -74,5 +75,27 @@ describe('work visibility formatting', () => {
     expect(row).toContain('⛔ [audit]');
     expect(row).toContain('halted: continuation count limit reached');
     expect(row).toContain('continuations: 20');
+  });
+
+  it('filters foreign work again before a non-main group formats it', () => {
+    const foreignWork: VisibleOpenWork = {
+      ...haltedWork,
+      id: 'foreign-work-id',
+      group_folder: 'other-group',
+      remaining: 'foreign private remaining',
+      halted_reason: 'foreign private halt reason',
+    };
+
+    const visible = filterVisibleOpenWorkForGroup(
+      [haltedWork, foreignWork],
+      'main',
+      false,
+    );
+    const output = visible.map(formatVisibleOpenWork).join('\n');
+
+    expect(output).toContain('[audit]');
+    expect(output).not.toContain('foreign-work-id');
+    expect(output).not.toContain('foreign private remaining');
+    expect(output).not.toContain('foreign private halt reason');
   });
 });

@@ -14,6 +14,7 @@ import { CronExpressionParser } from 'cron-parser';
 import allowedReactions from './telegram-allowed-reactions.json' with { type: 'json' };
 import { filterTasksByStatus, TaskFilter } from './tasks-filter.js';
 import {
+  filterVisibleOpenWorkForGroup,
   formatVisibleOpenWork,
   formatVisibleTask,
   readVisibleOpenWorkSnapshot,
@@ -1223,7 +1224,11 @@ safeTool(
       if (!fs.existsSync(workFile)) {
         return { content: [{ type: 'text' as const, text: 'No work found.' }] };
       }
-      const work = readVisibleOpenWorkSnapshot(workFile);
+      const work = filterVisibleOpenWorkForGroup(
+        readVisibleOpenWorkSnapshot(workFile),
+        groupFolder,
+        isMain,
+      );
       if (work.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No work found.' }] };
       }

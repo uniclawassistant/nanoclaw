@@ -73,4 +73,44 @@ describe('list_work snapshot source', () => {
       'Invalid work snapshot',
     );
   });
+
+  it('keeps foreign work out of a non-main group host snapshot', () => {
+    const ownWork: OpenWork = {
+      id: 'own-work',
+      group_folder: 'alpha',
+      chat_jid: 'tg:alpha',
+      remaining: 'own remaining',
+      opened_at: '2026-09-15T00:00:00.000Z',
+      continuation_count: 1,
+      last_continuation_at: '2026-09-15T00:05:00.000Z',
+      empty_continuation_count: 0,
+      pending_task_id: null,
+      claimed_task_id: null,
+      status: 'open',
+      halted_reason: null,
+    };
+    const foreignWork: OpenWork = {
+      ...ownWork,
+      id: 'foreign-work-id',
+      group_folder: 'beta',
+      chat_jid: 'tg:beta',
+      remaining: 'foreign private remaining',
+      status: 'halted',
+      halted_reason: 'foreign private halt reason',
+    };
+    const workFile = path.join(
+      testPaths.dataDir,
+      'ipc',
+      'alpha',
+      'current_open_work.json',
+    );
+
+    writeTasksSnapshot('alpha', false, [], [ownWork, foreignWork]);
+
+    const snapshotText = fs.readFileSync(workFile, 'utf-8');
+    expect(readVisibleOpenWorkSnapshot(workFile)).toEqual([ownWork]);
+    expect(snapshotText).not.toContain('foreign-work-id');
+    expect(snapshotText).not.toContain('foreign private remaining');
+    expect(snapshotText).not.toContain('foreign private halt reason');
+  });
 });
