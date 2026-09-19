@@ -35,6 +35,7 @@ import {
   openWork,
   scheduleWorkContinuationsAtTurnEnd,
 } from './work-continuation.js';
+import { deliverFormattedOutbound } from './router.js';
 
 async function captureScheduledInput(contextThreshold?: number) {
   createTask({
@@ -372,7 +373,12 @@ describe('task scheduler', () => {
 
   it('does not mark a continuation empty when its result reaches chat', async () => {
     const now = new Date();
-    const sendMessage = vi.fn(async () => {});
+    const delivered: string[] = [];
+    const sendMessage = vi.fn(async (_jid: string, rawText: string) =>
+      deliverFormattedOutbound(rawText, async (text) => {
+        delivered.push(text);
+      }),
+    );
     runContainerAgentMock.mockImplementation(
       async (_group, _input, _onProcess, onOutput) => {
         await onOutput({ status: 'success', result: 'finished a step' });
@@ -418,10 +424,85 @@ describe('task scheduler', () => {
       status: 'open',
     });
     expect(sendMessage).toHaveBeenCalledWith('main-chat', 'finished a step');
+    expect(delivered).toEqual(['finished a step']);
     expect(sendMessage).not.toHaveBeenCalledWith(
       'main-chat',
       expect.stringContaining('no observable effect'),
     );
+  });
+
+  it('counts an internal-only result as empty after router suppression', async () => {
+    const now = new Date();
+    const delivered: string[] = [];
+    const sendMessage = vi.fn(async (_jid: string, rawText: string) =>
+      deliverFormattedOutbound(rawText, async (text) => {
+        delivered.push(text);
+      }),
+    );
+    runContainerAgentMock.mockImplementation(
+      async (_group, _input, _onProcess, onOutput) => {
+        const output = {
+          status: 'success' as const,
+          result: '<internal>scheduled continuation did no work</internal>',
+        };
+        await onOutput(output);
+        return output;
+      },
+    );
+    openWork('main', 'main-chat', 'canary', 'continue', now);
+    scheduleWorkContinuationsAtTurnEnd('main', now, {
+      enabled: true,
+      delayMs: 0,
+      maxContinuations: 20,
+      silenceResetHours: 6,
+      maxWorkHours: 4,
+    });
+
+    startSchedulerLoop({
+      registeredGroups: () => ({
+        'main-chat': {
+          name: 'Main',
+          folder: 'main',
+          isMain: true,
+          trigger: '@Andy',
+          added_at: now.toISOString(),
+        },
+      }),
+      getSessions: () => ({ main: 'current-session' }),
+      queue: {
+        enqueueTask: (
+          _groupJid: string,
+          _taskId: string,
+          run: () => Promise<void>,
+        ) => void run(),
+        notifyIdle: () => {},
+      } as unknown as SchedulerDependencies['queue'],
+      onProcess: () => {},
+      sendMessage,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(getOpenWork('main', 'canary')).toMatchObject({
+      empty_continuation_count: 1,
+      status: 'open',
+    });
+    expect(delivered).toEqual([
+      expect.stringContaining('produced no observable effect'),
+    ]);
+
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(runContainerAgentMock).toHaveBeenCalledTimes(2);
+    expect(getOpenWork('main', 'canary')).toMatchObject({
+      empty_continuation_count: 2,
+      status: 'halted',
+      halted_reason: '2 consecutive empty continuation passes',
+    });
+    expect(delivered).toEqual([
+      expect.stringContaining('produced no observable effect'),
+      expect.stringContaining('2 consecutive empty continuation passes'),
+    ]);
+    expect(delivered.join('\n')).not.toContain('scheduled continuation');
   });
 
   it('halts expired open work on a scheduler tick before its task runs', async () => {

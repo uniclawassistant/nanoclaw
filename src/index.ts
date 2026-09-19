@@ -85,7 +85,11 @@ import {
   formatUsageLine,
   recordUsage,
 } from './usage-tracker.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  deliverFormattedOutbound,
+  findChannel,
+  formatMessages,
+} from './router.js';
 import {
   cleanupMermaidPng,
   mermaidEnabled,
@@ -1503,11 +1507,12 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (!channel) {
         logger.warn({ jid }, 'No channel owns JID, cannot send message');
-        return;
+        return false;
       }
-      const text = formatOutbound(rawText);
       const threadId = getLastIncomingThreadId(jid);
-      if (text) await sendText(channel, jid, text, threadId);
+      return deliverFormattedOutbound(rawText, (text) =>
+        sendText(channel, jid, text, threadId),
+      );
     },
     onWorkChanged: refreshTaskSnapshots,
   });

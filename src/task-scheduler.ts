@@ -106,7 +106,7 @@ export interface SchedulerDependencies {
     containerName: string,
     groupFolder: string,
   ) => void;
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (jid: string, text: string) => Promise<boolean | void>;
   onWorkChanged?: () => void;
 }
 
@@ -258,8 +258,13 @@ async function runTask(
         if (streamedOutput.result) {
           result = streamedOutput.result;
           // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
-          if (isWorkContinuation) recordWorkEffect(task.group_folder);
+          const delivered = await deps.sendMessage(
+            task.chat_jid,
+            streamedOutput.result,
+          );
+          if (isWorkContinuation && delivered === true) {
+            recordWorkEffect(task.group_folder);
+          }
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {

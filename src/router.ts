@@ -44,6 +44,16 @@ export function formatOutbound(rawText: string): string {
   return text;
 }
 
+export async function deliverFormattedOutbound(
+  rawText: string,
+  deliver: (text: string) => Promise<void>,
+): Promise<boolean> {
+  const text = formatOutbound(rawText);
+  if (!text) return false;
+  await deliver(text);
+  return true;
+}
+
 export async function routeOutbound(
   channels: Channel[],
   jid: string,
