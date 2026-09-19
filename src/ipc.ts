@@ -18,6 +18,7 @@ import { resolveContainerPathToHost } from './document-paths.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { isWorkContinuationTask } from './work-continuation.js';
+import { recordWorkEffect } from './work-effect.js';
 import { type MessageFormat, RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -489,6 +490,7 @@ async function processForwardMessageIpc(
       source: sourceRecord,
     });
     if (result.ok) {
+      recordWorkEffect(sourceGroup);
       logger.info(
         {
           toJid: data.toJid,
@@ -633,6 +635,7 @@ async function processMediaToolIpc(
         threadId,
       );
       if (result.ok) {
+        recordWorkEffect(sourceGroup);
         writeIpcResponse(responsesDir, data.requestId, {
           success: true,
           message_id: result.message_id,
@@ -723,6 +726,7 @@ async function processMediaToolIpc(
         threadId,
       );
       if (result.ok) {
+        recordWorkEffect(sourceGroup);
         writeIpcResponse(responsesDir, data.requestId, {
           success: true,
           message_id: result.message_id,
@@ -781,6 +785,7 @@ async function processMediaToolIpc(
         threadId,
       );
       if (result.ok) {
+        recordWorkEffect(sourceGroup);
         writeIpcResponse(responsesDir, data.requestId, {
           success: true,
           message_id: result.message_id,
@@ -827,6 +832,7 @@ async function processMediaToolIpc(
         threadId,
       );
       if (result.ok) {
+        recordWorkEffect(sourceGroup);
         writeIpcResponse(responsesDir, data.requestId, {
           success: true,
           message_id: result.message_id,
@@ -914,6 +920,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       ? data.format
                       : undefined;
                   await deps.sendMessage(data.chatJid, data.text, format);
+                  recordWorkEffect(sourceGroup);
                   logger.info(
                     {
                       chatJid: data.chatJid,
@@ -1164,6 +1171,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                         threadId,
                       );
                       if (result.ok) {
+                        recordWorkEffect(sourceGroup);
                         if (deps.recordOutgoingDocument) {
                           deps.recordOutgoingDocument(
                             data.chatJid,
@@ -1309,6 +1317,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     data.mode as 'new' | 'restart',
                   );
                   if (result.accepted) {
+                    recordWorkEffect(sourceGroup);
                     writeIpcResponse(responsesDir, data.requestId, {
                       success: true,
                     });
@@ -1546,6 +1555,7 @@ export async function processTaskIpc(
           status: 'active',
           created_at: new Date().toISOString(),
         });
+        recordWorkEffect(sourceGroup);
         logger.info(
           { taskId, sourceGroup, targetFolder, contextMode },
           'Task created via IPC',
@@ -1559,6 +1569,7 @@ export async function processTaskIpc(
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           updateTask(data.taskId, { status: 'paused' });
+          recordWorkEffect(sourceGroup);
           logger.info(
             { taskId: data.taskId, sourceGroup },
             'Task paused via IPC',
@@ -1578,6 +1589,7 @@ export async function processTaskIpc(
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           updateTask(data.taskId, { status: 'active' });
+          recordWorkEffect(sourceGroup);
           logger.info(
             { taskId: data.taskId, sourceGroup },
             'Task resumed via IPC',
@@ -1604,6 +1616,7 @@ export async function processTaskIpc(
               ? deps.closeWork(task.group_folder, data.taskId)
               : false;
           if (!closedWork) deleteTask(data.taskId);
+          recordWorkEffect(sourceGroup);
           logger.info(
             { taskId: data.taskId, sourceGroup, closedWork },
             'Task cancelled via IPC',
@@ -1686,6 +1699,7 @@ export async function processTaskIpc(
         }
 
         updateTask(data.taskId, updates);
+        recordWorkEffect(sourceGroup);
         logger.info(
           { taskId: data.taskId, sourceGroup, updates },
           'Task updated via IPC',
