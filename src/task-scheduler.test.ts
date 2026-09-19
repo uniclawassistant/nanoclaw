@@ -14,7 +14,9 @@ import {
   createTask,
   getOpenWork,
   getTaskById,
+  storeChatMetadata,
 } from './db.js';
+import { createSchedulerOutboundSender } from './index.js';
 import {
   _resetSchedulerLoopForTests,
   computeNextRun,
@@ -35,7 +37,22 @@ import {
   openWork,
   scheduleWorkContinuationsAtTurnEnd,
 } from './work-continuation.js';
-import { deliverFormattedOutbound } from './router.js';
+import type { Channel } from './types.js';
+
+function createSchedulerChannel(): Channel {
+  return {
+    name: 'scheduler-test',
+    connect: vi.fn(),
+    isConnected: () => true,
+    ownsJid: (jid) => jid === 'main-chat',
+    disconnect: vi.fn(),
+    sendMessage: vi.fn().mockResolvedValue('scheduler-message'),
+  };
+}
+
+function sentTexts(channel: Channel): string[] {
+  return vi.mocked(channel.sendMessage).mock.calls.map((call) => call[1]);
+}
 
 async function captureScheduledInput(contextThreshold?: number) {
   createTask({
@@ -373,11 +390,10 @@ describe('task scheduler', () => {
 
   it('does not mark a continuation empty when its result reaches chat', async () => {
     const now = new Date();
-    const delivered: string[] = [];
-    const sendMessage = vi.fn(async (_jid: string, rawText: string) =>
-      deliverFormattedOutbound(rawText, async (text) => {
-        delivered.push(text);
-      }),
+    const channel = createSchedulerChannel();
+    storeChatMetadata('main-chat', now.toISOString());
+    const sendMessage = vi.fn(
+      createSchedulerOutboundSender([channel], () => undefined),
     );
     runContainerAgentMock.mockImplementation(
       async (_group, _input, _onProcess, onOutput) => {
@@ -424,7 +440,7 @@ describe('task scheduler', () => {
       status: 'open',
     });
     expect(sendMessage).toHaveBeenCalledWith('main-chat', 'finished a step');
-    expect(delivered).toEqual(['finished a step']);
+    expect(sentTexts(channel)).toEqual(['finished a step']);
     expect(sendMessage).not.toHaveBeenCalledWith(
       'main-chat',
       expect.stringContaining('no observable effect'),
@@ -433,11 +449,10 @@ describe('task scheduler', () => {
 
   it('counts an internal-only result as empty after router suppression', async () => {
     const now = new Date();
-    const delivered: string[] = [];
-    const sendMessage = vi.fn(async (_jid: string, rawText: string) =>
-      deliverFormattedOutbound(rawText, async (text) => {
-        delivered.push(text);
-      }),
+    const channel = createSchedulerChannel();
+    storeChatMetadata('main-chat', now.toISOString());
+    const sendMessage = vi.fn(
+      createSchedulerOutboundSender([channel], () => undefined),
     );
     runContainerAgentMock.mockImplementation(
       async (_group, _input, _onProcess, onOutput) => {
@@ -486,7 +501,7 @@ describe('task scheduler', () => {
       empty_continuation_count: 1,
       status: 'open',
     });
-    expect(delivered).toEqual([
+    expect(sentTexts(channel)).toEqual([
       expect.stringContaining('produced no observable effect'),
     ]);
 
@@ -498,11 +513,13 @@ describe('task scheduler', () => {
       status: 'halted',
       halted_reason: '2 consecutive empty continuation passes',
     });
-    expect(delivered).toEqual([
+    expect(sentTexts(channel)).toEqual([
       expect.stringContaining('produced no observable effect'),
       expect.stringContaining('2 consecutive empty continuation passes'),
     ]);
-    expect(delivered.join('\n')).not.toContain('scheduled continuation');
+    expect(sentTexts(channel).join('\n')).not.toContain(
+      'scheduled continuation',
+    );
   });
 
   it('halts expired open work on a scheduler tick before its task runs', async () => {

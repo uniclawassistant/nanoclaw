@@ -249,6 +249,23 @@ export async function sendText(
   recordOutgoing(jid, msgId, { content: text, messageType: 'text' });
 }
 
+export function createSchedulerOutboundSender(
+  channels: Channel[],
+  resolveThreadId: (jid: string) => string | undefined,
+): (jid: string, rawText: string) => Promise<boolean> {
+  return async (jid, rawText) => {
+    const channel = findChannel(channels, jid);
+    if (!channel) {
+      logger.warn({ jid }, 'No channel owns JID, cannot send message');
+      return false;
+    }
+    const threadId = resolveThreadId(jid);
+    return deliverFormattedOutbound(rawText, (text) =>
+      sendText(channel, jid, text, threadId),
+    );
+  };
+}
+
 export interface ImageGenDelivery {
   ok: true;
   message_id: string;
@@ -1503,17 +1520,10 @@ async function main(): Promise<void> {
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
-    sendMessage: async (jid, rawText) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) {
-        logger.warn({ jid }, 'No channel owns JID, cannot send message');
-        return false;
-      }
-      const threadId = getLastIncomingThreadId(jid);
-      return deliverFormattedOutbound(rawText, (text) =>
-        sendText(channel, jid, text, threadId),
-      );
-    },
+    sendMessage: createSchedulerOutboundSender(
+      channels,
+      getLastIncomingThreadId,
+    ),
     onWorkChanged: refreshTaskSnapshots,
   });
   startIpcWatcher({
