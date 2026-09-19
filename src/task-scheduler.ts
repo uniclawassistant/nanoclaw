@@ -10,6 +10,7 @@ import {
 } from './container-runner.js';
 import {
   getAllTasks,
+  getAllWork,
   getDueTasks,
   getTaskById,
   logTaskRun,
@@ -106,6 +107,7 @@ export interface SchedulerDependencies {
     groupFolder: string,
   ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
+  onWorkChanged?: () => void;
 }
 
 async function runTask(
@@ -190,6 +192,7 @@ async function runTask(
       status: t.status,
       next_run: t.next_run,
     })),
+    getAllWork(),
   );
 
   let result: string | null = null;
@@ -349,6 +352,7 @@ async function runTask(
         );
     }
   }
+  if (claimedWork) deps.onWorkChanged?.();
 
   const durationMs = Date.now() - startTime;
 
@@ -411,7 +415,9 @@ function armNextWorkContinuation(): void {
  * and loop tick can never double-run the same task.
  */
 function enqueueDueTasks(deps: SchedulerDependencies): void {
-  for (const alert of haltExpiredOpenWork()) {
+  const expirationAlerts = haltExpiredOpenWork();
+  if (expirationAlerts.length > 0) deps.onWorkChanged?.();
+  for (const alert of expirationAlerts) {
     void deps
       .sendMessage(alert.chatJid, alert.text)
       .catch((err) =>
