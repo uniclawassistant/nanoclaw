@@ -25,6 +25,7 @@ vi.mock('./config.js', async () => {
 });
 
 import { startIpcWatcher, type IpcDeps } from './ipc.js';
+import { _initTestDatabase } from './db.js';
 import { getWorkEffectRevision } from './work-effect.js';
 
 afterEach(() => {
@@ -36,6 +37,7 @@ afterEach(() => {
 describe('IPC work effects', () => {
   it('records delivered messages, documents, and accepted resets', async () => {
     vi.useFakeTimers();
+    _initTestDatabase();
     const sourceGroup = 'main';
     const messagesDir = path.join(
       testPaths.dataDir,
@@ -43,8 +45,10 @@ describe('IPC work effects', () => {
       sourceGroup,
       'messages',
     );
+    const tasksDir = path.join(testPaths.dataDir, 'ipc', sourceGroup, 'tasks');
     const groupDir = path.join(testPaths.groupsDir, sourceGroup);
     fs.mkdirSync(messagesDir, { recursive: true });
+    fs.mkdirSync(tasksDir, { recursive: true });
     fs.mkdirSync(groupDir, { recursive: true });
     fs.writeFileSync(path.join(groupDir, 'note.txt'), 'evidence');
     fs.writeFileSync(
@@ -70,6 +74,14 @@ describe('IPC work effects', () => {
         type: 'reset_session',
         requestId: 'reset-request',
         mode: 'restart',
+      }),
+    );
+    fs.writeFileSync(
+      path.join(tasksDir, 'task-refusal.json'),
+      JSON.stringify({
+        type: 'pause_task',
+        requestId: 'task-refusal',
+        taskId: 'missing-task',
       }),
     );
 
@@ -99,5 +111,24 @@ describe('IPC work effects', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(getWorkEffectRevision(sourceGroup)).toBe(initialRevision + 3);
+    expect(
+      JSON.parse(
+        fs.readFileSync(
+          path.join(
+            testPaths.dataDir,
+            'ipc',
+            sourceGroup,
+            'responses',
+            'task-refusal.json',
+          ),
+          'utf-8',
+        ),
+      ),
+    ).toEqual({
+      requestId: 'task-refusal',
+      success: false,
+      error:
+        'Task missing-task was not found or is not accessible from this group.',
+    });
   });
 });
