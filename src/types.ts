@@ -81,6 +81,11 @@ export interface ScheduledTask {
 
 export type WorkHaltKind = 'count' | 'hours' | 'empty' | 'unknown';
 
+export interface WorkHalt {
+  kind: WorkHaltKind;
+  reason: string;
+}
+
 export interface OpenWork {
   id: string;
   group_folder: string;

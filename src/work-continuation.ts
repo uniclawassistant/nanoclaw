@@ -18,7 +18,7 @@ import {
   scheduleOpenWorkTask,
   upsertOpenWork,
 } from './db.js';
-import { OpenWork } from './types.js';
+import { OpenWork, WorkHalt } from './types.js';
 import { recordWorkEffect } from './work-effect.js';
 
 const WORK_CONTINUATION_TASK_PREFIX = 'work-continuation:';
@@ -116,12 +116,12 @@ export function scheduleWorkContinuationsAtTurnEnd(
   for (const work of getOpenWorkForGroup(groupFolder)) {
     if (work.pending_task_id) continue;
 
-    const limitReason = continuationLimitReason(work, now, config);
-    if (limitReason) {
-      if (haltOpenWork(work.group_folder, work.id, 'count', limitReason)) {
+    const halt = continuationLimit(work, now, config);
+    if (halt) {
+      if (haltOpenWork(work.group_folder, work.id, halt)) {
         alerts.push({
           chatJid: work.chat_jid,
-          text: `⚠️ Work continuation stopped for "${work.id}": ${limitReason}.`,
+          text: `⚠️ Work continuation stopped for "${work.id}": ${halt.reason}.`,
         });
       }
       continue;
@@ -169,14 +169,17 @@ export function recordWorkContinuationTurnOutcome(
     ];
   }
 
-  const reason = `${current.empty_continuation_count} consecutive empty continuation passes`;
-  if (!haltOpenWork(current.group_folder, current.id, 'empty', reason)) {
+  const halt: WorkHalt = {
+    kind: 'empty',
+    reason: `${current.empty_continuation_count} consecutive empty continuation passes`,
+  };
+  if (!haltOpenWork(current.group_folder, current.id, halt)) {
     return [];
   }
   return [
     {
       chatJid: current.chat_jid,
-      text: `⚠️ Work continuation stopped for "${current.id}": ${reason}.`,
+      text: `⚠️ Work continuation stopped for "${current.id}": ${halt.reason}.`,
     },
   ];
 }
@@ -188,13 +191,13 @@ export function haltExpiredOpenWork(
   if (!config.enabled) return [];
   const alerts: WorkContinuationAlert[] = [];
   for (const work of getAllOpenWork()) {
-    const reason = workHoursLimitReason(work, now, config);
-    if (!reason || !haltOpenWork(work.group_folder, work.id, 'hours', reason)) {
+    const halt = workHoursLimit(work, now, config);
+    if (!halt || !haltOpenWork(work.group_folder, work.id, halt)) {
       continue;
     }
     alerts.push({
       chatJid: work.chat_jid,
-      text: `⚠️ Work continuation stopped for "${work.id}": ${reason}.`,
+      text: `⚠️ Work continuation stopped for "${work.id}": ${halt.reason}.`,
     });
   }
   return alerts;
@@ -211,30 +214,36 @@ function continuationCountHasReset(
   return silenceMs >= config.silenceResetHours * 60 * 60 * 1000;
 }
 
-function continuationLimitReason(
+function continuationLimit(
   work: OpenWork,
   now: Date,
   config: WorkContinuationConfig,
-): string | null {
+): WorkHalt | null {
   const continuationCount = continuationCountHasReset(work, now, config)
     ? 0
     : work.continuation_count;
   if (continuationCount >= config.maxContinuations) {
-    return `continuation count limit (${config.maxContinuations}) reached before ${config.silenceResetHours} hours of silence`;
+    return {
+      kind: 'count',
+      reason: `continuation count limit (${config.maxContinuations}) reached before ${config.silenceResetHours} hours of silence`,
+    };
   }
 
-  return workHoursLimitReason(work, now, config);
+  return workHoursLimit(work, now, config);
 }
 
-function workHoursLimitReason(
+function workHoursLimit(
   work: OpenWork,
   now: Date,
   config: WorkContinuationConfig,
-): string | null {
+): WorkHalt | null {
   const elapsedMs = now.getTime() - new Date(work.opened_at).getTime();
   const maxWorkMs = config.maxWorkHours * 60 * 60 * 1000;
   if (elapsedMs >= maxWorkMs) {
-    return `MAX_WORK_HOURS (${config.maxWorkHours}) reached`;
+    return {
+      kind: 'hours',
+      reason: `MAX_WORK_HOURS (${config.maxWorkHours}) reached`,
+    };
   }
   return null;
 }
