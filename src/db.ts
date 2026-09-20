@@ -11,7 +11,7 @@ import {
   RegisteredGroup,
   ScheduledTask,
   TaskRunLog,
-  WorkHaltKind,
+  WorkHalt,
 } from './types.js';
 
 let db: Database.Database;
@@ -1374,8 +1374,7 @@ export function claimOpenWorkTask(taskId: string): OpenWork | undefined {
 export function haltOpenWork(
   groupFolder: string,
   id: string,
-  kind: WorkHaltKind,
-  reason: string,
+  halt: WorkHalt,
 ): boolean {
   return db.transaction(() => {
     const work = getOpenWork(groupFolder, id);
@@ -1386,7 +1385,7 @@ export function haltOpenWork(
          SET status = 'halted', halted_kind = ?, halted_reason = ?
          WHERE group_folder = ? AND id = ? AND status = 'open'`,
       )
-      .run(kind, reason, groupFolder, id);
+      .run(halt.kind, halt.reason, groupFolder, id);
     if (result.changes === 1 && work.pending_task_id) {
       deleteTask(work.pending_task_id);
     }

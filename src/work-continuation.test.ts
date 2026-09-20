@@ -209,6 +209,67 @@ describe('work continuations', () => {
     });
   });
 
+  it('keeps halt kinds and reasons consistent across every producer', () => {
+    openWork('main', 'tg:owner', 'count-end', 'remaining', openedAt);
+    scheduleWorkContinuationsAtTurnEnd('main', turnEndedAt, {
+      ...enabledConfig,
+      maxContinuations: 0,
+    });
+
+    openWork('main', 'tg:owner', 'hours-end', 'remaining', openedAt);
+    scheduleWorkContinuationsAtTurnEnd(
+      'main',
+      new Date('2026-08-25T00:00:00.000Z'),
+      enabledConfig,
+    );
+
+    openWork('main', 'tg:owner', 'empty-pass', 'remaining', openedAt);
+    const emptyWork = getOpenWork('main', 'empty-pass')!;
+    recordWorkContinuationTurnOutcome(emptyWork, false);
+    recordWorkContinuationTurnOutcome(emptyWork, false);
+
+    openWork('main', 'tg:owner', 'hours-tick', 'remaining', openedAt);
+    haltExpiredOpenWork(new Date('2026-08-25T00:00:00.000Z'), enabledConfig);
+
+    const expectedReasonByKind = {
+      count: /^continuation count limit \(/,
+      hours: /^MAX_WORK_HOURS \(/,
+      empty: /^\d+ consecutive empty continuation passes$/,
+    };
+    const expectedKinds = {
+      'count-end': 'count',
+      'hours-end': 'hours',
+      'empty-pass': 'empty',
+      'hours-tick': 'hours',
+    } as const;
+
+    for (const [id, expectedKind] of Object.entries(expectedKinds)) {
+      const work = getOpenWork('main', id)!;
+      expect(work.status).toBe('halted');
+      expect(work.halted_kind).toBe(expectedKind);
+      expect(work.halted_reason).toMatch(expectedReasonByKind[expectedKind]);
+    }
+
+    expect(
+      openWork(
+        'main',
+        'tg:owner',
+        'hours-end',
+        'new cycle',
+        new Date('2026-08-25T00:01:00.000Z'),
+      ),
+    ).toMatchObject({ accepted: true });
+    expect(
+      openWork(
+        'main',
+        'tg:owner',
+        'hours-tick',
+        'new cycle',
+        new Date('2026-08-25T00:01:00.000Z'),
+      ),
+    ).toMatchObject({ accepted: true });
+  });
+
   it('resets the consecutive empty count after an observed effect', () => {
     openWork('main', 'tg:owner', 'canary', 'remaining', openedAt);
     const work = getOpenWork('main', 'canary')!;
