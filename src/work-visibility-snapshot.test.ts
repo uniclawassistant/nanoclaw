@@ -17,6 +17,7 @@ describe('work visibility snapshot', () => {
       pending_task_id: 'work-continuation:pending',
       claimed_task_id: 'work-continuation:claimed',
       status: 'halted',
+      halted_kind: 'count',
       halted_reason: 'continuation count limit reached',
     };
     const task = (id: string) => ({

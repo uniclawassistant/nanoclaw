@@ -79,6 +79,8 @@ export interface ScheduledTask {
   created_at: string;
 }
 
+export type WorkHaltKind = 'count' | 'hours' | 'empty' | 'unknown';
+
 export interface OpenWork {
   id: string;
   group_folder: string;
@@ -91,6 +93,7 @@ export interface OpenWork {
   pending_task_id: string | null;
   claimed_task_id: string | null;
   status: 'open' | 'halted';
+  halted_kind: WorkHaltKind | null;
   halted_reason: string | null;
 }
 

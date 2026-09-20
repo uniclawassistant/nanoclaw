@@ -118,7 +118,7 @@ export function scheduleWorkContinuationsAtTurnEnd(
 
     const limitReason = continuationLimitReason(work, now, config);
     if (limitReason) {
-      if (haltOpenWork(work.group_folder, work.id, limitReason)) {
+      if (haltOpenWork(work.group_folder, work.id, 'count', limitReason)) {
         alerts.push({
           chatJid: work.chat_jid,
           text: `⚠️ Work continuation stopped for "${work.id}": ${limitReason}.`,
@@ -170,7 +170,9 @@ export function recordWorkContinuationTurnOutcome(
   }
 
   const reason = `${current.empty_continuation_count} consecutive empty continuation passes`;
-  if (!haltOpenWork(current.group_folder, current.id, reason)) return [];
+  if (!haltOpenWork(current.group_folder, current.id, 'empty', reason)) {
+    return [];
+  }
   return [
     {
       chatJid: current.chat_jid,
@@ -187,7 +189,9 @@ export function haltExpiredOpenWork(
   const alerts: WorkContinuationAlert[] = [];
   for (const work of getAllOpenWork()) {
     const reason = workHoursLimitReason(work, now, config);
-    if (!reason || !haltOpenWork(work.group_folder, work.id, reason)) continue;
+    if (!reason || !haltOpenWork(work.group_folder, work.id, 'hours', reason)) {
+      continue;
+    }
     alerts.push({
       chatJid: work.chat_jid,
       text: `⚠️ Work continuation stopped for "${work.id}": ${reason}.`,
@@ -241,19 +245,21 @@ function haltedWorkReopenPolicy(
 ): HaltedWorkReopenPolicy | undefined {
   if (work.status !== 'halted') return undefined;
   const reason = work.halted_reason ?? 'work continuation is halted';
-  if (reason.startsWith('MAX_WORK_HOURS (')) {
-    return resetHaltedWorkPolicy(true);
+  switch (work.halted_kind) {
+    case 'hours':
+      return resetHaltedWorkPolicy(true);
+    case 'empty':
+      return resetHaltedWorkPolicy(false);
+    case 'count':
+      return silenceWindowReopenPolicy(work, now, reason);
+    case 'unknown':
+      return silenceWindowReopenPolicy(work, now, reason);
+    default:
+      return silenceWindowReopenPolicy(work, now, reason);
   }
-  if (/^\d+ consecutive empty continuation passes$/.test(reason)) {
-    return resetHaltedWorkPolicy(false);
-  }
-  if (reason.startsWith('continuation count limit (')) {
-    return countLimitReopenPolicy(work, now, reason);
-  }
-  return rejectedHaltedWorkPolicy(reason);
 }
 
-function countLimitReopenPolicy(
+function silenceWindowReopenPolicy(
   work: OpenWork,
   now: Date,
   reason: string,

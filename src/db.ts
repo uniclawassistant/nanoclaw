@@ -11,6 +11,7 @@ import {
   RegisteredGroup,
   ScheduledTask,
   TaskRunLog,
+  WorkHaltKind,
 } from './types.js';
 
 let db: Database.Database;
@@ -79,6 +80,7 @@ function createSchema(database: Database.Database): void {
       empty_continuation_count INTEGER NOT NULL DEFAULT 0,
       pending_task_id TEXT,
       status TEXT NOT NULL DEFAULT 'open',
+      halted_kind TEXT,
       halted_reason TEXT,
       PRIMARY KEY (group_folder, id),
       FOREIGN KEY (pending_task_id) REFERENCES scheduled_tasks(id)
@@ -135,6 +137,13 @@ function createSchema(database: Database.Database): void {
       `ALTER TABLE open_work ADD COLUMN empty_continuation_count INTEGER NOT NULL DEFAULT 0`,
     );
   }
+  if (!openWorkColumns.some((column) => column.name === 'halted_kind')) {
+    database.exec(`ALTER TABLE open_work ADD COLUMN halted_kind TEXT`);
+  }
+  database.exec(
+    `UPDATE open_work SET halted_kind = 'unknown'
+     WHERE status = 'halted' AND halted_kind IS NULL`,
+  );
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
@@ -1178,7 +1187,8 @@ export function upsertOpenWork(input: {
              continuation_count = CASE WHEN ? THEN 0 ELSE continuation_count END,
              empty_continuation_count = CASE WHEN ? THEN 0 ELSE empty_continuation_count END,
              pending_task_id = NULL,
-             claimed_task_id = NULL, status = 'open', halted_reason = NULL
+             claimed_task_id = NULL, status = 'open',
+             halted_kind = NULL, halted_reason = NULL
          WHERE group_folder = ? AND id = ? AND status = 'halted'`,
       ).run(
         input.chat_jid,
@@ -1364,6 +1374,7 @@ export function claimOpenWorkTask(taskId: string): OpenWork | undefined {
 export function haltOpenWork(
   groupFolder: string,
   id: string,
+  kind: WorkHaltKind,
   reason: string,
 ): boolean {
   return db.transaction(() => {
@@ -1371,10 +1382,11 @@ export function haltOpenWork(
     if (!work || work.status !== 'open') return false;
     const result = db
       .prepare(
-        `UPDATE open_work SET status = 'halted', halted_reason = ?
+        `UPDATE open_work
+         SET status = 'halted', halted_kind = ?, halted_reason = ?
          WHERE group_folder = ? AND id = ? AND status = 'open'`,
       )
-      .run(reason, groupFolder, id);
+      .run(kind, reason, groupFolder, id);
     if (result.changes === 1 && work.pending_task_id) {
       deleteTask(work.pending_task_id);
     }
