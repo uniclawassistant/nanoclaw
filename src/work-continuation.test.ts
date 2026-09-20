@@ -162,6 +162,7 @@ describe('work continuations', () => {
       remaining: 'remaining',
       continuation_count: 0,
       status: 'halted',
+      halted_kind: 'count',
       halted_reason:
         'continuation count limit (0) reached before 6 hours of silence',
     });
@@ -203,6 +204,7 @@ describe('work continuations', () => {
     expect(getOpenWork('main', 'canary')).toMatchObject({
       empty_continuation_count: 2,
       status: 'halted',
+      halted_kind: 'empty',
       halted_reason: '2 consecutive empty continuation passes',
     });
   });
@@ -299,6 +301,7 @@ describe('work continuations', () => {
       continuation_count: 0,
       empty_continuation_count: 0,
       status: 'open',
+      halted_kind: null,
     });
   });
 
@@ -409,7 +412,10 @@ describe('work continuations', () => {
     );
 
     expect(alerts[0].text).toContain('MAX_WORK_HOURS (4) reached');
-    expect(getOpenWork('main', 'canary')?.status).toBe('halted');
+    expect(getOpenWork('main', 'canary')).toMatchObject({
+      status: 'halted',
+      halted_kind: 'hours',
+    });
     expect(getTaskById(taskId)).toBeUndefined();
   });
 });
