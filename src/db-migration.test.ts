@@ -117,7 +117,7 @@ describe('database migrations', () => {
     }
   });
 
-  it('reopens legacy halted work after the continuation silence window', async () => {
+  it('reopens legacy and unrecognized halt kinds after the silence window', async () => {
     const repoRoot = process.cwd();
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-db-test-'));
 
@@ -140,6 +140,7 @@ describe('database migrations', () => {
           pending_task_id TEXT,
           claimed_task_id TEXT,
           status TEXT NOT NULL DEFAULT 'open',
+          halted_kind TEXT,
           halted_reason TEXT,
           PRIMARY KEY (group_folder, id)
         );
@@ -157,6 +158,15 @@ describe('database migrations', () => {
             '2026-09-20T00:00:00.000Z', 0, NULL,
             'halted', NULL
           );
+        INSERT INTO open_work (
+          id, group_folder, chat_jid, remaining, opened_at,
+          continuation_count, last_continuation_at, status,
+          halted_kind, halted_reason
+        ) VALUES (
+          'future-kind', 'main', 'tg:owner', 'finish it',
+          '2026-09-20T00:00:00.000Z', 0, NULL, 'halted',
+          'future-policy', 'a future halt policy stopped this work'
+        );
       `);
       legacyDb.close();
 
@@ -201,7 +211,29 @@ describe('database migrations', () => {
         openWork(
           'main',
           'tg:owner',
+          'future-kind',
+          'too soon',
+          new Date('2026-09-20T05:00:00.000Z'),
+        ),
+      ).toEqual({
+        accepted: false,
+        reason:
+          'a future halt policy stopped this work; 1 hour of continuation silence remaining before this name can reopen',
+      });
+      expect(
+        openWork(
+          'main',
+          'tg:owner',
           'old-count',
+          'new cycle',
+          new Date('2026-09-20T07:01:00.000Z'),
+        ),
+      ).toMatchObject({ accepted: true });
+      expect(
+        openWork(
+          'main',
+          'tg:owner',
+          'future-kind',
           'new cycle',
           new Date('2026-09-20T07:01:00.000Z'),
         ),
