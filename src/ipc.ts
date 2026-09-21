@@ -17,6 +17,8 @@ import {
 import { resolveContainerPathToHost } from './document-paths.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { isWorkContinuationTask } from './work-continuation.js';
+import { recordWorkEffect } from './work-effect.js';
 import { type MessageFormat, RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -488,6 +490,7 @@ async function processForwardMessageIpc(
       source: sourceRecord,
     });
     if (result.ok) {
+      recordWorkEffect(sourceGroup);
       logger.info(
         {
           toJid: data.toJid,
@@ -632,6 +635,7 @@ async function processMediaToolIpc(
         threadId,
       );
       if (result.ok) {
+        recordWorkEffect(sourceGroup);
         writeIpcResponse(responsesDir, data.requestId, {
           success: true,
           message_id: result.message_id,
@@ -722,6 +726,7 @@ async function processMediaToolIpc(
         threadId,
       );
       if (result.ok) {
+        recordWorkEffect(sourceGroup);
         writeIpcResponse(responsesDir, data.requestId, {
           success: true,
           message_id: result.message_id,
@@ -780,6 +785,7 @@ async function processMediaToolIpc(
         threadId,
       );
       if (result.ok) {
+        recordWorkEffect(sourceGroup);
         writeIpcResponse(responsesDir, data.requestId, {
           success: true,
           message_id: result.message_id,
@@ -826,6 +832,7 @@ async function processMediaToolIpc(
         threadId,
       );
       if (result.ok) {
+        recordWorkEffect(sourceGroup);
         writeIpcResponse(responsesDir, data.requestId, {
           success: true,
           message_id: result.message_id,
@@ -913,6 +920,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       ? data.format
                       : undefined;
                   await deps.sendMessage(data.chatJid, data.text, format);
+                  recordWorkEffect(sourceGroup);
                   logger.info(
                     {
                       chatJid: data.chatJid,
@@ -1163,6 +1171,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                         threadId,
                       );
                       if (result.ok) {
+                        recordWorkEffect(sourceGroup);
                         if (deps.recordOutgoingDocument) {
                           deps.recordOutgoingDocument(
                             data.chatJid,
@@ -1308,6 +1317,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     data.mode as 'new' | 'restart',
                   );
                   if (result.accepted) {
+                    recordWorkEffect(sourceGroup);
                     writeIpcResponse(responsesDir, data.requestId, {
                       success: true,
                     });
@@ -1401,7 +1411,22 @@ export function startIpcWatcher(deps: IpcDeps): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               // Pass source group identity to processTaskIpc for authorization
-              await processTaskIpc(data, sourceGroup, isMain, deps);
+              const result = await processTaskIpc(
+                data,
+                sourceGroup,
+                isMain,
+                deps,
+              );
+              if (typeof data.requestId === 'string') {
+                writeIpcResponse(
+                  path.join(ipcBaseDir, sourceGroup, 'responses'),
+                  data.requestId,
+                  result ?? {
+                    success: false,
+                    error: `Unsupported task request: ${data.type}`,
+                  },
+                );
+              }
               fs.unlinkSync(filePath);
             } catch (err) {
               logger.error(
@@ -1433,6 +1458,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
 export async function processTaskIpc(
   data: {
     type: string;
+    requestId?: string;
     taskId?: string;
     prompt?: string;
     schedule_type?: string;
@@ -1453,7 +1479,7 @@ export async function processTaskIpc(
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
   deps: IpcDeps,
-): Promise<void> {
+): Promise<{ success: boolean; error?: string; data?: unknown } | undefined> {
   const registeredGroups = deps.registeredGroups();
 
   switch (data.type) {
@@ -1545,6 +1571,7 @@ export async function processTaskIpc(
           status: 'active',
           created_at: new Date().toISOString(),
         });
+        recordWorkEffect(sourceGroup);
         logger.info(
           { taskId, sourceGroup, targetFolder, contextMode },
           'Task created via IPC',
@@ -1554,78 +1581,115 @@ export async function processTaskIpc(
       break;
 
     case 'pause_task':
-      if (data.taskId) {
+      if (!data.taskId) {
+        return { success: false, error: 'task_id is required' };
+      }
+      {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
-          updateTask(data.taskId, { status: 'paused' });
-          logger.info(
-            { taskId: data.taskId, sourceGroup },
-            'Task paused via IPC',
-          );
-          deps.onTasksChanged();
-        } else {
+        if (!task || (!isMain && task.group_folder !== sourceGroup)) {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
             'Unauthorized task pause attempt',
           );
+          return {
+            success: false,
+            error: `Task ${data.taskId} was not found or is not accessible from this group.`,
+          };
         }
+        updateTask(data.taskId, { status: 'paused' });
+        recordWorkEffect(sourceGroup);
+        logger.info(
+          { taskId: data.taskId, sourceGroup },
+          'Task paused via IPC',
+        );
+        deps.onTasksChanged();
+        return {
+          success: true,
+          data: { task_id: data.taskId, status: 'paused' },
+        };
       }
-      break;
 
     case 'resume_task':
-      if (data.taskId) {
+      if (!data.taskId) {
+        return { success: false, error: 'task_id is required' };
+      }
+      {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
-          updateTask(data.taskId, { status: 'active' });
-          logger.info(
-            { taskId: data.taskId, sourceGroup },
-            'Task resumed via IPC',
-          );
-          deps.onTasksChanged();
-        } else {
+        if (!task || (!isMain && task.group_folder !== sourceGroup)) {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
             'Unauthorized task resume attempt',
           );
+          return {
+            success: false,
+            error: `Task ${data.taskId} was not found or is not accessible from this group.`,
+          };
         }
+        updateTask(data.taskId, { status: 'active' });
+        recordWorkEffect(sourceGroup);
+        logger.info(
+          { taskId: data.taskId, sourceGroup },
+          'Task resumed via IPC',
+        );
+        deps.onTasksChanged();
+        return {
+          success: true,
+          data: { task_id: data.taskId, status: 'active' },
+        };
       }
-      break;
 
     case 'cancel_task':
-      if (data.taskId) {
+      if (!data.taskId) {
+        return { success: false, error: 'task_id is required' };
+      }
+      {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
-          deleteTask(data.taskId);
-          logger.info(
-            { taskId: data.taskId, sourceGroup },
-            'Task cancelled via IPC',
-          );
-          deps.onTasksChanged();
-        } else {
+        if (!task || (!isMain && task.group_folder !== sourceGroup)) {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
             'Unauthorized task cancel attempt',
           );
+          return {
+            success: false,
+            error: `Task ${data.taskId} was not found or is not accessible from this group.`,
+          };
         }
+        const closedWork =
+          isWorkContinuationTask(data.taskId) && deps.closeWork
+            ? deps.closeWork(task.group_folder, data.taskId)
+            : false;
+        if (!closedWork) deleteTask(data.taskId);
+        recordWorkEffect(sourceGroup);
+        logger.info(
+          { taskId: data.taskId, sourceGroup, closedWork },
+          'Task cancelled via IPC',
+        );
+        deps.onTasksChanged();
+        return {
+          success: true,
+          data: {
+            task_id: data.taskId,
+            cancelled: true,
+            closed_work: closedWork,
+          },
+        };
       }
-      break;
 
     case 'update_task':
-      if (data.taskId) {
+      if (!data.taskId) {
+        return { success: false, error: 'task_id is required' };
+      }
+      {
         const task = getTaskById(data.taskId);
-        if (!task) {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Task not found for update',
-          );
-          break;
-        }
-        if (!isMain && task.group_folder !== sourceGroup) {
+        if (!task || (!isMain && task.group_folder !== sourceGroup)) {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
             'Unauthorized task update attempt',
           );
-          break;
+          return {
+            success: false,
+            error: `Task ${data.taskId} was not found or is not accessible from this group.`,
+          };
         }
 
         const updates: Parameters<typeof updateTask>[1] = {};
@@ -1657,13 +1721,14 @@ export async function processTaskIpc(
                 { taskId: data.taskId, value: updatedTask.schedule_value },
                 'Invalid cron in task update',
               );
-              break;
+              return { success: false, error: 'Invalid cron expression.' };
             }
           } else if (updatedTask.schedule_type === 'interval') {
             const ms = parseInt(updatedTask.schedule_value, 10);
-            if (!isNaN(ms) && ms > 0) {
-              updates.next_run = new Date(Date.now() + ms).toISOString();
+            if (isNaN(ms) || ms <= 0) {
+              return { success: false, error: 'Invalid interval.' };
             }
+            updates.next_run = new Date(Date.now() + ms).toISOString();
           } else if (updatedTask.schedule_type === 'once') {
             const date = new Date(updatedTask.schedule_value);
             if (isNaN(date.getTime())) {
@@ -1671,20 +1736,24 @@ export async function processTaskIpc(
                 { taskId: data.taskId, value: updatedTask.schedule_value },
                 'Invalid timestamp in task update',
               );
-              break;
+              return { success: false, error: 'Invalid timestamp.' };
             }
             updates.next_run = date.toISOString();
           }
         }
 
         updateTask(data.taskId, updates);
+        recordWorkEffect(sourceGroup);
         logger.info(
           { taskId: data.taskId, sourceGroup, updates },
           'Task updated via IPC',
         );
         deps.onTasksChanged();
+        return {
+          success: true,
+          data: { task_id: data.taskId, updated: true },
+        };
       }
-      break;
 
     case 'refresh_groups':
       // Only main group can request a refresh

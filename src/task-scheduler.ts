@@ -10,6 +10,7 @@ import {
 } from './container-runner.js';
 import {
   getAllTasks,
+  getAllWork,
   getDueTasks,
   getTaskById,
   logTaskRun,
@@ -29,9 +30,12 @@ import {
 } from './usage-tracker.js';
 import {
   claimWorkContinuation,
+  haltExpiredOpenWork,
   isWorkContinuationTask,
+  recordWorkContinuationTurnOutcome,
   scheduleWorkContinuationsAtTurnEnd,
 } from './work-continuation.js';
+import { getWorkEffectRevision, recordWorkEffect } from './work-effect.js';
 
 /**
  * Compute the next run time for a recurring task, anchored to the
@@ -102,7 +106,8 @@ export interface SchedulerDependencies {
     containerName: string,
     groupFolder: string,
   ) => void;
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (jid: string, text: string) => Promise<boolean | void>;
+  onWorkChanged?: () => void;
 }
 
 async function runTask(
@@ -111,7 +116,13 @@ async function runTask(
 ): Promise<void> {
   const startTime = Date.now();
   const isWorkContinuation = isWorkContinuationTask(task.id);
-  if (isWorkContinuation && !claimWorkContinuation(task.id)) {
+  const claimedWork = isWorkContinuation
+    ? claimWorkContinuation(task.id)
+    : undefined;
+  const initialWorkEffectRevision = isWorkContinuation
+    ? getWorkEffectRevision(task.group_folder)
+    : null;
+  if (isWorkContinuation && !claimedWork) {
     logger.info({ taskId: task.id }, 'Skipping cancelled work continuation');
     updateTaskAfterRun(task.id, null, 'Cancelled');
     return;
@@ -181,6 +192,7 @@ async function runTask(
       status: t.status,
       next_run: t.next_run,
     })),
+    getAllWork(),
   );
 
   let result: string | null = null;
@@ -225,6 +237,7 @@ async function runTask(
         isMain,
         isScheduledTask: true,
         isWorkContinuation,
+        workId: claimedWork?.id,
         taskId: task.id,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
@@ -245,7 +258,13 @@ async function runTask(
         if (streamedOutput.result) {
           result = streamedOutput.result;
           // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          const delivered = await deps.sendMessage(
+            task.chat_jid,
+            streamedOutput.result,
+          );
+          if (isWorkContinuation && delivered === true) {
+            recordWorkEffect(task.group_folder);
+          }
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {
@@ -304,6 +323,22 @@ async function runTask(
   const resetApplied = isRespawnTask(task.id)
     ? false
     : await deps.applyPendingResetAtTurnEnd?.(task.group_folder);
+  const continuationAlerts = claimedWork
+    ? recordWorkContinuationTurnOutcome(
+        claimedWork,
+        getWorkEffectRevision(task.group_folder) !== initialWorkEffectRevision,
+      )
+    : [];
+  for (const alert of continuationAlerts) {
+    await deps
+      .sendMessage(alert.chatJid, alert.text)
+      .catch((err) =>
+        logger.error(
+          { taskId: task.id, chatJid: alert.chatJid, err },
+          'Failed to deliver work continuation effect alert',
+        ),
+      );
+  }
   if (!resetApplied) {
     const alerts = scheduleWorkContinuationsAtTurnEnd(
       task.group_folder,
@@ -322,6 +357,7 @@ async function runTask(
         );
     }
   }
+  if (claimedWork) deps.onWorkChanged?.();
 
   const durationMs = Date.now() - startTime;
 
@@ -384,6 +420,18 @@ function armNextWorkContinuation(): void {
  * and loop tick can never double-run the same task.
  */
 function enqueueDueTasks(deps: SchedulerDependencies): void {
+  const expirationAlerts = haltExpiredOpenWork();
+  if (expirationAlerts.length > 0) deps.onWorkChanged?.();
+  for (const alert of expirationAlerts) {
+    void deps
+      .sendMessage(alert.chatJid, alert.text)
+      .catch((err) =>
+        logger.error(
+          { chatJid: alert.chatJid, err },
+          'Failed to deliver expired work continuation alert',
+        ),
+      );
+  }
   const dueTasks = getDueTasks();
   if (dueTasks.length > 0) {
     logger.info({ count: dueTasks.length }, 'Found due tasks');

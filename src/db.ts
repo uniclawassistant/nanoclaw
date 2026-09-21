@@ -11,6 +11,7 @@ import {
   RegisteredGroup,
   ScheduledTask,
   TaskRunLog,
+  WorkHalt,
 } from './types.js';
 
 let db: Database.Database;
@@ -75,8 +76,11 @@ function createSchema(database: Database.Database): void {
       remaining TEXT NOT NULL,
       opened_at TEXT NOT NULL,
       continuation_count INTEGER NOT NULL DEFAULT 0,
+      last_continuation_at TEXT,
+      empty_continuation_count INTEGER NOT NULL DEFAULT 0,
       pending_task_id TEXT,
       status TEXT NOT NULL DEFAULT 'open',
+      halted_kind TEXT,
       halted_reason TEXT,
       PRIMARY KEY (group_folder, id),
       FOREIGN KEY (pending_task_id) REFERENCES scheduled_tasks(id)
@@ -104,6 +108,42 @@ function createSchema(database: Database.Database): void {
       requires_trigger INTEGER DEFAULT 1
     );
   `);
+
+  // Remembers the continuation row that last woke this work, so close_work still
+  // resolves after claimOpenWorkTask clears pending_task_id for the running turn.
+  try {
+    database.exec(`ALTER TABLE open_work ADD COLUMN claimed_task_id TEXT`);
+  } catch {
+    /* column already exists */
+  }
+  const openWorkColumns = database.pragma('table_info(open_work)') as Array<{
+    name: string;
+  }>;
+  if (
+    !openWorkColumns.some((column) => column.name === 'last_continuation_at')
+  ) {
+    database.exec(`ALTER TABLE open_work ADD COLUMN last_continuation_at TEXT`);
+  }
+  database.exec(
+    `UPDATE open_work SET last_continuation_at = opened_at
+     WHERE continuation_count > 0 AND last_continuation_at IS NULL`,
+  );
+  if (
+    !openWorkColumns.some(
+      (column) => column.name === 'empty_continuation_count',
+    )
+  ) {
+    database.exec(
+      `ALTER TABLE open_work ADD COLUMN empty_continuation_count INTEGER NOT NULL DEFAULT 0`,
+    );
+  }
+  if (!openWorkColumns.some((column) => column.name === 'halted_kind')) {
+    database.exec(`ALTER TABLE open_work ADD COLUMN halted_kind TEXT`);
+  }
+  database.exec(
+    `UPDATE open_work SET halted_kind = 'unknown'
+     WHERE status = 'halted' AND halted_kind IS NULL`,
+  );
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
@@ -1127,13 +1167,41 @@ export function upsertOpenWork(input: {
   chat_jid: string;
   remaining: string;
   opened_at: string;
+  reopenHalted?: {
+    resetContinuationCount: boolean;
+    resetEmptyContinuationCount: boolean;
+  };
 }): { accepted: true; work: OpenWork } | { accepted: false; reason: string } {
   return db.transaction(() => {
     const existing = getOpenWork(input.group_folder, input.id);
-    if (existing?.status === 'halted') {
+    if (existing?.status === 'halted' && !input.reopenHalted) {
       return {
         accepted: false as const,
         reason: existing.halted_reason ?? 'work continuation is halted',
+      };
+    }
+    if (existing?.status === 'halted') {
+      db.prepare(
+        `UPDATE open_work
+         SET chat_jid = ?, remaining = ?, opened_at = ?,
+             continuation_count = CASE WHEN ? THEN 0 ELSE continuation_count END,
+             empty_continuation_count = CASE WHEN ? THEN 0 ELSE empty_continuation_count END,
+             pending_task_id = NULL,
+             claimed_task_id = NULL, status = 'open',
+             halted_kind = NULL, halted_reason = NULL
+         WHERE group_folder = ? AND id = ? AND status = 'halted'`,
+      ).run(
+        input.chat_jid,
+        input.remaining,
+        input.opened_at,
+        input.reopenHalted!.resetContinuationCount ? 1 : 0,
+        input.reopenHalted!.resetEmptyContinuationCount ? 1 : 0,
+        input.group_folder,
+        input.id,
+      );
+      return {
+        accepted: true as const,
+        work: getOpenWork(input.group_folder, input.id)!,
       };
     }
     db.prepare(
@@ -1180,8 +1248,49 @@ export function getOpenWorkForGroup(groupFolder: string): OpenWork[] {
     .all(groupFolder) as OpenWork[];
 }
 
-export function closeOpenWork(groupFolder: string, id: string): boolean {
+export function getAllOpenWork(): OpenWork[] {
+  return db
+    .prepare(
+      `SELECT * FROM open_work
+       WHERE status = 'open'
+       ORDER BY opened_at, group_folder, id`,
+    )
+    .all() as OpenWork[];
+}
+
+export function getAllWork(): OpenWork[] {
+  return db
+    .prepare('SELECT * FROM open_work ORDER BY opened_at, group_folder, id')
+    .all() as OpenWork[];
+}
+
+/**
+ * Resolves what a caller passed to the work record it means: either the work's
+ * own id, or the id of the continuation row that carries it. A woken session is
+ * handed the task row id and not the work id, so without this the most natural
+ * close_work call reports `closed: false` and the work keeps re-firing.
+ */
+export function resolveOpenWorkId(
+  groupFolder: string,
+  idOrTaskId: string,
+): string | undefined {
+  if (getOpenWork(groupFolder, idOrTaskId)) return idOrTaskId;
+  const work = db
+    .prepare(
+      `SELECT id FROM open_work
+       WHERE group_folder = ? AND (pending_task_id = ? OR claimed_task_id = ?)`,
+    )
+    .get(groupFolder, idOrTaskId, idOrTaskId) as { id: string } | undefined;
+  return work?.id;
+}
+
+export function closeOpenWork(
+  groupFolder: string,
+  idOrTaskId: string,
+): boolean {
   return db.transaction(() => {
+    const id = resolveOpenWorkId(groupFolder, idOrTaskId);
+    if (!id) return false;
     const work = getOpenWork(groupFolder, id);
     if (!work) return false;
     db.prepare('DELETE FROM open_work WHERE group_folder = ? AND id = ?').run(
@@ -1196,6 +1305,7 @@ export function closeOpenWork(groupFolder: string, id: string): boolean {
 export function scheduleOpenWorkTask(
   work: OpenWork,
   task: Omit<ScheduledTask, 'last_run' | 'last_result'>,
+  resetContinuationCount = false,
 ): boolean {
   return db.transaction(() => {
     const current = getOpenWork(work.group_folder, work.id);
@@ -1210,17 +1320,41 @@ export function scheduleOpenWorkTask(
     const result = db
       .prepare(
         `UPDATE open_work
-         SET pending_task_id = ?, continuation_count = continuation_count + 1
+         SET pending_task_id = ?,
+             continuation_count = CASE WHEN ? THEN 1 ELSE continuation_count + 1 END,
+             last_continuation_at = ?
          WHERE group_folder = ? AND id = ?
            AND status = 'open' AND pending_task_id IS NULL`,
       )
-      .run(task.id, work.group_folder, work.id);
+      .run(
+        task.id,
+        resetContinuationCount ? 1 : 0,
+        task.created_at,
+        work.group_folder,
+        work.id,
+      );
     if (result.changes === 0) {
       deleteTask(task.id);
       return false;
     }
     return true;
   })();
+}
+
+export function recordOpenWorkContinuationOutcome(
+  groupFolder: string,
+  id: string,
+  hadEffect: boolean,
+): OpenWork | undefined {
+  db.prepare(
+    `UPDATE open_work
+     SET empty_continuation_count = CASE
+       WHEN ? THEN 0
+       ELSE empty_continuation_count + 1
+     END
+     WHERE group_folder = ? AND id = ? AND status = 'open'`,
+  ).run(hadEffect ? 1 : 0, groupFolder, id);
+  return getOpenWork(groupFolder, id);
 }
 
 export function claimOpenWorkTask(taskId: string): OpenWork | undefined {
@@ -1230,25 +1364,33 @@ export function claimOpenWorkTask(taskId: string): OpenWork | undefined {
       .get(taskId) as OpenWork | undefined;
     if (!work) return undefined;
     db.prepare(
-      `UPDATE open_work SET pending_task_id = NULL
+      `UPDATE open_work SET pending_task_id = NULL, claimed_task_id = ?
        WHERE group_folder = ? AND id = ? AND pending_task_id = ?`,
-    ).run(work.group_folder, work.id, taskId);
-    return { ...work, pending_task_id: null };
+    ).run(taskId, work.group_folder, work.id, taskId);
+    return { ...work, pending_task_id: null, claimed_task_id: taskId };
   })();
 }
 
 export function haltOpenWork(
   groupFolder: string,
   id: string,
-  reason: string,
+  halt: WorkHalt,
 ): boolean {
-  const result = db
-    .prepare(
-      `UPDATE open_work SET status = 'halted', halted_reason = ?
-       WHERE group_folder = ? AND id = ? AND status = 'open'`,
-    )
-    .run(reason, groupFolder, id);
-  return result.changes === 1;
+  return db.transaction(() => {
+    const work = getOpenWork(groupFolder, id);
+    if (!work || work.status !== 'open') return false;
+    const result = db
+      .prepare(
+        `UPDATE open_work
+         SET status = 'halted', halted_kind = ?, halted_reason = ?
+         WHERE group_folder = ? AND id = ? AND status = 'open'`,
+      )
+      .run(halt.kind, halt.reason, groupFolder, id);
+    if (result.changes === 1 && work.pending_task_id) {
+      deleteTask(work.pending_task_id);
+    }
+    return result.changes === 1;
+  })();
 }
 
 export function getTaskById(id: string): ScheduledTask | undefined {
@@ -1322,7 +1464,13 @@ export function updateTask(
 }
 
 export function deleteTask(id: string): void {
-  // Delete child records first (FK constraint)
+  // Delete child records first (FK constraint). open_work.pending_task_id
+  // references this row, so drop the link before the row goes: otherwise the
+  // delete throws, the caller has already answered "cancellation requested",
+  // and the task survives to fire anyway.
+  db.prepare(
+    'UPDATE open_work SET pending_task_id = NULL WHERE pending_task_id = ?',
+  ).run(id);
   db.prepare('DELETE FROM task_run_logs WHERE task_id = ?').run(id);
   db.prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
 }

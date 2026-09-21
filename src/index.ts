@@ -51,6 +51,7 @@ import {
   getAllSessions,
   deleteSession,
   getAllTasks,
+  getAllWork,
   getLastBotMessageTimestamp,
   getLastIncomingThreadId,
   getMessageById,
@@ -84,7 +85,11 @@ import {
   formatUsageLine,
   recordUsage,
 } from './usage-tracker.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  deliverFormattedOutbound,
+  findChannel,
+  formatMessages,
+} from './router.js';
 import {
   cleanupMermaidPng,
   mermaidEnabled,
@@ -133,6 +138,23 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+
+function refreshTaskSnapshots(): void {
+  const taskRows = getAllTasks().map((task) => ({
+    id: task.id,
+    groupFolder: task.group_folder,
+    prompt: task.prompt,
+    script: task.script || undefined,
+    schedule_type: task.schedule_type,
+    schedule_value: task.schedule_value,
+    status: task.status,
+    next_run: task.next_run,
+  }));
+  const work = getAllWork();
+  for (const group of Object.values(registeredGroups)) {
+    writeTasksSnapshot(group.folder, group.isMain === true, taskRows, work);
+  }
+}
 // FED-21 / PR #61: groups marked for a session reset that should fire after
 // the current turn ends, or before the next runAgent if the marker arrived
 // post-turnEnd. Keyed by group folder. Entry is the reset mode requested by
@@ -225,6 +247,23 @@ export async function sendText(
 
   const msgId = await channel.sendMessage(jid, text, threadId, format);
   recordOutgoing(jid, msgId, { content: text, messageType: 'text' });
+}
+
+export function createSchedulerOutboundSender(
+  channels: Channel[],
+  resolveThreadId: (jid: string) => string | undefined,
+): (jid: string, rawText: string) => Promise<boolean> {
+  return async (jid, rawText) => {
+    const channel = findChannel(channels, jid);
+    if (!channel) {
+      logger.warn({ jid }, 'No channel owns JID, cannot send message');
+      return false;
+    }
+    const threadId = resolveThreadId(jid);
+    return deliverFormattedOutbound(rawText, (text) =>
+      sendText(channel, jid, text, threadId),
+    );
+  };
 }
 
 export interface ImageGenDelivery {
@@ -980,6 +1019,7 @@ async function handleOpenWorkAtTurnEnd(folder: string): Promise<void> {
     undefined,
     armSchedulerWake,
   );
+  refreshTaskSnapshots();
   for (const alert of alerts) {
     const channel = findChannel(channels, alert.chatJid);
     if (!channel) {
@@ -1099,6 +1139,7 @@ async function runAgent(
       status: t.status,
       next_run: t.next_run,
     })),
+    getAllWork(),
   );
 
   // Update available groups snapshot (main group only can see all groups)
@@ -1479,16 +1520,11 @@ async function main(): Promise<void> {
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
-    sendMessage: async (jid, rawText) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) {
-        logger.warn({ jid }, 'No channel owns JID, cannot send message');
-        return;
-      }
-      const text = formatOutbound(rawText);
-      const threadId = getLastIncomingThreadId(jid);
-      if (text) await sendText(channel, jid, text, threadId);
-    },
+    sendMessage: createSchedulerOutboundSender(
+      channels,
+      getLastIncomingThreadId,
+    ),
+    onWorkChanged: refreshTaskSnapshots,
   });
   startIpcWatcher({
     sendMessage: async (jid, text, format) => {
@@ -1565,25 +1601,17 @@ async function main(): Promise<void> {
       pendingResets[folder] = mode;
       return { accepted: true };
     },
-    openWork: (folder, chatJid, id, remaining) =>
-      openWork(folder, chatJid, id, remaining),
-    closeWork: (folder, id) => closeWork(folder, id),
-    onTasksChanged: () => {
-      const tasks = getAllTasks();
-      const taskRows = tasks.map((t) => ({
-        id: t.id,
-        groupFolder: t.group_folder,
-        prompt: t.prompt,
-        script: t.script || undefined,
-        schedule_type: t.schedule_type,
-        schedule_value: t.schedule_value,
-        status: t.status,
-        next_run: t.next_run,
-      }));
-      for (const group of Object.values(registeredGroups)) {
-        writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
-      }
+    openWork: (folder, chatJid, id, remaining) => {
+      const result = openWork(folder, chatJid, id, remaining);
+      if (result.accepted) refreshTaskSnapshots();
+      return result;
     },
+    closeWork: (folder, id) => {
+      const closed = closeWork(folder, id);
+      if (closed) refreshTaskSnapshots();
+      return closed;
+    },
+    onTasksChanged: refreshTaskSnapshots,
     getMessage: (messageId, jid) => getMessageById(messageId, jid),
     searchMessages: (params) => searchMessages(params),
     getMessagesAroundTimestamp: (chatJid, timestamp, messageId, n) =>

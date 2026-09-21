@@ -40,6 +40,7 @@ interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   isWorkContinuation?: boolean;
+  workId?: string;
   assistantName?: string;
   script?: string;
   contextThreshold?: number;
@@ -665,8 +666,7 @@ async function runQuery(
       // No maxThinkingTokens: the SDK enables adaptive thinking by default.
       // The host forwards an instance-scoped override for canary rollouts;
       // services without one stay on the existing Opus default.
-      model:
-        process.env.NANOCLAW_DEFAULT_MODEL || 'claude-opus-5[1m]',
+      model: process.env.NANOCLAW_DEFAULT_MODEL || 'claude-opus-5[1m]',
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
@@ -860,6 +860,7 @@ async function main(): Promise<void> {
     containerInput.isScheduledTask === true,
     containerInput.isWorkContinuation === true,
     pending.map((message) => message.text),
+    containerInput.workId,
   );
   let deliveryIds = pending.flatMap((message) =>
     message.deliveryId ? [message.deliveryId] : [],

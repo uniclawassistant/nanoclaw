@@ -18,3 +18,33 @@ describe('initial prompt', () => {
     expect(prompt).toContain('run report');
   });
 });
+
+describe('work continuation header', () => {
+  it('names the work so the woken session can close it', () => {
+    const initial = buildInitialPrompt(
+      'finish the audit',
+      true,
+      true,
+      [],
+      'weekly-memory-audit-2026-09-13',
+    );
+
+    expect(initial).toContain('weekly-memory-audit-2026-09-13');
+    expect(initial).toContain('close_work');
+    expect(initial.endsWith('finish the audit')).toBe(true);
+  });
+
+  it('carries remaining verbatim below the header', () => {
+    const remaining = 'line 1\nline 2\n  indented\ttab';
+
+    const initial = buildInitialPrompt(remaining, true, true, [], 'canary');
+
+    expect(initial.slice(initial.length - remaining.length)).toBe(remaining);
+  });
+
+  it('adds no header when the host sent no work id', () => {
+    const initial = buildInitialPrompt('finish the audit', true, true, []);
+
+    expect(initial).toBe('finish the audit');
+  });
+});

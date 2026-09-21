@@ -31,7 +31,7 @@ import {
 import { detectAuthMode } from './credential-proxy.js';
 import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
-import { RegisteredGroup } from './types.js';
+import { OpenWork, RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -45,6 +45,8 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   isWorkContinuation?: boolean;
+  /** Work this continuation carries. Without it a woken session cannot close it. */
+  workId?: string;
   taskId?: string;
   assistantName?: string;
   script?: string;
@@ -860,19 +862,56 @@ export async function runContainerAgent(
   });
 }
 
+export interface TaskSnapshotInput {
+  id: string;
+  groupFolder: string;
+  prompt: string;
+  script?: string | null;
+  schedule_type: string;
+  schedule_value: string;
+  status: string;
+  next_run: string | null;
+}
+
+export function buildTaskVisibilitySnapshot(
+  tasks: TaskSnapshotInput[],
+  work: OpenWork[],
+): Array<TaskSnapshotInput & Record<string, unknown>> {
+  const workByTaskId = new Map<string, OpenWork>();
+  for (const item of work) {
+    if (item.pending_task_id) workByTaskId.set(item.pending_task_id, item);
+    if (item.claimed_task_id) workByTaskId.set(item.claimed_task_id, item);
+  }
+  return tasks.map((task) => {
+    const linkedWork = workByTaskId.get(task.id);
+    if (!linkedWork) {
+      return {
+        ...task,
+        kind: task.id.startsWith('work-continuation:')
+          ? ('work_continuation' as const)
+          : ('scheduled_task' as const),
+      };
+    }
+    return {
+      ...task,
+      kind: 'work_continuation' as const,
+      work: {
+        id: linkedWork.id,
+        remaining: linkedWork.remaining,
+        continuation_count: linkedWork.continuation_count,
+        empty_continuation_count: linkedWork.empty_continuation_count,
+        status: linkedWork.status,
+        halted_reason: linkedWork.halted_reason,
+      },
+    };
+  });
+}
+
 export function writeTasksSnapshot(
   groupFolder: string,
   isMain: boolean,
-  tasks: Array<{
-    id: string;
-    groupFolder: string;
-    prompt: string;
-    script?: string | null;
-    schedule_type: string;
-    schedule_value: string;
-    status: string;
-    next_run: string | null;
-  }>,
+  tasks: TaskSnapshotInput[],
+  work: OpenWork[],
 ): void {
   // Write filtered tasks to the group's IPC directory
   const groupIpcDir = resolveGroupIpcPath(groupFolder);
@@ -882,9 +921,15 @@ export function writeTasksSnapshot(
   const filteredTasks = isMain
     ? tasks
     : tasks.filter((t) => t.groupFolder === groupFolder);
+  const filteredWork = isMain
+    ? work
+    : work.filter((item) => item.group_folder === groupFolder);
+  const visibleTasks = buildTaskVisibilitySnapshot(filteredTasks, filteredWork);
 
   const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
-  fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
+  fs.writeFileSync(tasksFile, JSON.stringify(visibleTasks, null, 2));
+  const workFile = path.join(groupIpcDir, 'current_open_work.json');
+  fs.writeFileSync(workFile, JSON.stringify(filteredWork, null, 2));
 }
 
 export interface AvailableGroup {
