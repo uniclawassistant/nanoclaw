@@ -196,6 +196,30 @@ export interface TelegramChannelOpts {
   stopGroupRun?: (folder: string) => 'interrupted' | 'idle' | 'none';
 }
 
+const ADDRESSED_COMMAND_RE = /^\/[A-Za-z0-9_]{1,32}@([A-Za-z0-9_]+)$/;
+
+/**
+ * True when the text starts with a bot command explicitly addressed to a
+ * different bot (`/cmd@otherbot`). Such messages belong to that bot and are
+ * dropped before storage. Telegram bot usernames always end in "bot".
+ */
+export function isCommandForOtherBot(
+  text: string | undefined,
+  entities:
+    | ReadonlyArray<{ type: string; offset: number; length: number }>
+    | undefined,
+  myUsername: string | undefined,
+): boolean {
+  if (!text || !text.startsWith('/') || !myUsername) return false;
+  const entity = entities?.find(
+    (e) => e.type === 'bot_command' && e.offset === 0,
+  );
+  const token = entity ? text.slice(0, entity.length) : text.split(/\s/, 1)[0];
+  const target = ADDRESSED_COMMAND_RE.exec(token)?.[1];
+  if (!target || !/bot$/i.test(target)) return false;
+  return target.toLowerCase() !== myUsername.toLowerCase();
+}
+
 // Marker file used to notify a chat after /restart kickstart completes.
 const RESTART_NOTIFY_FILE = path.join(DATA_DIR, 'restart-notify.json');
 
@@ -529,6 +553,19 @@ export class TelegramChannel implements Channel {
     ]);
 
     this.bot.on('message:text', async (ctx) => {
+      if (
+        isCommandForOtherBot(
+          ctx.message.text,
+          ctx.message.entities,
+          ctx.me?.username,
+        )
+      ) {
+        logger.debug(
+          { chatJid: `tg:${ctx.chat.id}` },
+          'Ignoring command addressed to another bot',
+        );
+        return;
+      }
       if (ctx.message.text.startsWith('/')) {
         const cmd = ctx.message.text.slice(1).split(/[\s@]/)[0].toLowerCase();
         if (TELEGRAM_BOT_COMMANDS.has(cmd)) return;
@@ -648,6 +685,16 @@ export class TelegramChannel implements Channel {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
+      if (
+        isCommandForOtherBot(
+          ctx.message.caption,
+          ctx.message.caption_entities,
+          ctx.me?.username,
+        )
+      ) {
+        logger.debug({ chatJid }, 'Ignoring command addressed to another bot');
+        return;
+      }
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =

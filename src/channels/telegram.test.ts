@@ -389,6 +389,65 @@ describe('TelegramChannel', () => {
       );
     });
 
+    it('drops slash commands addressed to another bot', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(
+        createTextCtx({
+          text: '/models@UnicLokibot',
+          entities: [{ type: 'bot_command', offset: 0, length: 19 }],
+        }),
+      );
+      await triggerTextMessage(
+        createTextCtx({ text: '/foo@other_helper_bot please' }),
+      );
+      await triggerTextMessage(createTextCtx({ text: '/bar@OtherBot' }));
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+      expect(opts.onChatMetadata).not.toHaveBeenCalled();
+    });
+
+    it('keeps commands without a target, commands for us, and mid-text bot mentions', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const texts = [
+        '/models',
+        '/models@Andy_AI_Bot',
+        '/models@ANDY_AI_BOT',
+        '/x@SomeUser',
+        'ask @UnicLokibot about /models@UnicLokibot',
+        '/home/user@hostbot is the path',
+        'hello',
+      ];
+      for (const text of texts) {
+        await triggerTextMessage(createTextCtx({ text }));
+      }
+
+      expect(opts.onMessage).toHaveBeenCalledTimes(texts.length);
+      for (const text of texts) {
+        expect(opts.onMessage).toHaveBeenCalledWith(
+          'tg:100200300',
+          expect.objectContaining({ content: text }),
+        );
+      }
+    });
+
+    it('keeps addressed commands when our own username is unknown', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({ text: '/models@UnicLokibot' });
+      (ctx as any).me = { id: 12345 };
+      await triggerTextMessage(ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledTimes(1);
+    });
+
     it('extracts sender name from first_name', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
@@ -740,6 +799,25 @@ describe('TelegramChannel', () => {
           content: '[Photo] (/workspace/group/attachments/photo_1.jpg)',
         }),
       );
+    });
+
+    it('drops media whose caption is a command for another bot', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        caption: '/describe@UnicLokibot',
+        extra: {
+          caption_entities: [{ type: 'bot_command', offset: 0, length: 21 }],
+          photo: [{ file_id: 'photo_id', width: 800 }],
+        },
+      });
+      await triggerMediaMessage('message:photo', ctx);
+      await flushPromises();
+
+      expect(currentBot().api.getFile).not.toHaveBeenCalled();
+      expect(opts.onMessage).not.toHaveBeenCalled();
     });
 
     it('downloads photo with caption', async () => {
