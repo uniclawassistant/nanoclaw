@@ -97,7 +97,11 @@ import {
   renderMermaidToPng,
 } from './mermaid.js';
 import { editImage, generateImage } from './image-gen.js';
-import { buildVoiceDirective, synthesize } from './tts.js';
+import {
+  buildVoiceDirective,
+  synthesize,
+  type VoiceDirectiveInput,
+} from './tts.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -468,14 +472,21 @@ async function synthesizeAndSendVoice(
   text: string,
   directive: VoiceDirectiveInput,
   threadId: string | undefined,
-): Promise<{ ok: true; message_id: string } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; message_id: string; warnings?: string[] }
+  | { ok: false; error: string }
+> {
   if (!channel.sendVoice) {
     return { ok: false, error: 'channel does not support sendVoice' };
   }
   const resolved = buildVoiceDirective(directive);
+  if (resolved.error) return { ok: false, error: resolved.error };
+  const spoken = resolved.directive?.parts
+    ? resolved.directive.parts.map((p) => `${p.speaker}: ${p.text}`).join('\n')
+    : text;
   let audio: Buffer | null;
   try {
-    audio = await synthesize(text, resolved);
+    audio = await synthesize(spoken, resolved.directive);
   } catch (err) {
     return {
       ok: false,
@@ -488,17 +499,14 @@ async function synthesizeAndSendVoice(
   const result = await channel.sendVoice(jid, audio, threadId);
   if (!result.ok) return { ok: false, error: result.error };
   recordOutgoing(jid, result.message_id, {
-    content: `[Voice] ${text}`,
+    content: `[Voice] ${spoken}`,
     messageType: 'voice',
   });
-  return { ok: true, message_id: result.message_id };
-}
-
-interface VoiceDirectiveInput {
-  voice?: string;
-  director?: string;
-  profile?: string;
-  scene?: string;
+  return {
+    ok: true,
+    message_id: result.message_id,
+    ...(resolved.warnings.length > 0 ? { warnings: resolved.warnings } : {}),
+  };
 }
 
 const onecli = new OneCLI({ url: ONECLI_URL });

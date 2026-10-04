@@ -3,14 +3,39 @@ import { execFileSync } from 'child_process';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
-export interface VoiceDirective {
-  voice?: string;
-  profile?: string;
-  scene?: string;
-  director?: string;
+export const GEMINI_TTS_MODEL = 'gemini-3.8-flash-tts';
+
+export interface VoicePart {
+  speaker: string;
+  voice: string;
+  text: string;
+  style?: string;
 }
 
-// Gemini 3.1 Flash TTS voice catalog. Case-sensitive — voices passed via
+export interface VoiceDirective {
+  voice?: string;
+  style?: string;
+  language?: string;
+  parts?: VoicePart[];
+}
+
+export interface VoiceDirectiveInput {
+  voice?: string;
+  style?: string;
+  language?: string;
+  director?: string;
+  profile?: string;
+  scene?: string;
+  parts?: Array<Partial<VoicePart>>;
+}
+
+export interface ResolvedVoiceDirective {
+  directive?: VoiceDirective;
+  warnings: string[];
+  error?: string;
+}
+
+// Gemini Flash TTS prebuilt voice catalog. Case-sensitive — voices passed via
 // send_voice that don't exactly match one of these are ignored (voice stays
 // at DEFAULT) with a warn log. Source: memory/tools-reference.md
 // "TTS / Gemini Flash — voices catalog".
@@ -63,46 +88,259 @@ function resolveDefaultVoice(): string {
 }
 export const DEFAULT_VOICE = resolveDefaultVoice();
 
+const BCP47 = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
+const MAX_SPEAKERS = 2;
+
 /**
- * Build a clean VoiceDirective from MCP-tool input. Validates the voice
- * against KNOWN_VOICES (warn-and-ignore unknowns, voice stays default).
- * Returns undefined when nothing was specified so callers can pass through
- * directly to synthesize().
+ * Turn MCP-tool input into a VoiceDirective for Gemini 3.8 TTS.
+ *
+ * 3.8 speaks the text field verbatim, so persona/scene/director prose is never
+ * prepended to the transcript. `director` becomes the turn-level `style`
+ * (speechMetadata.style) unless an explicit `style` is given; `profile` and
+ * `scene` have no per-request field and are dropped with a warning.
  */
-export function buildVoiceDirective(input: {
-  voice?: string;
-  director?: string;
-  profile?: string;
-  scene?: string;
-}): VoiceDirective | undefined {
+export function buildVoiceDirective(
+  input: VoiceDirectiveInput,
+): ResolvedVoiceDirective {
+  const warnings: string[] = [];
   const directive: VoiceDirective = {};
+
   if (input.voice) {
     if (KNOWN_VOICES.has(input.voice)) {
       directive.voice = input.voice;
     } else {
-      logger.warn(
-        { voice: input.voice },
-        'send_voice: unknown voice name, ignoring (voice stays default)',
+      warnings.push(
+        `unknown voice "${input.voice}" ignored, using ${DEFAULT_VOICE}`,
       );
     }
   }
-  if (input.director) directive.director = input.director;
-  if (input.profile) directive.profile = input.profile;
-  if (input.scene) directive.scene = input.scene;
-  return Object.keys(directive).length > 0 ? directive : undefined;
+
+  const style = input.style?.trim();
+  const director = input.director?.trim();
+  if (style) {
+    directive.style = style;
+    if (director) {
+      warnings.push('director ignored: explicit style takes precedence');
+    }
+  } else if (director) {
+    directive.style = director;
+  }
+  if (input.profile?.trim()) {
+    warnings.push(
+      'profile ignored: Gemini 3.8 reads prompt prose aloud; pick a voice and a short style instead',
+    );
+  }
+  if (input.scene?.trim()) {
+    warnings.push(
+      'scene ignored: Gemini 3.8 reads prompt prose aloud; pick a voice and a short style instead',
+    );
+  }
+
+  const language = input.language?.trim();
+  if (language) {
+    if (BCP47.test(language)) {
+      directive.language = language;
+    } else {
+      warnings.push(`language "${language}" is not BCP-47, ignored`);
+    }
+  }
+
+  if (input.parts !== undefined) {
+    const parsed = parseParts(input.parts);
+    if ('error' in parsed) return { warnings, error: parsed.error };
+    directive.parts = parsed.parts;
+    if (directive.voice) {
+      warnings.push('voice ignored: each part carries its own voice');
+      delete directive.voice;
+    }
+    if (directive.style) {
+      warnings.push('style ignored: set style per part');
+      delete directive.style;
+    }
+  }
+
+  for (const warning of warnings) logger.warn({ warning }, 'send_voice');
+  return {
+    directive: Object.keys(directive).length > 0 ? directive : undefined,
+    warnings,
+  };
+}
+
+function parseParts(
+  raw: Array<Partial<VoicePart>>,
+): { parts: VoicePart[] } | { error: string } {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return { error: 'parts must be a non-empty array' };
+  }
+  const voiceBySpeaker = new Map<string, string>();
+  const parts: VoicePart[] = [];
+  for (const [index, part] of raw.entries()) {
+    const speaker = part.speaker?.trim();
+    const text = part.text?.trim();
+    const voice = part.voice?.trim();
+    if (!speaker) return { error: `parts[${index}].speaker is required` };
+    if (!text) return { error: `parts[${index}].text is required` };
+    const known = voiceBySpeaker.get(speaker);
+    if (voice && !KNOWN_VOICES.has(voice)) {
+      return { error: `parts[${index}].voice "${voice}" is not a known voice` };
+    }
+    if (known && voice && voice !== known) {
+      return {
+        error: `parts[${index}]: speaker "${speaker}" already uses voice ${known}`,
+      };
+    }
+    const resolvedVoice = voice ?? known;
+    if (!resolvedVoice) {
+      return { error: `parts[${index}].voice is required for a new speaker` };
+    }
+    voiceBySpeaker.set(speaker, resolvedVoice);
+    const style = part.style?.trim();
+    parts.push({
+      speaker,
+      voice: resolvedVoice,
+      text,
+      ...(style ? { style } : {}),
+    });
+  }
+  if (voiceBySpeaker.size > MAX_SPEAKERS) {
+    return { error: `parts support at most ${MAX_SPEAKERS} speakers` };
+  }
+  return { parts };
 }
 
 /**
- * Compose the natural-language prefix that carries profile/scene/director
- * into the Gemini prompt. Gemini TTS reads these as persona/context/stage
- * directions and applies them to the spoken text that follows.
+ * Build the generateContent request body. camelCase is the canonical REST
+ * JSON form. One speaker uses voiceConfig; two speakers use
+ * multiSpeakerVoiceConfig, and every part names its speaker.
  */
-export function buildPromptPrefix(directive: VoiceDirective): string {
-  const parts: string[] = [];
-  if (directive.profile) parts.push(`[Audio Profile] ${directive.profile}`);
-  if (directive.scene) parts.push(`[Scene] ${directive.scene}`);
-  if (directive.director) parts.push(`[Director's Note] ${directive.director}`);
-  return parts.length > 0 ? parts.join('\n') + '\n\n' : '';
+export function buildGeminiRequest(
+  text: string,
+  directive?: VoiceDirective,
+): Record<string, unknown> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const speechConfig: Record<string, any> = {};
+  if (directive?.language) speechConfig.languageCode = directive.language;
+
+  let contentParts: Array<Record<string, unknown>>;
+  const parts = directive?.parts;
+  const speakers = parts ? [...new Set(parts.map((p) => p.speaker))] : [];
+
+  if (parts && speakers.length > 1) {
+    contentParts = parts.map((p) => ({
+      text: p.text,
+      speechMetadata: {
+        speaker: p.speaker,
+        ...(p.style ? { style: p.style } : {}),
+      },
+    }));
+    speechConfig.multiSpeakerVoiceConfig = {
+      speakerVoiceConfigs: speakers.map((speaker) => ({
+        speaker,
+        voiceConfig: {
+          prebuiltVoiceConfig: {
+            voiceName: parts.find((p) => p.speaker === speaker)!.voice,
+          },
+        },
+      })),
+    };
+  } else if (parts) {
+    contentParts = parts.map((p) => ({
+      text: p.text,
+      ...(p.style ? { speechMetadata: { style: p.style } } : {}),
+    }));
+    speechConfig.voiceConfig = {
+      prebuiltVoiceConfig: { voiceName: parts[0].voice },
+    };
+  } else {
+    contentParts = [
+      {
+        text,
+        ...(directive?.style
+          ? { speechMetadata: { style: directive.style } }
+          : {}),
+      },
+    ];
+    speechConfig.voiceConfig = {
+      prebuiltVoiceConfig: { voiceName: directive?.voice ?? DEFAULT_VOICE },
+    };
+  }
+
+  return {
+    contents: [{ role: 'user', parts: contentParts }],
+    generationConfig: { responseModalities: ['AUDIO'], speechConfig },
+  };
+}
+
+export interface DecodedAudio {
+  pcm: Buffer;
+  sampleRate: number;
+  channels: number;
+}
+
+/**
+ * Normalize Gemini inline audio to raw s16le PCM. 3.1 returned headerless PCM
+ * (`audio/L16;codec=pcm;rate=24000`); 3.8 returns `audio/wav`. A RIFF header
+ * is detected by content as well as by mime type, so it is never fed to the
+ * s16le encoder as samples.
+ */
+export function decodeGeminiAudio(
+  data: Buffer,
+  mimeType?: string,
+): DecodedAudio {
+  const isRiff =
+    data.length >= 12 &&
+    data.toString('latin1', 0, 4) === 'RIFF' &&
+    data.toString('latin1', 8, 12) === 'WAVE';
+  if (isRiff) return parseWav(data);
+  if (mimeType && /wav/i.test(mimeType)) {
+    throw new Error(`Gemini TTS: ${mimeType} without a RIFF/WAVE header`);
+  }
+  const rate = mimeType?.match(/rate=(\d+)/i)?.[1];
+  return { pcm: data, sampleRate: rate ? Number(rate) : 24000, channels: 1 };
+}
+
+function parseWav(data: Buffer): DecodedAudio {
+  let offset = 12;
+  let format: {
+    channels: number;
+    sampleRate: number;
+    bits: number;
+    tag: number;
+  } | null = null;
+  while (offset + 8 <= data.length) {
+    const id = data.toString('latin1', offset, offset + 4);
+    const size = data.readUInt32LE(offset + 4);
+    const body = offset + 8;
+    if (id === 'fmt ') {
+      if (size < 16 || body + 16 > data.length) {
+        throw new Error('Gemini TTS: truncated WAV fmt chunk');
+      }
+      format = {
+        tag: data.readUInt16LE(body),
+        channels: data.readUInt16LE(body + 2),
+        sampleRate: data.readUInt32LE(body + 4),
+        bits: data.readUInt16LE(body + 14),
+      };
+    } else if (id === 'data') {
+      if (!format) throw new Error('Gemini TTS: WAV data before fmt chunk');
+      if (format.tag !== 1 || format.bits !== 16) {
+        throw new Error(
+          `Gemini TTS: unsupported WAV format tag=${format.tag} bits=${format.bits}`,
+        );
+      }
+      const end =
+        size === 0xffffffff || body + size > data.length
+          ? data.length
+          : body + size;
+      return {
+        pcm: data.subarray(body, end),
+        sampleRate: format.sampleRate,
+        channels: format.channels,
+      };
+    }
+    offset = body + size + (size % 2);
+  }
+  throw new Error('Gemini TTS: WAV without data chunk');
 }
 
 function getKeys(): { openai?: string; google?: string } {
@@ -118,26 +356,12 @@ async function synthesizeGemini(
   apiKey: string,
   directive?: VoiceDirective,
 ): Promise<Buffer> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent?key=${apiKey}`;
-
-  const prefix = directive ? buildPromptPrefix(directive) : '';
-  const fullText = prefix + text;
-  const voiceName = directive?.voice ?? DEFAULT_VOICE;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TTS_MODEL}:generateContent`;
 
   const resp = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: fullText }] }],
-      generationConfig: {
-        response_modalities: ['AUDIO'],
-        speech_config: {
-          voice_config: {
-            prebuilt_voice_config: { voice_name: voiceName },
-          },
-        },
-      },
-    }),
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+    body: JSON.stringify(buildGeminiRequest(text, directive)),
   });
 
   if (!resp.ok) {
@@ -152,11 +376,14 @@ async function synthesizeGemini(
     throw new Error('Gemini TTS: no audio in response');
   }
 
-  const pcmBuffer = Buffer.from(part.inlineData.data as string, 'base64');
-  return pcmToOggOpus(pcmBuffer);
+  const decoded = decodeGeminiAudio(
+    Buffer.from(part.inlineData.data as string, 'base64'),
+    part.inlineData.mimeType,
+  );
+  return pcmToOggOpus(decoded);
 }
 
-function pcmToOggOpus(pcm: Buffer): Buffer {
+function pcmToOggOpus({ pcm, sampleRate, channels }: DecodedAudio): Buffer {
   return Buffer.from(
     execFileSync(
       'ffmpeg',
@@ -164,9 +391,9 @@ function pcmToOggOpus(pcm: Buffer): Buffer {
         '-f',
         's16le',
         '-ar',
-        '24000',
+        String(sampleRate),
         '-ac',
-        '1',
+        String(channels),
         '-i',
         'pipe:0',
         '-c:a',
@@ -225,15 +452,20 @@ export async function synthesize(
       );
       return audio;
     } catch (err) {
+      if (directive?.parts) throw err;
       logger.warn({ err }, 'Gemini TTS failed, trying OpenAI fallback');
     }
   }
 
+  if (directive?.parts) {
+    logger.warn('TTS: multi-part speech needs GOOGLE_AI_API_KEY');
+    return null;
+  }
+
   if (keys.openai) {
     try {
-      // OpenAI fallback drops voice control — prepending persona prose
-      // would be read aloud by gpt-4o-mini-tts (see tts-v2 brief
-      // §OpenAI fallback). Raw text only.
+      // OpenAI fallback drops voice control: style/language/voice are not
+      // mapped onto gpt-4o-mini-tts. Raw text only.
       if (directive) {
         logger.warn(
           { directive },

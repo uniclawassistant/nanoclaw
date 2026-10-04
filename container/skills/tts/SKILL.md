@@ -1,11 +1,11 @@
 ---
 name: tts
-description: Speak your response as a voice message via the `send_voice` MCP tool (Gemini 3.1 Flash TTS, OpenAI fallback). Returns `{ ok, message_id }` so you can `get_message` / `react`. Supports 30 voices, persona/scene/director prose, and multi-speaker scenes via sequential posts.
+description: Speak your response as a voice message via the `send_voice` MCP tool (Gemini 3.8 Flash TTS, OpenAI fallback). Returns `{ ok, message_id, warnings? }` so you can `get_message` / `react`. Supports 30 prebuilt voices, inline vocal tags, a short `style`, `language`, and two-voice dialogues via `parts`.
 ---
 
 # Voice messages — `send_voice`
 
-`send_voice` is an MCP tool that synthesizes audio (Gemini 3.1 Flash by default, OpenAI fallback) and ships it to the chat as a Telegram voice note. The tool returns `{ ok, message_id }` so you can react to it, look it up later via `get_message`, or follow it up with text.
+`send_voice` is an MCP tool that synthesizes audio (Gemini 3.8 Flash TTS by default, OpenAI fallback for a single voice) and ships it to the chat as a Telegram voice note. The tool returns `{ ok, message_id, warnings? }` so you can react to it, look it up later via `get_message`, or follow it up with text. `warnings` lists parameters that were ignored or adjusted.
 
 ```jsonc
 send_voice({
@@ -13,7 +13,7 @@ send_voice({
 })
 ```
 
-The default voice is **configured per instance** via the `TTS_DEFAULT_VOICE` env var (ships as `Enceladus` if unset). That's my voice. Only override it with `voice:` when voicing **someone other than myself** — a character, a retelling from another POV, or a multi-speaker scene.
+The default voice is **configured per instance** via the `TTS_DEFAULT_VOICE` env var (ships as `Enceladus` if unset). That's my voice. Only override it with `voice:` when voicing **someone other than myself** — a character, a retelling from another POV, or a dialogue.
 
 > **Channel scope.** Voice is Telegram-only today. On other channels you get `{ ok: true, skipped: true, reason: "channel not supported" }` and no error.
 
@@ -27,61 +27,83 @@ The default voice is **configured per instance** via the `TTS_DEFAULT_VOICE` env
 
 - Long messages with code, lists, or structured data — those need text
 - User is clearly reading/typing, not listening
-- More than ~60 seconds of audio in a single post — split across multiple `send_voice` calls (Gemini docs recommend this; Telegram UI handles the separation naturally)
+- More than ~60 seconds of audio in a single post — split across multiple `send_voice` calls
 
 ## Mixed responses (voice summary + text details)
 
 Call `send_voice` first with the spoken summary, then `send_message` (or just final text output) with the longer details. The two posts arrive in order.
 
-```jsonc
-send_voice({ text: "Short version, spoken: everything's good, on it." })
-// Then your normal text reply with the full details.
-```
-
 ---
+
+## The one rule of 3.8: text is spoken verbatim
+
+Everything in `text` is read aloud. Stage directions, persona descriptions, "say it in a whisper", speaker names — all of it becomes speech. Delivery goes into `style`; one-off sounds go into inline tags; nothing else.
 
 ## Parameters
 
 ```jsonc
 send_voice({
-  text: string,            // required, plain text — what gets spoken
-  voice?: string,          // optional, named voice (case-sensitive)
-  director?: string,       // optional, prose stage direction applied to delivery
-  profile?: string,        // optional, persona / Audio Profile (block-mode equivalent)
-  scene?: string,          // optional, environment / context (block-mode equivalent)
+  text?: string,           // what gets spoken, verbatim (single voice) — or use parts
+  voice?: string,          // named prebuilt voice (case-sensitive)
+  style?: string,          // short delivery for the whole utterance
+  language?: string,       // BCP-47, e.g. "ru-RU"; omit to auto-detect
+  parts?: [{ speaker, voice?, text, style? }],  // two-voice dialogue instead of text
 })
 ```
 
-### `text` (required)
+Exactly one of `text` or `parts`.
 
-Plain text — no markdown, no code, no bullets (they read literally as "asterisk asterisk bold asterisk asterisk"). Inline Gemini expression tags work **inside** the text:
+### `text`
+
+Plain text — no markdown, no code, no bullets. Inline vocal tags in **angle brackets**, at the exact point where the sound should happen. Keep tag names in English even for Russian text:
 
 ```jsonc
 send_voice({
-  text: "Ну привет! [laughs] Как ты? [whispers] Это секрет. [gasp] Да ладно!",
+  text: "<breath> Ну привет! Как ты? <short pause> Слушай, это смешно <chuckle>.",
+  language: "ru-RU",
 })
 ```
 
-These are semantic hints, not structured directives. Gemini listens to the surrounding meaning, so `"...and he said [whispers] quietly"` whispers reliably; `[newscaster voice, 2x speed]` is more like a wish. For reliable control over timbre/pacing/style, use `director:` instead.
+Recommended tags (Google's list, not a closed enum): `<breath>`, `<chuckle>` / `<chuckles>`, `<laugh>`, `<sigh>`, `<gasp>`, `<exhales>`, `<short pause>`, `<long pause>`, `<whispers>` / `<whispering>`. Avoid sound-effect tags (applause, thuds). Square-bracket tags like `[laughs]` are old 3.1 syntax — in 3.8 they may be read aloud.
 
-Baseline list that works: `[laughs]`, `[giggles]`, `[sighs]`, `[gasp]`, `[whispers]`, `[shouting]`, `[crying]`, `[cough]`, `[excited]`, `[curious]`, `[sarcastic]`, `[serious]`, `[tired]`, `[trembling]`, `[mischievously]`.
+### `style`
 
-### `voice` (optional)
+A short natural-language delivery instruction for the whole turn (sent as `speechMetadata.style`). Documented examples: `"casual, friendly"`, `"calm and relaxed"`, `"whispered urgently"`, `"out of breath"`, `"warm and enthusiastic"`, `"speaking slowly"`, `"speaking rapidly"`, `"muttering, then reassuring"`.
 
-Named voice from the catalog (case-sensitive — `Kore` works, `kore` is silently ignored and the voice stays at the instance default). Full catalog below.
+- Most requests need **no style at all**. Try without it first.
+- Keep it short; reuse the exact same string when you want a consistent baseline.
+- Don't put names, age, gender or permanent accent into `style` — that's the voice's job.
 
-### `director` (optional)
+### `language`
 
-Free-form prose stage direction applied to the whole utterance, e.g. `"whispered, close to mic"` / `"warm storyteller tone, unhurried"` / `"tired late-night sarcasm"`. Layered on top of `voice` — any voice can be colored differently.
+BCP-47 code (`"ru-RU"`, `"en-US"`). Omit to let the model detect the language. Useful for Russian text with Latin names.
 
-### `profile` and `scene` (optional)
+### `voice`
 
-Free-form prose carried into the synthesis prompt. Use for richer characterizations than a one-liner director note:
+Named voice from the catalog (case-sensitive). Unknown names fall back to the instance default with a warning.
 
-- `profile`: who is speaking — `"warm grandmother telling a bedtime story"` / `"noir detective, 40s, tired, smoking by the window"`
-- `scene`: where / when — `"quiet room, soft lamplight, child drifting off"` / `"rainy night, flickering neon outside, ashtray overflowing"`
+### `parts` — two-voice dialogue in one recording
 
-You usually only need these for storytelling or character work. For everyday voice replies, leave them out.
+```jsonc
+send_voice({
+  language: "ru-RU",
+  parts: [
+    { speaker: "HostA", voice: "Puck", text: "<breath> Сейчас — новый трек. Слушай этот бас |угу|.", style: "casual, friendly" },
+    { speaker: "HostB", voice: "Kore", text: "Да, тут есть за что зацепиться <chuckle>." },
+    { speaker: "HostA", text: "Поехали." },
+  ],
+})
+```
+
+- Up to **two speakers**, prebuilt voices only. Each element is one turn; a speaker can have many turns (voice may be omitted after the first).
+- Listener reactions inside a turn go in pipes: `|угу|`, `|oh really?|` — no separate turn needed.
+- Never write `"HostA: line"` inside a single `text` — the API rejects flat transcripts for multi-speaker; use `parts`.
+- No OpenAI fallback for `parts`: if Gemini fails, you get an error.
+- A single speaker in `parts` is fine too — a way to change `style` mid-utterance.
+
+### Deprecated: `director`, `profile`, `scene`
+
+`director` is mapped to `style` when `style` isn't given (keep it short). `profile` and `scene` are **ignored with a warning** — 3.8 has no field for them and would read them aloud. For a persona, choose a voice; for a mood, a short style.
 
 ---
 
@@ -92,59 +114,18 @@ You usually only need these for storytelling or character work. For everyday voi
 send_voice({ text: "Hey, how's it going?" })
 
 // Voice change only
-send_voice({
-  text: "Serious product briefing.",
-  voice: "Kore",                  // F, Firm — dry tone
-})
+send_voice({ text: "Serious product briefing.", voice: "Kore" })
 
-// Director only (own voice)
-send_voice({
-  text: "Shhh, it's a secret.",
-  director: "whispered, close to mic",
-})
+// Style only (own voice)
+send_voice({ text: "Shhh, it's a secret.", style: "whispered urgently" })
 
-// Voice + director
+// Storytelling
 send_voice({
-  text: "Once upon a time there was a unicorn in the forest...",
+  text: "Жил-был в далёком лесу маленький единорог. <long pause> Он был очень застенчивый...",
   voice: "Leda",
-  director: "warm storyteller tone, unhurried",
+  style: "calm and relaxed",
+  language: "ru-RU",
 })
-
-// Storytelling — full block
-send_voice({
-  text: "Once upon a time, in a faraway forest, there lived a little unicorn. [whispers] He was very shy... and only came out at night, to the clearing, to look at the stars.",
-  voice: "Leda",
-  profile: "warm grandmother telling a bedtime story to her grandchild",
-  scene: "quiet room, soft lamplight, child drifting off",
-  director: "unhurried, with long pauses, softer toward the end",
-})
-
-// Character monologue
-send_voice({
-  text: "This city's eating me alive. [sighs] Every night it's the same — a call, a body, questions with no answers.",
-  voice: "Algenib",
-  profile: "noir detective, 40s, tired, smoking by the window",
-  scene: "rainy night, flickering neon outside, ashtray overflowing",
-  director: "hard-boiled delivery, cynical, long drags between lines",
-})
-```
-
----
-
-## Multi-speaker dialogs
-
-**Not via the `MultiSpeakerVoiceConfig` API.** Instead, send a **sequence of posts** — each speaker turn is a separate `send_voice` call.
-
-Why:
-- Telegram UI visually separates the turns — "different actors" feeling comes for free
-- No audio stitching, no opus-merge pain
-- Long scenes can be broken up naturally (messenger-style)
-- Each turn ≤ ~60s → stays within safe synthesis range
-
-```jsonc
-send_voice({ text: "Did you see a unicorn?",                voice: "Puck",    director: "excitedly" })
-send_voice({ text: "Saw one. Last Tuesday, at Starbucks.",  voice: "Algenib", director: "wearily" })
-send_voice({ text: "Ugh, how prosaic.",                     voice: "Puck",    director: "disappointed" })
 ```
 
 ---
@@ -200,7 +181,7 @@ Balance: 16 M / 14 F.
 - **Technical explainer / clear:** Iapetus (M, Clear), Erinome (F, Clear), Sadaltager (M, Knowledgeable)
 - **Casual / friendly chat:** Achird (M, Friendly), Zubenelgenubi (M, Casual), Callirrhoe (F, Easy-going)
 
-The characteristic is the baseline timbre. `director` / `profile` / `scene` layer on top — any voice can be colored differently. Before using an unfamiliar voice in production, audition it in AI Studio on a test prompt to avoid surprises with mood.
+The characteristic is the baseline timbre. A short `style` layers on top — any voice can be colored differently. Before using an unfamiliar voice in production, audition it in AI Studio on a test prompt to avoid surprises with mood.
 
 ---
 
@@ -213,18 +194,19 @@ Works even in the middle of English text — the letter Ё itself triggers corre
 
 ## Limits
 
-- **Long scenes (>~60s)** — split across multiple `send_voice` calls. Gemini TTS docs recommend this themselves.
-- **OpenAI fallback** — when Gemini is unavailable, synthesis falls back to gpt-4o-mini-tts. `voice` / `director` / `profile` / `scene` are **dropped** — gpt would read the prefix literally. Logged as warn. No voice control in fallback.
-- **Accent on non-English text** — works with limitations, not tested on Russian in v1. If `director` says "British accent" for Russian text, the effect is unpredictable.
-- **Unknown voice name** — silently ignored, voice stays at the instance default. Warn in host log.
+- **Long scenes (>~60s)** — split across multiple `send_voice` calls.
+- **OpenAI fallback** — single voice only; when Gemini is unavailable, synthesis falls back to gpt-4o-mini-tts. `voice` / `style` / `language` are **dropped**. Logged as warn. No voice control in fallback.
+- **Latin names in Russian text** — `language: "ru-RU"` helps, but there's no pronunciation lexicon; untested acoustically.
+- **Unknown voice name** — ignored, voice stays at the instance default, listed in `warnings`.
 
 ## Default-first
 
-If there's no explicit reason — bare `send_voice({ text })` with no extras. Don't drag in `voice` / `director` / `profile` for the sake of it. The instance default with natural text sounds good — it's been validated, chosen, it's mine.
+If there's no explicit reason — bare `send_voice({ text })` with no extras. The instance default with natural text sounds good.
 
 Control levels engage **consciously**, when:
-- Voicing **not myself** (character, retelling from another POV) → `voice` + `profile`
-- Need a specific **tone** the text itself doesn't convey → `director`
-- Multi-voice **scene** → sequential `send_voice` calls with different `voice` per turn
+- Voicing **not myself** (character, retelling from another POV) → `voice`
+- Need a specific **tone** the text itself doesn't convey → short `style`
+- One-off sound at an exact place → inline tag
+- Two-voice **scene** → `parts`
 
 Otherwise — baseline.
