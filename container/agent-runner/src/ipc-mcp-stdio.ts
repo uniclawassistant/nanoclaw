@@ -519,28 +519,33 @@ RETURN (JSON in tool output):
 
 safeTool(
   'send_voice',
-  `Synthesize TTS audio with Gemini 3.1 Flash and send it as a Telegram voice note.
+  `Synthesize TTS audio with Gemini 3.8 Flash TTS and send it as a Telegram voice note.
 
 USE FOR: voice replies — natural for casual chat, a short spoken summary, or staying in voice mode after the user sent a voice message. For mixed responses, send the spoken summary via this tool and include details in a follow-up text message via \`send_message\`.
 
-TEXT: what should be spoken. Plain text — no markdown / code / bullets (they are read literally). Inline Gemini expression tags work inside the text: \`[laughs]\`, \`[whispers]\`, \`[sighs]\`, \`[gasp]\`, etc. Example: "Ну привет! [laughs] Как ты? [whispers] Это секрет."
+TEXT: what should be spoken. Gemini 3.8 speaks it VERBATIM — no markdown / code / bullets, and no stage directions in the text (they would be read aloud). Inline vocal tags in angle brackets are honored at the exact point: \`<breath>\`, \`<chuckle>\`, \`<laugh>\`, \`<sigh>\`, \`<gasp>\`, \`<short pause>\`, \`<long pause>\`, \`<whispering>\` etc. Keep tags in English even for Russian text. Example: "<breath> Ну привет! Как ты? <chuckle>". Old square-bracket tags ([laughs]) are not 3.8 syntax.
 
-VOICE (optional): named Gemini voice. Examples: Kore, Leda, Algenib, Puck, Enceladus, Zephyr. Unknown names warn-and-fall back to the instance default. Full catalog in the tts skill.
+VOICE (optional): named prebuilt Gemini voice. Examples: Kore, Leda, Algenib, Puck, Enceladus, Zephyr. Unknown names fall back to the instance default with a warning.
 
-DIRECTOR (optional): prose-style stage direction applied to the whole utterance, e.g. "whispered, close to mic" or "warm storyteller tone, unhurried" or "tired late-night sarcasm".
+STYLE (optional): short delivery instruction for the whole utterance, sent as speechMetadata.style, e.g. "casual, friendly", "whispered urgently", "speaking slowly". Keep it short; do not put names, age or gender there.
 
-PROFILE / SCENE (optional): persona / setting carried into the synthesis prompt. Use when you want a specific characterization beyond a one-liner director note.
+LANGUAGE (optional): BCP-47 code, e.g. "ru-RU". Omit to let the model detect the language.
+
+DIRECTOR (deprecated): mapped to STYLE when STYLE is not given. PROFILE / SCENE (deprecated): ignored with a warning — 3.8 would read them aloud.
+
+PARTS (optional, instead of TEXT): a dialogue of up to two prebuilt voices: [{ speaker, voice, text, style? }]. Each element is one turn; repeat a speaker to give it more turns (voice may be omitted on repeats). Listener reactions inside a turn: "|угу|". Do not write "Name: line" into a single text — use PARTS. No OpenAI fallback for PARTS.
 
 CHANNELS: Telegram-only; non-Telegram returns \`{ ok: true, skipped: true, reason: "channel not supported" }\`.
 
 RETURN (JSON in tool output):
-  • { ok: true, message_id } on success — message_id is usable with \`get_message\` and \`react\`.
-  • { ok: false, error } on failure — common reasons: "TTS not configured (no API key)", Gemini/OpenAI API errors, "channel does not support sendVoice".`,
+  • { ok: true, message_id, warnings? } on success — message_id is usable with \`get_message\` and \`react\`; warnings lists ignored or adjusted parameters.
+  • { ok: false, error } on failure — common reasons: "TTS not configured (no API key)", "provide exactly one of text or parts", invalid parts, Gemini/OpenAI API errors, "channel does not support sendVoice".`,
   {
     text: z
       .string()
+      .optional()
       .describe(
-        'Plain text to speak. Inline Gemini expression tags ([laughs], [whispers], etc.) are honored.',
+        'Text to speak verbatim, single voice. Inline vocal tags (<breath>, <chuckle>, <short pause>) are honored. Use either text or parts.',
       ),
     voice: z
       .string()
@@ -548,19 +553,54 @@ RETURN (JSON in tool output):
       .describe(
         'Optional named Gemini voice (e.g. "Kore", "Leda"). Unknown names fall back to instance default.',
       ),
-    director: z
+    style: z
       .string()
       .optional()
       .describe(
-        'Optional prose-style stage direction applied to the utterance (e.g. "whispered, close to mic").',
+        'Optional short delivery style for the whole utterance (e.g. "casual, friendly").',
       ),
-    profile: z.string().optional().describe('Optional persona/audio profile.'),
-    scene: z.string().optional().describe('Optional scene/setting context.'),
+    language: z
+      .string()
+      .optional()
+      .describe('Optional BCP-47 language code, e.g. "ru-RU".'),
+    parts: z
+      .array(
+        z.object({
+          speaker: z.string().describe('Speaker name, e.g. "HostA".'),
+          voice: z
+            .string()
+            .optional()
+            .describe(
+              'Prebuilt voice for this speaker; required on first turn.',
+            ),
+          text: z.string().describe('Verbatim text of this turn.'),
+          style: z.string().optional().describe('Optional style of this turn.'),
+        }),
+      )
+      .optional()
+      .describe(
+        'Optional dialogue of up to two speakers, one element per turn. Use instead of text.',
+      ),
+    director: z
+      .string()
+      .optional()
+      .describe('Deprecated: mapped to style when style is not given.'),
+    profile: z
+      .string()
+      .optional()
+      .describe('Deprecated: ignored with a warning (3.8 reads it aloud).'),
+    scene: z
+      .string()
+      .optional()
+      .describe('Deprecated: ignored with a warning (3.8 reads it aloud).'),
   },
   async (args) => {
     return dispatchMediaTool('send_voice', {
       text: args.text,
       voice: args.voice,
+      style: args.style,
+      language: args.language,
+      parts: args.parts,
       director: args.director,
       profile: args.profile,
       scene: args.scene,

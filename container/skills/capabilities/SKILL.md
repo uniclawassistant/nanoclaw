@@ -49,7 +49,7 @@ The NanoClaw MCP server exposes these tools (via `mcp__nanoclaw__*` prefix):
 - `send_image` — send a local image as a compressed photo with native preview
 - `generate_image` — generate a new image (GPT Image) and ship it as a photo, returns `message_id`
 - `edit_image` — edit a previously sent image (referenced by `source_message_id`) and ship the result
-- `send_voice` — synthesize text via Gemini 3.1 Flash TTS and send as a Telegram voice note
+- `send_voice` — synthesize text via Gemini 3.8 Flash TTS (single voice or a two-voice `parts` dialogue) and send as a Telegram voice note
 - `react` — set/clear an emoji reaction on a Telegram message (👀 while working, 👌 when done)
 - `get_message` — look up a stored message by id (text, attachment path, image-gen prompt, …)
 - `schedule_task` — schedule a recurring or one-time task

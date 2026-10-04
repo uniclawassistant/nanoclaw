@@ -145,12 +145,23 @@ export interface IpcDeps {
     text: string,
     directive: {
       voice?: string;
+      style?: string;
+      language?: string;
       director?: string;
       profile?: string;
       scene?: string;
+      parts?: Array<{
+        speaker?: string;
+        voice?: string;
+        text?: string;
+        style?: string;
+      }>;
     },
     threadId: string | undefined,
-  ) => Promise<{ ok: true; message_id: string } | { ok: false; error: string }>;
+  ) => Promise<
+    | { ok: true; message_id: string; warnings?: string[] }
+    | { ok: false; error: string }
+  >;
   // Forwards or copies an existing message into the target chat. `source` is
   // the already-loaded MessageRecord for `(messageId, fromJid)` — passed in so
   // the host can reuse it for outbound persistence without a second DB read.
@@ -559,9 +570,17 @@ type MediaToolIpc = {
   sourcePath?: string;
   text?: string;
   voice?: string;
+  style?: string;
+  language?: string;
   director?: string;
   profile?: string;
   scene?: string;
+  parts?: Array<{
+    speaker?: string;
+    voice?: string;
+    text?: string;
+    style?: string;
+  }>;
 };
 
 /**
@@ -813,21 +832,26 @@ async function processMediaToolIpc(
         });
         return;
       }
-      if (typeof data.text !== 'string' || !data.text.trim()) {
+      const hasText = typeof data.text === 'string' && !!data.text.trim();
+      const hasParts = Array.isArray(data.parts) && data.parts.length > 0;
+      if (hasText === hasParts) {
         writeIpcResponse(responsesDir, data.requestId, {
           success: false,
-          error: 'text is required',
+          error: 'provide exactly one of text or parts',
         });
         return;
       }
       const result = await deps.sendVoice(
         data.chatJid,
-        data.text,
+        hasText ? (data.text as string) : '',
         {
           voice: data.voice,
+          style: data.style,
+          language: data.language,
           director: data.director,
           profile: data.profile,
           scene: data.scene,
+          parts: hasParts ? data.parts : undefined,
         },
         threadId,
       );
@@ -836,7 +860,11 @@ async function processMediaToolIpc(
         writeIpcResponse(responsesDir, data.requestId, {
           success: true,
           message_id: result.message_id,
-          data: { ok: true, message_id: result.message_id },
+          data: {
+            ok: true,
+            message_id: result.message_id,
+            ...(result.warnings ? { warnings: result.warnings } : {}),
+          },
         });
       } else {
         writeIpcResponse(responsesDir, data.requestId, {
