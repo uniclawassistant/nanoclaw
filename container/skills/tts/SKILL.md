@@ -100,6 +100,7 @@ send_voice({
 - Never write `"HostA: line"` inside a single `text` — the API rejects flat transcripts for multi-speaker; use `parts`.
 - No OpenAI fallback for `parts`: if Gemini fails, you get an error.
 - A single speaker in `parts` is fine too — a way to change `style` mid-utterance.
+- Voice assignment is not deterministic. The same request can come back with speakers shifted (seen 2026-10-04: line 2 spoken by speaker A's voice, B's voice starting on line 3); the payload is correct, it is the model. For anything that matters, listen to the result and regenerate on a mix-up. Do not work around it by generating lines separately and joining them — that was rejected because of seams and voice drift.
 
 ### Deprecated: `director`, `profile`, `scene`
 
