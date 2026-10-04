@@ -383,6 +383,19 @@ async function synthesizeGemini(
   return pcmToOggOpus(decoded);
 }
 
+/**
+ * Remove Gemini 3.8 inline markup that other engines would read aloud:
+ * angle-bracket vocal tags and |pipe| listener reactions.
+ */
+export function stripInlineMarkup(text: string): string {
+  return text
+    .replace(/<[^<>]*>/g, ' ')
+    .replace(/\|[^|\n]*\|/g, ' ')
+    .replace(/\s+([.,!?;:…])/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 function pcmToOggOpus({ pcm, sampleRate, channels }: DecodedAudio): Buffer {
   return Buffer.from(
     execFileSync(
@@ -472,7 +485,10 @@ export async function synthesize(
           'TTS: directive dropped on OpenAI fallback (unsupported)',
         );
       }
-      const audio = await synthesizeOpenAI(text, keys.openai);
+      const audio = await synthesizeOpenAI(
+        stripInlineMarkup(text),
+        keys.openai,
+      );
       logger.info(
         { provider: 'openai', chars: text.length },
         'TTS synthesized',

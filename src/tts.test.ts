@@ -6,6 +6,7 @@ import {
   buildGeminiRequest,
   buildVoiceDirective,
   decodeGeminiAudio,
+  stripInlineMarkup,
 } from './tts.js';
 
 function wav(
@@ -277,5 +278,21 @@ describe('buildGeminiRequest', () => {
       body.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig
         .voiceName,
     ).toBe('Puck');
+  });
+});
+
+describe('stripInlineMarkup', () => {
+  it('removes Gemini 3.8 tags and reactions so the OpenAI fallback does not read them aloud', () => {
+    expect(
+      stripInlineMarkup(
+        '<breath> Привет! Это смешно <chuckle>. Слушай |угу| бас <short pause> да.',
+      ),
+    ).toBe('Привет! Это смешно. Слушай бас да.');
+  });
+
+  it('leaves plain text untouched', () => {
+    expect(stripInlineMarkup('Просто текст, без тегов.')).toBe(
+      'Просто текст, без тегов.',
+    );
   });
 });
