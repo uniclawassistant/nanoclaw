@@ -45,7 +45,7 @@ curl -sS "$SUPAPOWA_URL/figma/v1/files/<file key>?depth=1" -H "Authorization: Be
   answer), `deniedByOwner`, `pathNotAllowed`, `methodNotAllowed`, `requestTooLarge`,
   `unknownConnection`, `unknownRequest` (no such ID for you, or older than an hour), `notRegistered` (token problem on the host), `notThisAgent` (missing or stale
   `SUPAPOWA_KEY`), `supapowaUnreachable` (Supapowa not running or quit by the owner).
-- Ticket runs in Clip still use their own run headers and your `gateway-grant` blocks; this is for
+- Ticket runs in Paperclip still use their own run headers and your `gateway-grant` blocks; this is for
   your own calls.
 
 ## Admin: configuring Supapowa
@@ -74,5 +74,7 @@ curl -sS --max-time 700 -X POST "$SUPAPOWA_URL/_admin" -H "Authorization: Bearer
   the owner is asked; a resend joins the same window.
 - Paths, methods and limits of an existing connection, devices, managers, allowances (yours too),
   grants and leases are yours to change; the owner sees them in History.
-- Refused for admins: `secret`, `task-system`, `call`, and acting as another agent
+- Task systems (Paperclip) are Supapowa extensions; `["extension","list"]` shows them. Managers of
+  a task system are `--task-managers paperclip:<agent id>[@<company id>]`; tickets `CRO-1175`.
+- Refused for admins: `secret`, changing extensions, `call`, and acting as another agent
   (`--agent`/`--manager` must be your own name).
