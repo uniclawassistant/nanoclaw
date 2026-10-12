@@ -49,12 +49,12 @@ export function supapowaConfig(): SupapowaConfig | null {
     port: parseInt(env('SUPAPOWA_PROXY_PORT') || '3002', 10),
     tokenFile:
       env('SUPAPOWA_TOKEN_FILE') ||
-      path.join(os.homedir(), '.config/agent-desktop/tokens', `${safe}.token`),
+      path.join(os.homedir(), '.config/supapowa/tokens', `${safe}.token`),
     endpointFile:
       env('SUPAPOWA_ENDPOINT_FILE') ||
       path.join(
         os.homedir(),
-        'Library/Application Support/Agent Desktop/Gateway/endpoint.json',
+        'Library/Application Support/Supapowa/Gateway/endpoint.json',
       ),
   };
 }
@@ -107,7 +107,6 @@ function refuse(
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'X-Supapowa-Error': 'true',
-    'X-Agent-Desktop-Gateway-Error': 'true',
   });
   res.end(JSON.stringify({ code, message }));
 }
@@ -176,7 +175,7 @@ export function startSupapowaProxy(
               method: req.method,
               path: pathOnly,
               status: upRes.statusCode,
-              receipt: upRes.headers['x-agent-desktop-gateway-receipt'],
+              receipt: upRes.headers['x-supapowa-receipt'],
               ms: Date.now() - started,
             },
             'Supapowa request',
