@@ -72,7 +72,7 @@ describe('Supapowa forwarder', () => {
         });
         res.writeHead(200, {
           'Content-Type': 'application/json',
-          'X-Agent-Desktop-Gateway-Receipt': 'r-1',
+          'X-Supapowa-Receipt': 'r-1',
         });
         res.end('{"ok":true}');
       });
@@ -125,7 +125,7 @@ describe('Supapowa forwarder', () => {
     );
     expect(res.status).toBe(200);
     expect(res.body).toBe('{"ok":true}');
-    expect(res.headers['x-agent-desktop-gateway-receipt']).toBe('r-1');
+    expect(res.headers['x-supapowa-receipt']).toBe('r-1');
     expect(seen).toHaveLength(1);
     expect(seen[0].method).toBe('POST');
     expect(seen[0].url).toBe(
@@ -194,7 +194,7 @@ describe('supapowaConfig', () => {
     const c = supapowaConfig()!;
     expect(c.port).toBe(3002);
     expect(c.tokenFile).toBe(
-      path.join(os.homedir(), '.config/agent-desktop/tokens/Unic.token'),
+      path.join(os.homedir(), '.config/supapowa/tokens/Unic.token'),
     );
   });
 });

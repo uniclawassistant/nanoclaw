@@ -38,7 +38,7 @@ curl -sS "$SUPAPOWA_URL/figma/v1/files/<file key>?depth=1" -H "Authorization: Be
   5 s you get `202` with `{"request": ID, "state": "waiting", "check": "/_requests/ID"}`; later
   `curl "$SUPAPOWA_URL/_requests/ID" -H "Authorization: Bearer $SUPAPOWA_KEY"` gives `202` while it
   waits, then the answer itself (kept for an hour). Works for `/_admin` too.
-- If `/tmp/h.txt` has `X-Supapowa-Error: true` (older Supapowa: `X-Agent-Desktop-Gateway-Error`),
+- If `/tmp/h.txt` has `X-Supapowa-Error: true`,
   the body is `{code, message}`: the
   gateway (not the provider) refused — say the message, do not retry the same call.
   Codes: `noAllowance`/`allowanceUsedUp`/`allowanceExpired` (no calls; owner was asked or did not
@@ -63,7 +63,8 @@ curl -sS --max-time 700 -X POST "$SUPAPOWA_URL/_admin" -H "Authorization: Bearer
 curl -sS --max-time 700 -X POST "$SUPAPOWA_URL/_admin" -H "Authorization: Bearer $SUPAPOWA_KEY" \
   -H "Content-Type: application/json" -d '{"args":["connection","save","-"],"input":{"name":"jira",
   "space":"work","origin":"https://example.atlassian.net","authHeader":"Authorization",
-  "authPrefix":"Basic ","secret":"jira","methods":["GET"],"paths":["/rest/api/3/"]}}'
+  "basicUser":"me@example.com","secret":"jira","methods":["GET"],"paths":["/rest/api/3/"]}}'
+# basicUser: Supapowa sends Authorization: Basic base64(basicUser:key); the key is the API token alone
 ```
 
 - `200`: the command's JSON answer. `400` `{code:"commandFailed", message}`: refused or wrong
@@ -74,6 +75,9 @@ curl -sS --max-time 700 -X POST "$SUPAPOWA_URL/_admin" -H "Authorization: Bearer
   the owner is asked; a resend joins the same window.
 - Paths, methods and limits of an existing connection, devices, managers, allowances (yours too),
   grants and leases are yours to change; the owner sees them in History.
+- A ticket run waiting for a device: `POST $SUPAPOWA_URL/_devices/<device>/lease` with
+  `{"reason": "...", "wait": 120}` holds its place and answers when the device is free (or after
+  120 s with its position — then ask again).
 - Task systems (Paperclip) are Supapowa extensions; `["extension","list"]` shows them. Managers of
   a task system are `--task-managers paperclip:<agent id>[@<company id>]`; tickets `CRO-1175`.
 - Refused for admins: `secret`, changing extensions, `call`, and acting as another agent
