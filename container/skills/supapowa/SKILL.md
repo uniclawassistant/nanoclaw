@@ -32,12 +32,18 @@ curl -sS "$SUPAPOWA_URL/figma/v1/files/<file key>?depth=1" -H "Authorization: Be
 
 - The answer is the provider's, unchanged. Each request spends one call, failed ones too.
 - With no calls left the owner is asked on the Mac; the request waits for the answer (up to 10
-  minutes). Use a long curl timeout (`--max-time 700`) and do not retry while it waits.
-- If `/tmp/h.txt` has `X-Agent-Desktop-Gateway-Error: true`, the body is `{code, message}`: the
+  minutes). Use a long curl timeout (`--max-time 700`). Sending it again while the owner's window
+  is open opens no second window: it joins the open one (one answer, granted once).
+- Not to hold the connection: add `-H "Prefer: respond-async"`. If the answer is not ready within
+  5 s you get `202` with `{"request": ID, "state": "waiting", "check": "/_requests/ID"}`; later
+  `curl "$SUPAPOWA_URL/_requests/ID" -H "Authorization: Bearer $SUPAPOWA_KEY"` gives `202` while it
+  waits, then the answer itself (kept for an hour). Works for `/_admin` too.
+- If `/tmp/h.txt` has `X-Supapowa-Error: true` (older Supapowa: `X-Agent-Desktop-Gateway-Error`),
+  the body is `{code, message}`: the
   gateway (not the provider) refused — say the message, do not retry the same call.
   Codes: `noAllowance`/`allowanceUsedUp`/`allowanceExpired` (no calls; owner was asked or did not
   answer), `deniedByOwner`, `pathNotAllowed`, `methodNotAllowed`, `requestTooLarge`,
-  `unknownConnection`, `notRegistered` (token problem on the host), `notThisAgent` (missing or stale
+  `unknownConnection`, `unknownRequest` (no such ID for you, or older than an hour), `notRegistered` (token problem on the host), `notThisAgent` (missing or stale
   `SUPAPOWA_KEY`), `supapowaUnreachable` (Supapowa not running or quit by the owner).
 - Ticket runs in Clip still use their own run headers and your `gateway-grant` blocks; this is for
   your own calls.
@@ -64,7 +70,8 @@ curl -sS --max-time 700 -X POST "$SUPAPOWA_URL/_admin" -H "Authorization: Bearer
   arguments — the message says why; `["help"]` lists the commands.
 - You never send keys or KVM passwords. A new connection, a key going to another origin/header/
   prefix, or a new KVM opens a window on the owner's Mac: the owner types the key and approves. The
-  request waits for that (up to 10 minutes) — tell the user the owner is asked, do not retry.
+  request waits for that (up to 10 minutes; or use `Prefer: respond-async` as above) — tell the user
+  the owner is asked; a resend joins the same window.
 - Paths, methods and limits of an existing connection, devices, managers, allowances (yours too),
   grants and leases are yours to change; the owner sees them in History.
 - Refused for admins: `secret`, `task-system`, `call`, and acting as another agent

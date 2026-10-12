@@ -106,6 +106,7 @@ function refuse(
 ) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
+    'X-Supapowa-Error': 'true',
     'X-Agent-Desktop-Gateway-Error': 'true',
   });
   res.end(JSON.stringify({ code, message }));
