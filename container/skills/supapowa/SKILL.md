@@ -1,6 +1,6 @@
 ---
 name: supapowa
-description: Call provider APIs (Gemini, Figma, and whatever the owner connects) through Supapowa, the owner's gateway on the host Mac, without holding any API key. Use when a task needs such an API, or to see which connections and how many calls you have ("what can I call", "Gemini", "Figma API", "Supapowa"). Only when SUPAPOWA_URL is set.
+description: Call provider APIs (Gemini, Figma, and whatever the owner connects) through Supapowa, the owner's gateway on the host Mac, without holding any API key. Use when a task needs such an API, or to see which connections and how many calls you have ("what can I call", "Gemini", "Figma API", "Supapowa"). If the owner made you admin, also to configure Supapowa (connections, devices, managers, allowances, leases). Only when SUPAPOWA_URL is set.
 ---
 
 # Supapowa
@@ -41,3 +41,31 @@ curl -sS "$SUPAPOWA_URL/figma/v1/files/<file key>?depth=1" -H "Authorization: Be
   `SUPAPOWA_KEY`), `supapowaUnreachable` (Supapowa not running or quit by the owner).
 - Ticket runs in Clip still use their own run headers and your `gateway-grant` blocks; this is for
   your own calls.
+
+## Admin: configuring Supapowa
+
+Only if the owner gave this agent the admin role (otherwise `403` with `notAdmin`). One endpoint,
+the gateway's command language as an array of words:
+
+```bash
+curl -sS --max-time 700 -X POST "$SUPAPOWA_URL/_admin" -H "Authorization: Bearer $SUPAPOWA_KEY" \
+  -H "Content-Type: application/json" -d '{"args":["help"]}'          # what an admin can send
+curl -sS --max-time 700 -X POST "$SUPAPOWA_URL/_admin" -H "Authorization: Bearer $SUPAPOWA_KEY" \
+  -H "Content-Type: application/json" -d '{"args":["devices"]}'
+curl -sS --max-time 700 -X POST "$SUPAPOWA_URL/_admin" -H "Authorization: Bearer $SUPAPOWA_KEY" \
+  -H "Content-Type: application/json" -d '{"args":["allow","<agent>","gemini","--calls","100","--for","7d"]}'
+curl -sS --max-time 700 -X POST "$SUPAPOWA_URL/_admin" -H "Authorization: Bearer $SUPAPOWA_KEY" \
+  -H "Content-Type: application/json" -d '{"args":["connection","save","-"],"input":{"name":"jira",
+  "space":"work","origin":"https://example.atlassian.net","authHeader":"Authorization",
+  "authPrefix":"Basic ","secret":"jira","methods":["GET"],"paths":["/rest/api/3/"]}}'
+```
+
+- `200`: the command's JSON answer. `400` `{code:"commandFailed", message}`: refused or wrong
+  arguments — the message says why; `["help"]` lists the commands.
+- You never send keys or KVM passwords. A new connection, a key going to another origin/header/
+  prefix, or a new KVM opens a window on the owner's Mac: the owner types the key and approves. The
+  request waits for that (up to 10 minutes) — tell the user the owner is asked, do not retry.
+- Paths, methods and limits of an existing connection, devices, managers, allowances (yours too),
+  grants and leases are yours to change; the owner sees them in History.
+- Refused for admins: `secret`, `task-system`, `call`, and acting as another agent
+  (`--agent`/`--manager` must be your own name).
