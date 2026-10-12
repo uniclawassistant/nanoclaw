@@ -29,6 +29,11 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import {
+  issueSupapowaKey,
+  revokeSupapowaKeys,
+  supapowaConfig,
+} from './supapowa-proxy.js';
 import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { OpenWork, RegisteredGroup } from './types.js';
@@ -311,6 +316,18 @@ function buildContainerArgs(
     args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
   } else {
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+  }
+
+  // Supapowa (the owner's capability gateway) through the host forwarder: a key for this run only,
+  // never the agent's token (see supapowa-proxy.ts).
+  const supapowa = supapowaConfig();
+  if (supapowa) {
+    args.push(
+      '-e',
+      `SUPAPOWA_URL=http://${CONTAINER_HOST_GATEWAY}:${supapowa.port}`,
+      '-e',
+      `SUPAPOWA_KEY=${issueSupapowaKey(containerName)}`,
+    );
   }
 
   // Pass GitHub token if available (for gh CLI and git push)
@@ -642,6 +659,7 @@ export async function runContainerAgent(
 
     container.on('close', (code) => {
       clearTimeout(timeout);
+      revokeSupapowaKeys(containerName);
       const duration = Date.now() - startTime;
 
       if (timedOut) {

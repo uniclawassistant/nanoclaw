@@ -37,6 +37,7 @@ import {
   evaluateResetAgeGate,
 } from './reset-lifecycle.js';
 import { startCredentialProxy } from './credential-proxy.js';
+import { startSupapowaProxy, supapowaConfig } from './supapowa-proxy.js';
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
@@ -1383,6 +1384,13 @@ async function main(): Promise<void> {
     ensureNetworkKeepalive();
     await waitForHostAddress(PROXY_BIND_HOST);
     await startCredentialProxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST);
+    // Optional: Supapowa for this instance's agent (SUPAPOWA_AGENT in .env). A failure leaves the rest running.
+    const supapowa = supapowaConfig();
+    if (supapowa) {
+      await startSupapowaProxy(supapowa, PROXY_BIND_HOST).catch((err) =>
+        logger.error({ err }, 'Supapowa forwarder did not start'),
+      );
+    }
   }
   initDatabase();
   logger.info('Database initialized');
