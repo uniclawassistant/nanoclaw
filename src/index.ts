@@ -38,6 +38,8 @@ import {
 } from './reset-lifecycle.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import { startSupapowaProxy, supapowaConfig } from './supapowa-proxy.js';
+import { startSupapowaEvents } from './supapowa-events.js';
+import { storeSupapowaMessage } from './supapowa-message.js';
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
@@ -1377,6 +1379,8 @@ function ensureContainerSystemRunning(): void {
 
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
+  const supapowa = supapowaConfig();
+  let supapowaStarted = false;
   if (PROXY_BIND_HOST) {
     // Apple Container only attaches the host bridge (with PROXY_BIND_HOST)
     // while a container is running. Pin a long-lived keepalive container
@@ -1385,16 +1389,24 @@ async function main(): Promise<void> {
     await waitForHostAddress(PROXY_BIND_HOST);
     await startCredentialProxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST);
     // Optional: Supapowa for this instance's agent (SUPAPOWA_AGENT in .env). A failure leaves the rest running.
-    const supapowa = supapowaConfig();
     if (supapowa) {
-      await startSupapowaProxy(supapowa, PROXY_BIND_HOST).catch((err) =>
-        logger.error({ err }, 'Supapowa forwarder did not start'),
-      );
+      supapowaStarted = await startSupapowaProxy(supapowa, PROXY_BIND_HOST)
+        .then(() => true)
+        .catch((err) => {
+          logger.error({ err }, 'Supapowa forwarder did not start');
+          return false;
+        });
     }
   }
   initDatabase();
   logger.info('Database initialized');
   loadState();
+
+  if (supapowaStarted && supapowa?.agent === 'Unic' && PROXY_BIND_HOST) {
+    await startSupapowaEvents(supapowa, PROXY_BIND_HOST, (content) =>
+      storeSupapowaMessage(registeredGroups, content),
+    ).catch(() => logger.warn('Supapowa events listener did not start'));
+  }
 
   // Ensure OneCLI agents exist for all registered groups.
   // Recovers from missed creates (e.g. OneCLI was down at registration time).
