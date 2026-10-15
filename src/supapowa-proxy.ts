@@ -27,6 +27,8 @@ export interface SupapowaConfig {
   agent: string;
   /** Where the forwarder listens (port on the proxy bind host). */
   port: number;
+  /** Separate loopback-only webhook listener. */
+  eventsPort?: number;
   /** The agent's token, written by Supapowa's "Save Token File". */
   tokenFile: string;
   /** Supapowa's endpoint port, saved by Supapowa (JSON {"port": N}). */
@@ -47,6 +49,7 @@ export function supapowaConfig(): SupapowaConfig | null {
   return {
     agent,
     port: parseInt(env('SUPAPOWA_PROXY_PORT') || '3002', 10),
+    eventsPort: parseInt(env('SUPAPOWA_EVENTS_PORT') || '3003', 10),
     tokenFile:
       env('SUPAPOWA_TOKEN_FILE') ||
       path.join(os.homedir(), '.config/supapowa/tokens', `${safe}.token`),
@@ -111,94 +114,121 @@ function refuse(
   res.end(JSON.stringify({ code, message }));
 }
 
+/** Shared routing: webhook routes exist only on the dedicated listener. */
+export function createSupapowaHandler(
+  config: SupapowaConfig,
+  events?: {
+    handle(
+      req: import('http').IncomingMessage,
+      res: import('http').ServerResponse,
+    ): Promise<void>;
+  },
+): import('http').RequestListener {
+  return (req, res) => {
+    if ((req.url || '/').split('?')[0] === '/supapowa/events') {
+      if (events) void events.handle(req, res);
+      else {
+        req.resume();
+        refuse(res, 404, 'notFound', 'Not found.');
+      }
+      return;
+    }
+    if (events) {
+      req.resume();
+      refuse(res, 404, 'notFound', 'Not found.');
+      return;
+    }
+    const auth = req.headers['authorization'] || '';
+    const presented = /^bearer\s+/i.test(auth)
+      ? auth.replace(/^bearer\s+/i, '').trim()
+      : '';
+    const container = presented ? liveKey(presented) : undefined;
+    if (!container) {
+      req.resume();
+      return refuse(
+        res,
+        401,
+        'notThisAgent',
+        'Send Authorization: Bearer $SUPAPOWA_KEY (the key of this container run).',
+      );
+    }
+    let token: string;
+    let port: number;
+    try {
+      token = fs.readFileSync(config.tokenFile, 'utf8').trim();
+      port = JSON.parse(fs.readFileSync(config.endpointFile, 'utf8')).port;
+      if (!token || !Number.isInteger(port)) throw new Error('empty');
+      // eslint-disable-next-line no-catch-all/no-catch-all -- any read or parse failure means "not set up"
+    } catch {
+      req.resume();
+      return refuse(
+        res,
+        503,
+        'supapowaNotSetUp',
+        `Supapowa is not set up for ${config.agent} on this Mac (token or endpoint missing). Ask the owner.`,
+      );
+    }
+
+    const headers: Record<string, string | string[]> = {};
+    for (const [name, value] of Object.entries(req.headers)) {
+      if (value === undefined || DROPPED.has(name)) continue;
+      headers[name] = value;
+    }
+    headers['authorization'] = `Bearer ${token}`;
+
+    const started = Date.now();
+    const pathOnly = (req.url || '/').split('?')[0];
+    const upstream = httpRequest(
+      {
+        hostname: '127.0.0.1',
+        port,
+        path: req.url,
+        method: req.method,
+        headers,
+        timeout: UPSTREAM_TIMEOUT_MS,
+      },
+      (upRes) => {
+        res.writeHead(upRes.statusCode || 502, upRes.headers);
+        upRes.pipe(res);
+        logger.info(
+          {
+            container,
+            method: req.method,
+            path: pathOnly,
+            status: upRes.statusCode,
+            receipt: upRes.headers['x-supapowa-receipt'],
+            ms: Date.now() - started,
+          },
+          'Supapowa request',
+        );
+      },
+    );
+    upstream.on('timeout', () => upstream.destroy(new Error('timeout')));
+    upstream.on('error', (err) => {
+      logger.warn(
+        { container, path: pathOnly, err: err.message },
+        'Supapowa unreachable',
+      );
+      if (!res.headersSent)
+        refuse(
+          res,
+          502,
+          'supapowaUnreachable',
+          'Supapowa did not answer (not running, or quit by the owner).',
+        );
+      else res.destroy();
+    });
+    req.pipe(upstream);
+  };
+}
+
+/** Start the existing container-facing forwarder. */
 export function startSupapowaProxy(
   config: SupapowaConfig,
   host: string,
 ): Promise<Server> {
   return new Promise((resolve, reject) => {
-    const server = createServer((req, res) => {
-      const auth = req.headers['authorization'] || '';
-      const presented = /^bearer\s+/i.test(auth)
-        ? auth.replace(/^bearer\s+/i, '').trim()
-        : '';
-      const container = presented ? liveKey(presented) : undefined;
-      if (!container) {
-        req.resume();
-        return refuse(
-          res,
-          401,
-          'notThisAgent',
-          'Send Authorization: Bearer $SUPAPOWA_KEY (the key of this container run).',
-        );
-      }
-      let token: string;
-      let port: number;
-      try {
-        token = fs.readFileSync(config.tokenFile, 'utf8').trim();
-        port = JSON.parse(fs.readFileSync(config.endpointFile, 'utf8')).port;
-        if (!token || !Number.isInteger(port)) throw new Error('empty');
-        // eslint-disable-next-line no-catch-all/no-catch-all -- any read or parse failure means "not set up"
-      } catch {
-        req.resume();
-        return refuse(
-          res,
-          503,
-          'supapowaNotSetUp',
-          `Supapowa is not set up for ${config.agent} on this Mac (token or endpoint missing). Ask the owner.`,
-        );
-      }
-
-      const headers: Record<string, string | string[]> = {};
-      for (const [name, value] of Object.entries(req.headers)) {
-        if (value === undefined || DROPPED.has(name)) continue;
-        headers[name] = value;
-      }
-      headers['authorization'] = `Bearer ${token}`;
-
-      const started = Date.now();
-      const pathOnly = (req.url || '/').split('?')[0];
-      const upstream = httpRequest(
-        {
-          hostname: '127.0.0.1',
-          port,
-          path: req.url,
-          method: req.method,
-          headers,
-          timeout: UPSTREAM_TIMEOUT_MS,
-        },
-        (upRes) => {
-          res.writeHead(upRes.statusCode || 502, upRes.headers);
-          upRes.pipe(res);
-          logger.info(
-            {
-              container,
-              method: req.method,
-              path: pathOnly,
-              status: upRes.statusCode,
-              receipt: upRes.headers['x-supapowa-receipt'],
-              ms: Date.now() - started,
-            },
-            'Supapowa request',
-          );
-        },
-      );
-      upstream.on('timeout', () => upstream.destroy(new Error('timeout')));
-      upstream.on('error', (err) => {
-        logger.warn(
-          { container, path: pathOnly, err: err.message },
-          'Supapowa unreachable',
-        );
-        if (!res.headersSent)
-          refuse(
-            res,
-            502,
-            'supapowaUnreachable',
-            'Supapowa did not answer (not running, or quit by the owner).',
-          );
-        else res.destroy();
-      });
-      req.pipe(upstream);
-    });
+    const server = createServer(createSupapowaHandler(config));
     server.requestTimeout = 0; // a request may wait for the owner's answer
     server.headersTimeout = 60_000;
     server.on('error', reject);
