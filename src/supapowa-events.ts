@@ -198,7 +198,8 @@ function eventSummary(event: unknown): string | null {
       summary: short(value.summary, 200),
     });
   }
-  if (value.type === 'macos') return '';
+  // Supapowa may add event types (e.g. `hook test`); ignore rather than reject the batch.
+  if (typeof value.type === 'string' && value.type !== 'question') return '';
   return null;
 }
 
