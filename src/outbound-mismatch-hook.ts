@@ -1,4 +1,3 @@
-import { ASSISTANT_NAME } from './config.js';
 import { logger } from './logger.js';
 
 // FED-9 — guard against the two mirror-image outbound mismatches:
@@ -10,12 +9,9 @@ import { logger } from './logger.js';
 //     final output empty or wholly inside <internal>...</internal> → user sees
 //     silence and assumes the agent hung.
 //
-// Phase 1 = log-only. Phase 2 (FED-16) = host-side ack-stub on Class B: when
-// a Class B trigger fires the hook ships a `[host] ...` message via the
-// supplied sendAckStub callback, increments an in-memory counter and warns
-// when the per-hour count exceeds SILENT_FINISH_THRESHOLD_PER_HOUR.
+// Both classes are log-only. Class B never sends a message to the chat.
 //
-// FED-30 — two legitimate silent finishes must NOT trip the Class B ack-stub:
+// FED-30 — two legitimate silent finishes must NOT trip Class B diagnostics:
 //   (a) Scheduled-task / poller wakes. These never run through this hook at all
 //       (task-scheduler.ts drives them and never calls checkClassB); on the
 //       user-message path they surface as isUserFacing=false. The existing
@@ -24,8 +20,7 @@ import { logger } from './logger.js';
 //       terminal reaction (👌 / 🫡 / 💯 …) and nothing else — that IS a reply,
 //       not a deadlock. A bare 👀 does NOT count: it is the transient "working"
 //       marker that auto-clears on turn end (see auto-clear-eye.ts), so a
-//       react(👀)+freeze must still trip the stub or we re-open the 2026-05-04
-//       silent-turn scar.
+//       react(👀)+freeze still produces a diagnostic warning.
 
 const EYE_EMOJI = '👀';
 
@@ -42,47 +37,8 @@ export interface TurnState {
 const RAW_SAMPLE_LIMIT = 2000;
 const INTERNAL_RX = /<internal>[\s\S]*?<\/internal>/g;
 const INTERNAL_OPEN_RX = /<internal>/g;
-// FED-31: the silence-stub must NEVER expose `<internal>` block content to the
-// chat. A single neutral string is used regardless of whether the turn was
-// truly empty or contained only internal reasoning — the agent's private notes
-// are not leakable through this surface. Per-turn diagnostics (rawLen,
-// internalBlockCount) still go to logs at `warn` for post-hoc debug.
-const ACK_STUB = `[host] ${ASSISTANT_NAME} завершил ход, не отправив сообщения в чат.`;
-const SILENT_FINISH_THRESHOLD_DEFAULT = 5;
 
 const activeTurns = new Map<string, TurnState>();
-
-const silentFinish = {
-  hour: '',
-  hourCount: 0,
-  total: 0,
-};
-
-function silentFinishThreshold(): number {
-  const raw = process.env.SILENT_FINISH_THRESHOLD_PER_HOUR;
-  if (!raw) return SILENT_FINISH_THRESHOLD_DEFAULT;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : SILENT_FINISH_THRESHOLD_DEFAULT;
-}
-
-function bumpSilentFinishCounter(now: Date = new Date()): {
-  hour: string;
-  hourCount: number;
-  total: number;
-} {
-  const hour = now.toISOString().slice(0, 13);
-  if (silentFinish.hour !== hour) {
-    silentFinish.hour = hour;
-    silentFinish.hourCount = 0;
-  }
-  silentFinish.hourCount++;
-  silentFinish.total++;
-  return {
-    hour,
-    hourCount: silentFinish.hourCount,
-    total: silentFinish.total,
-  };
-}
 
 export function beginTurn(
   jid: string,
@@ -124,7 +80,7 @@ export function recordReaction(jid: string, emoji: string | null): void {
 
 // A turn counts as answered-by-reaction only when it ended on a terminal,
 // non-👀 reaction. A bare 👀 is the transient "working" marker (auto-cleared
-// on turn end) and must not suppress the Class B stub.
+// on turn end) and must not suppress the Class B diagnostic.
 function turnAnsweredByReaction(state: TurnState): boolean {
   return (
     state.lastReactionEmoji != null && state.lastReactionEmoji !== EYE_EMOJI
@@ -147,14 +103,13 @@ export function checkClassA(state: TurnState, text: string): void {
 
 export interface CheckClassBOpts {
   hadError: boolean;
-  sendAckStub?: (text: string) => Promise<void>;
 }
 
-export async function checkClassB(
+export function checkClassB(
   state: TurnState,
   raw: string,
   opts: CheckClassBOpts,
-): Promise<void> {
+): void {
   if (opts.hadError) return;
   if (!state.isUserFacing) return; // FED-30 signal (a): scheduled-task / non-user-facing
   if (state.outboundCount > 0) return;
@@ -173,36 +128,6 @@ export async function checkClassB(
     },
     'CLASS_B_SILENT_DEADLOCK: user-facing turn ended without outbound',
   );
-
-  if (!opts.sendAckStub) return;
-
-  const { hour, hourCount, total } = bumpSilentFinishCounter();
-  logger.info(
-    { hour, hourCount, total },
-    `silent_finish_count=${hourCount} / hour=${hour} / total=${total}`,
-  );
-
-  const threshold = silentFinishThreshold();
-  if (hourCount > threshold) {
-    logger.warn(
-      {
-        group: state.groupName,
-        jid: state.jid,
-        hour,
-        hourCount,
-        threshold,
-      },
-      'excess silent finishes',
-    );
-  }
-
-  await opts.sendAckStub(ACK_STUB);
-}
-
-export function _resetSilentFinishCounter(): void {
-  silentFinish.hour = '';
-  silentFinish.hourCount = 0;
-  silentFinish.total = 0;
 }
 
 export const _RAW_SAMPLE_LIMIT = RAW_SAMPLE_LIMIT;
