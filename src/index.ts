@@ -821,13 +821,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           // alive and idle until IDLE_TIMEOUT, and "typing…" through that idle
           // stretch would be a lie; the next piped message restarts it.
           await channel.setTyping?.(chatJid, false);
-          await checkClassB(turnState, rawAccumulated, {
-            hadError,
-            sendAckStub: async (ackText) => {
-              await sendText(channel, chatJid, ackText, replyThreadId);
-              outputSentToUser = true;
-            },
-          });
+          checkClassB(turnState, rawAccumulated, { hadError });
           if (result.usage) {
             const state = recordUsage({
               jid: chatJid,
@@ -866,12 +860,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (idleTimer) clearTimeout(idleTimer);
 
     if (turnBoundary.isPending()) {
-      await checkClassB(turnState, rawAccumulated, {
+      checkClassB(turnState, rawAccumulated, {
         hadError: hadError || output === 'error',
-        sendAckStub: async (text) => {
-          await sendText(channel, chatJid, text, replyThreadId);
-          outputSentToUser = true;
-        },
       });
       await turnBoundary.handlePending(() =>
         handleOpenWorkAtTurnEnd(group.folder),
